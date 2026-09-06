@@ -1,0 +1,10 @@
+{
+  "name": "TripMate",
+  "description": "All-in-one AI travel companion and trip planning application with intelligent itinerary generation, group expense splitting, packing checklists, interactive maps, and destination insights.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
