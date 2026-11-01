@@ -1,13 +1,9 @@
 import express from 'express';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json());
 
@@ -57,7 +53,7 @@ app.post('/api/gemini/generate-itinerary', async (req, res) => {
     Return a structured JSON object with a list of days. Each day should have a dayNumber, title, summary, and a list of activities (each with time like "09:00 AM", title, locationName, latitude/longitude if known, category choice from [sightseeing, food, stay, transport, activity, shopping], estimatedCost in USD, and helpful local notes).`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.8-flash',
       contents: prompt,
       config: {
         systemInstruction: `You are an expert global travel planner, local tour guide, and logistics director. ${langInstruction}`,
@@ -128,7 +124,7 @@ app.post('/api/gemini/recommendations', async (req, res) => {
     Include local insider tips, approximate cost, and why it is special.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.8-flash',
       contents: prompt,
       config: {
         systemInstruction: `You are an insider travel curator offering authentic local recommendations. ${langInstruction}`,
@@ -178,7 +174,7 @@ app.post('/api/gemini/packing-list', async (req, res) => {
     Categorize items into: Essentials, Clothing, Electronics, Toiletries, Documents, Gear.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.8-flash',
       contents: prompt,
       config: {
         systemInstruction: `You are a professional travel packing expert. ${langInstruction}`,
@@ -227,7 +223,7 @@ app.post('/api/gemini/chat', async (req, res) => {
     Answer concisely, provide actionable advice, emergency contacts if asked, local currency advice, transport tips, or language phrases. ${langInstruction}`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
+      model: 'gemini-3.8-flash',
       contents: message,
       config: {
         systemInstruction,

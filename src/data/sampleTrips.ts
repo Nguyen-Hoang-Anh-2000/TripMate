@@ -11,10 +11,11 @@ export const SAMPLE_TRIPS: Trip[] = [
     coverImage: 'https://images.unsplash.com/photo-1583417319070-4a69db38a482?auto=format&fit=crop&w=1200&q=80',
     budgetTotal: 6000000,
     currency: 'VND',
+    fundHolderId: 'm1',
     members: [
-      { id: 'm1', name: 'Minh Tuấn', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80' },
-      { id: 'm2', name: 'Thùy Trang', avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=150&q=80' },
-      { id: 'm3', name: 'Bảo Anh', avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=150&q=80' }
+      { id: 'm1', name: 'Minh Tuấn', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80', contributedAmount: 2000000 },
+      { id: 'm2', name: 'Thùy Trang', avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=150&q=80', contributedAmount: 2000000 },
+      { id: 'm3', name: 'Bảo Anh', avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=150&q=80', contributedAmount: 2000000 }
     ],
     weatherForecast: {
       avgTempC: 16,

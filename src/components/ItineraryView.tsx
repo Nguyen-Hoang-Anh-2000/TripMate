@@ -2,12 +2,14 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { 
   Clock, MapPin, Plus, CheckCircle2, Circle, Trash2, 
   Sparkles, Utensils, Hotel, Car, Camera, ShoppingBag, Compass, Tag, X,
-  Search, Calendar, Filter, ChevronDown, ChevronUp, Eye, Edit3, ExternalLink,
-  Navigation, BookmarkCheck
+  Search, Calendar, Filter, ChevronDown, ChevronUp, Edit3, ExternalLink,
+  Navigation, BookmarkCheck, DollarSign, Users, ArrowRight, Check, CreditCard,
+  RotateCcw, RefreshCw, PiggyBank, AlertCircle
 } from 'lucide-react';
-import { Trip, ActivityItem, CategoryType, SavedPlace } from '../types';
+import { Trip, ActivityItem, CategoryType, SavedPlace, Expense } from '../types';
 import { useLanguage } from '../context/LanguageContext';
 import { formatMoney } from '../utils/formatCurrency';
+import { CategoryConfig, getSavedCategories, CategorySettingsModal } from './CategorySettingsModal';
 
 interface ItineraryViewProps {
   trip: Trip;
@@ -17,6 +19,21 @@ interface ItineraryViewProps {
   onToggleActivityCheck: (dayNumber: number, activityId: string) => void;
   onDeleteActivity: (dayNumber: number, activityId: string) => void;
   onOpenAIModal: () => void;
+  onAddExpense?: (expense: Omit<Expense, 'id'>) => void;
+  onSaveActivityExpense?: (
+    dayNumber: number,
+    activityId: string,
+    data: {
+      amount: number;
+      paidBy: string;
+      splitWith: string[];
+      memberSplits?: { memberId: string; amount: number }[];
+      recordExpense: boolean;
+      unitPrice?: number;
+      expenseId?: string;
+    }
+  ) => void;
+  onNavigateToExpenses?: () => void;
 }
 
 const CATEGORY_ICONS: Record<CategoryType, React.ReactNode> = {
@@ -81,6 +98,38 @@ export const formatToDDMMYYYY = (dateStr?: string, dayNumber: number = 1, tripSt
   return `Ngày ${dayNumber}`;
 };
 
+export const calculateEvenSplits = (totalAmount: number, memberIds: string[]): { [memberId: string]: string } => {
+  const result: { [memberId: string]: string } = {};
+  if (!memberIds || memberIds.length === 0) return result;
+
+  if (totalAmount <= 0 || isNaN(totalAmount)) {
+    memberIds.forEach((id) => {
+      result[id] = '0';
+    });
+    return result;
+  }
+
+  const count = memberIds.length;
+  // If the total is an integer (standard for currencies like VND)
+  if (Math.floor(totalAmount) === totalAmount) {
+    const baseShare = Math.floor(totalAmount / count);
+    const remainder = totalAmount - (baseShare * count);
+    memberIds.forEach((id, index) => {
+      // Put remainder on the first member so sum strictly equals totalAmount
+      result[id] = String(index === 0 ? baseShare + remainder : baseShare);
+    });
+  } else {
+    const baseShare = Math.floor((totalAmount / count) * 100) / 100;
+    const remainder = Math.round((totalAmount - (baseShare * count)) * 100) / 100;
+    memberIds.forEach((id, index) => {
+      const share = index === 0 ? Math.round((baseShare + remainder) * 100) / 100 : baseShare;
+      result[id] = String(share);
+    });
+  }
+
+  return result;
+};
+
 export const ItineraryView: React.FC<ItineraryViewProps> = ({
   trip,
   savedPlaces = [],
@@ -89,8 +138,12 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   onToggleActivityCheck,
   onDeleteActivity,
   onOpenAIModal,
+  onAddExpense,
+  onSaveActivityExpense,
+  onNavigateToExpenses,
 }) => {
   const { lang, t } = useLanguage();
+  const isVi = lang === 'vi';
   const [activeDayTab, setActiveDayTab] = useState<number | 'all'>('all');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -109,8 +162,180 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [targetDayNumber, setTargetDayNumber] = useState<number>(trip.days[0]?.dayNumber || 1);
 
-  // Detail viewing modal state
-  const [viewingActivity, setViewingActivity] = useState<{ activity: ActivityItem; dayNumber: number } | null>(null);
+  // Delete activity confirmation modal state
+  const [activityToDelete, setActivityToDelete] = useState<{ activity: ActivityItem; dayNumber: number } | null>(null);
+
+  // Completion Expense Prompt Modal state
+  const [completedActivityPrompt, setCompletedActivityPrompt] = useState<{
+    activity: ActivityItem;
+    dayNumber: number;
+    unitPrice: number;
+    amount: string;
+    isAmountManuallyEdited?: boolean;
+    paidBy: string;
+    splitWith: string[];
+    memberSplits: { [memberId: string]: string };
+    recordExpense: boolean;
+  } | null>(null);
+  const [paidBySearch, setPaidBySearch] = useState('');
+  const [isPaidByDropdownOpen, setIsPaidByDropdownOpen] = useState(false);
+  const [isSplitWithDropdownOpen, setIsSplitWithDropdownOpen] = useState(false);
+  const [splitWithSearch, setSplitWithSearch] = useState('');
+  const [isCompletedParticipantsExpanded, setIsCompletedParticipantsExpanded] = useState(true);
+  const [completedParticipantsFilter, setCompletedParticipantsFilter] = useState<'all' | 'selected'>('all');
+  const paidByRef = useRef<HTMLDivElement>(null);
+  const splitWithRef = useRef<HTMLDivElement>(null);
+
+  // Open modal to view/edit expense details for completed activity
+  const handleOpenEditCompletedExpense = (act: ActivityItem, dayNum: number) => {
+    const linkedExpense = trip.expenses?.find(
+      (e) =>
+        e.activityId === act.id ||
+        (act.expenseId && e.id === act.expenseId) ||
+        (e.title.trim().toLowerCase() === act.title.trim().toLowerCase() &&
+          e.receiptNote &&
+          e.receiptNote.includes(`Ngày ${dayNum}`))
+    );
+
+    const initialAmount =
+      act.actualCost !== undefined
+        ? act.actualCost
+        : linkedExpense
+        ? linkedExpense.amount
+        : act.estimatedCost !== undefined && act.estimatedCost > 0
+        ? act.estimatedCost
+        : 0;
+
+    const initialPayer =
+      act.paidBy ||
+      linkedExpense?.paidBy ||
+      trip.members[0]?.id ||
+      '';
+
+    const initialSplitWith =
+      act.splitWith && act.splitWith.length > 0
+        ? act.splitWith
+        : linkedExpense?.splitWith && linkedExpense.splitWith.length > 0
+        ? linkedExpense.splitWith
+        : trip.members.map((m) => m.id);
+
+    // Initialize member splits - default equal split
+    let initialSplits: { [memberId: string]: string } = {};
+    const existingSplits = act.memberSplits || linkedExpense?.memberSplits;
+    if (existingSplits && existingSplits.length > 0) {
+      existingSplits.forEach((s) => {
+        initialSplits[s.memberId] = String(s.amount);
+      });
+      initialSplitWith.forEach((id) => {
+        if (initialSplits[id] === undefined) initialSplits[id] = '0';
+      });
+    } else {
+      initialSplits = calculateEvenSplits(initialAmount, initialSplitWith);
+    }
+
+    setCompletedActivityPrompt({
+      activity: act,
+      dayNumber: dayNum,
+      unitPrice: 0,
+      amount: initialAmount > 0 ? String(initialAmount) : '',
+      isAmountManuallyEdited: true,
+      paidBy: initialPayer,
+      splitWith: initialSplitWith,
+      memberSplits: initialSplits,
+      recordExpense: true,
+    });
+    setPaidBySearch('');
+    setIsPaidByDropdownOpen(false);
+    setSplitWithSearch('');
+    setIsCompletedParticipantsExpanded(true);
+    setCompletedParticipantsFilter('all');
+  };
+
+  // Close dropdowns on outside click
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (paidByRef.current && !paidByRef.current.contains(e.target as Node)) {
+        setIsPaidByDropdownOpen(false);
+      }
+      if (splitWithRef.current && !splitWithRef.current.contains(e.target as Node)) {
+        setIsSplitWithDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const handleSaveCompletedActivityPrompt = () => {
+    if (!completedActivityPrompt) return;
+    const costVal = parseFloat(completedActivityPrompt.amount);
+    const hasValidAmount = !isNaN(costVal) && costVal >= 0;
+    const participantCount = completedActivityPrompt.splitWith.length || trip.members.length || 1;
+    const fallbackAmount = completedActivityPrompt.unitPrice > 0 
+      ? completedActivityPrompt.unitPrice * participantCount 
+      : (completedActivityPrompt.activity.actualCost ?? completedActivityPrompt.activity.estimatedCost ?? 0);
+    const finalAmount = hasValidAmount ? costVal : fallbackAmount;
+    const finalPayer = completedActivityPrompt.paidBy || trip.members[0]?.id || 'm1';
+    const finalSplitWith = completedActivityPrompt.splitWith.length > 0
+      ? completedActivityPrompt.splitWith
+      : trip.members.map((m) => m.id);
+
+    const memberSplitsArray = finalSplitWith.map((mId) => ({
+      memberId: mId,
+      amount: parseFloat(completedActivityPrompt.memberSplits?.[mId] || '0') || 0,
+    }));
+    const memberSplitsSum = memberSplitsArray.reduce((acc, curr) => acc + curr.amount, 0);
+    // Ensure final amount matches member splits sum if member splits were entered
+    const effectiveAmount = memberSplitsSum > 0 && (!hasValidAmount || Math.abs(memberSplitsSum - finalAmount) > 0.01)
+      ? memberSplitsSum
+      : finalAmount;
+
+    // 1. If onSaveActivityExpense is provided, use it to update both activity and linked expense in-place!
+    // (Never duplicates expense records in expense history)
+    if (onSaveActivityExpense) {
+      onSaveActivityExpense(
+        completedActivityPrompt.dayNumber,
+        completedActivityPrompt.activity.id,
+        {
+          amount: effectiveAmount,
+          paidBy: finalPayer,
+          splitWith: finalSplitWith,
+          memberSplits: memberSplitsArray,
+          recordExpense: completedActivityPrompt.recordExpense,
+          unitPrice: completedActivityPrompt.unitPrice,
+        }
+      );
+    } else {
+      if (onEditActivity) {
+        onEditActivity(
+          completedActivityPrompt.dayNumber,
+          completedActivityPrompt.activity.id,
+          {
+            actualCost: effectiveAmount,
+            estimatedCost: effectiveAmount,
+            paidBy: finalPayer,
+            splitWith: finalSplitWith,
+            memberSplits: memberSplitsArray,
+            isCompleted: true,
+          }
+        );
+      }
+      if (completedActivityPrompt.recordExpense && onAddExpense) {
+        onAddExpense({
+          title: completedActivityPrompt.activity.title,
+          amount: effectiveAmount,
+          currency: completedActivityPrompt.activity.currency || trip.currency || 'VND',
+          category: completedActivityPrompt.activity.category || 'activity',
+          paidBy: finalPayer,
+          splitWith: finalSplitWith,
+          memberSplits: memberSplitsArray,
+          date: new Date().toISOString().split('T')[0],
+          receiptNote: `${isVi ? 'Chi tiêu tự động từ hoạt động:' : 'Auto-recorded from activity:'} ${completedActivityPrompt.activity.title} (${isVi ? `Ngày ${completedActivityPrompt.dayNumber}` : `Day ${completedActivityPrompt.dayNumber}`})`,
+        });
+      }
+    }
+
+    setCompletedActivityPrompt(null);
+  };
 
   // Editing activity modal state
   const [editingActivity, setEditingActivity] = useState<{ activity: ActivityItem; dayNumber: number } | null>(null);
@@ -121,6 +346,21 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   const [editCategory, setEditCategory] = useState<CategoryType>('sightseeing');
   const [editEstimatedCost, setEditEstimatedCost] = useState('');
   const [editNotes, setEditNotes] = useState('');
+
+  // Merged expense fields in Activity Edit Modal
+  const [editRecordExpense, setEditRecordExpense] = useState(true);
+  const [editActualCost, setEditActualCost] = useState('');
+  const [editPaidBy, setEditPaidBy] = useState('');
+  const [editSplitWith, setEditSplitWith] = useState<string[]>([]);
+  const [editMemberSplits, setEditMemberSplits] = useState<{ [memberId: string]: string }>({});
+  const [isEditPaidByDropdownOpen, setIsEditPaidByDropdownOpen] = useState(false);
+  const [editPaidBySearch, setEditPaidBySearch] = useState('');
+  const [isEditSplitWithDropdownOpen, setIsEditSplitWithDropdownOpen] = useState(false);
+  const [editSplitWithSearch, setEditSplitWithSearch] = useState('');
+  const [isEditParticipantsExpanded, setIsEditParticipantsExpanded] = useState(true);
+  const [editParticipantsFilter, setEditParticipantsFilter] = useState<'all' | 'selected'>('all');
+  const editPaidByRef = useRef<HTMLDivElement>(null);
+  const editSplitWithRef = useRef<HTMLDivElement>(null);
 
   // Location search droplist in Add Modal
   const [isLocationDropdownOpen, setIsLocationDropdownOpen] = useState(false);
@@ -139,10 +379,20 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
       if (locationDropdownRef.current && !locationDropdownRef.current.contains(target)) {
         setIsLocationDropdownOpen(false);
       }
+      if (editPaidByRef.current && !editPaidByRef.current.contains(target)) {
+        setIsEditPaidByDropdownOpen(false);
+      }
+      if (editSplitWithRef.current && !editSplitWithRef.current.contains(target)) {
+        setIsEditSplitWithDropdownOpen(false);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  // Categories configuration state
+  const [categoriesList, setCategoriesList] = useState<CategoryConfig[]>(() => getSavedCategories());
+  const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
 
   // Form states
   const [title, setTitle] = useState('');
@@ -153,17 +403,14 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   const [notes, setNotes] = useState('');
   const [selectedSavedPlaceId, setSelectedSavedPlaceId] = useState<string>('');
 
-  const isVi = lang === 'vi';
-
-  const categories: { label: string; value: string }[] = [
-    { label: t('cat.all'), value: 'all' },
-    { label: t('cat.food'), value: 'food' },
-    { label: t('cat.sightseeing'), value: 'sightseeing' },
-    { label: t('cat.activity'), value: 'activity' },
-    { label: t('cat.transport'), value: 'transport' },
-    { label: t('cat.stay'), value: 'stay' },
-    { label: t('cat.shopping'), value: 'shopping' },
-  ];
+  const categories: { label: string; value: string; icon?: string }[] = useMemo(() => [
+    { label: t('cat.all'), value: 'all', icon: '✨' },
+    ...categoriesList.map((c) => ({
+      label: `${c.icon ? c.icon + ' ' : ''}${isVi ? c.nameVi : c.nameEn}`,
+      value: c.id,
+      icon: c.icon,
+    })),
+  ], [categoriesList, isVi, t]);
 
   // Filtered days for Day search droplist
   const filteredDaysForDropdown = useMemo(() => {
@@ -219,21 +466,82 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
     (sum, d) => sum + d.activities.reduce((dSum, a) => dSum + (a.estimatedCost || 0), 0),
     0
   );
-  const totalSpent = trip.expenses ? trip.expenses.reduce((sum, e) => sum + e.amount, 0) : 0;
+  const totalSpent = useMemo(() => {
+    let total = 0;
+    const processedActivityIds = new Set<string>();
 
-  // Matching saved places for location search droplist in Add modal
-  const matchingSavedPlaces = useMemo(() => {
+    // 1. Tất cả các khoản chi tiêu từ trip.expenses
+    (trip.expenses || []).forEach((exp) => {
+      let actId = exp.activityId;
+      if (actId) {
+        processedActivityIds.add(actId);
+      } else {
+        for (const day of trip.days) {
+          for (const act of day.activities) {
+            if (act.expenseId && act.expenseId === exp.id) {
+              actId = act.id;
+              processedActivityIds.add(act.id);
+              break;
+            }
+            const expTitle = exp.title.trim().toLowerCase();
+            const actTitle = act.title.trim().toLowerCase();
+            if (expTitle === actTitle || expTitle.includes(actTitle) || actTitle.includes(expTitle)) {
+              actId = act.id;
+              processedActivityIds.add(act.id);
+              break;
+            }
+            if (exp.receiptNote && exp.receiptNote.toLowerCase().includes(actTitle)) {
+              actId = act.id;
+              processedActivityIds.add(act.id);
+              break;
+            }
+          }
+          if (actId) break;
+        }
+      }
+      total += Number(exp.amount) || 0;
+    });
+
+    // 2. Các hoạt động đã hoàn thành trong lịch trình chưa có trong trip.expenses
+    trip.days.forEach((day) => {
+      day.activities.forEach((act) => {
+        if (act.isCompleted && !processedActivityIds.has(act.id)) {
+          processedActivityIds.add(act.id);
+          const cost = act.actualCost !== undefined ? Number(act.actualCost) : Number(act.estimatedCost || 0);
+          total += cost;
+        }
+      });
+    });
+
+    return total;
+  }, [trip.expenses, trip.days]);
+
+  // Matching saved places for location search droplist in Add modal (filtered by trip destination)
+  const tripSavedPlaces = useMemo(() => {
     if (!savedPlaces || savedPlaces.length === 0) return [];
+    const dest = (trip.destination || '').trim().toLowerCase();
+    if (!dest) return savedPlaces;
+    // Filter places in this trip's destination city
+    const filtered = savedPlaces.filter((p) => {
+      const cName = (p.cityName || '').trim().toLowerCase();
+      return cName === dest || cName.includes(dest) || dest.includes(cName);
+    });
+    // If none match the destination specifically, fall back to all saved places
+    return filtered.length > 0 ? filtered : savedPlaces;
+  }, [savedPlaces, trip.destination]);
+
+  const matchingSavedPlaces = useMemo(() => {
+    if (!tripSavedPlaces || tripSavedPlaces.length === 0) return [];
     const q = locationName.trim().toLowerCase();
-    if (!q) return savedPlaces;
-    return savedPlaces.filter(
+    if (!q) return tripSavedPlaces;
+    return tripSavedPlaces.filter(
       (p) =>
         p.name.toLowerCase().includes(q) ||
         (p.address && p.address.toLowerCase().includes(q)) ||
         p.cityName.toLowerCase().includes(q) ||
         p.category.toLowerCase().includes(q)
     );
-  }, [savedPlaces, locationName]);
+  }, [tripSavedPlaces, locationName]);
 
   const handleOpenAddModal = (dayNum?: number) => {
     if (dayNum) {
@@ -262,13 +570,142 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
     setEditCategory(act.category);
     setEditEstimatedCost(act.estimatedCost !== undefined ? String(act.estimatedCost) : '');
     setEditNotes(act.notes || '');
+
+    // Expense initialization
+    const linkedExpense = trip.expenses?.find(
+      (e) =>
+        e.activityId === act.id ||
+        (act.expenseId && e.id === act.expenseId) ||
+        (e.title.trim().toLowerCase() === act.title.trim().toLowerCase() &&
+          e.receiptNote &&
+          e.receiptNote.includes(`Ngày ${dayNum}`))
+    );
+
+    // Unified Cost: prioritize actualCost if completed, else linkedExpense amount, else estimatedCost
+    const initialAmount =
+      act.actualCost !== undefined && act.actualCost > 0
+        ? act.actualCost
+        : linkedExpense && linkedExpense.amount > 0
+        ? linkedExpense.amount
+        : act.estimatedCost !== undefined && act.estimatedCost > 0
+        ? act.estimatedCost
+        : 0;
+
+    const costString = initialAmount > 0 ? String(initialAmount) : (act.estimatedCost !== undefined ? String(act.estimatedCost) : '');
+    setEditEstimatedCost(costString);
+    setEditActualCost(costString);
+
+    const initialPayer =
+      act.paidBy ||
+      linkedExpense?.paidBy ||
+      trip.members[0]?.id ||
+      '';
+
+    const initialSplitWith =
+      act.splitWith && act.splitWith.length > 0
+        ? act.splitWith
+        : linkedExpense?.splitWith && linkedExpense.splitWith.length > 0
+        ? linkedExpense.splitWith
+        : trip.members.map((m) => m.id);
+
+    setEditPaidBy(initialPayer);
+    setEditSplitWith(initialSplitWith);
+
+    // Initialize editMemberSplits
+    let initialSplits: { [mId: string]: string } = {};
+    const existingSplits = act.memberSplits || linkedExpense?.memberSplits;
+    if (existingSplits && existingSplits.length > 0) {
+      existingSplits.forEach((s) => {
+        initialSplits[s.memberId] = String(s.amount);
+      });
+      initialSplitWith.forEach((id) => {
+        if (initialSplits[id] === undefined) initialSplits[id] = '0';
+      });
+    } else {
+      initialSplits = calculateEvenSplits(initialAmount, initialSplitWith);
+    }
+    setEditMemberSplits(initialSplits);
+
+    setEditRecordExpense(act.expenseId ? true : (linkedExpense ? true : true));
+    setIsEditPaidByDropdownOpen(false);
+    setEditPaidBySearch('');
+    setIsEditSplitWithDropdownOpen(false);
+    setEditSplitWithSearch('');
+    setIsEditParticipantsExpanded(true);
+    setEditParticipantsFilter('all');
   };
 
   const handleSaveEdit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingActivity || !editTitle.trim() || !editLocationName.trim()) return;
 
-    if (onEditActivity) {
+    const isCompleted = !!editingActivity.activity.isCompleted;
+    // Unified cost: parsed from editEstimatedCost (which is synchronized with editActualCost)
+    const rawCost = editEstimatedCost.trim() || editActualCost.trim();
+    const parsedCost = rawCost ? parseFloat(rawCost) : 0;
+    const costVal = !isNaN(parsedCost) && parsedCost >= 0 ? parsedCost : 0;
+
+    const finalPayer = editPaidBy || trip.members[0]?.id || 'm1';
+    const finalSplitWith = editSplitWith.length > 0 ? editSplitWith : trip.members.map((m) => m.id);
+
+    const splitsArray = finalSplitWith.map((mId) => ({
+      memberId: mId,
+      amount: parseFloat(editMemberSplits[mId] || '0') || 0,
+    }));
+    const splitsSum = splitsArray.reduce((acc, curr) => acc + curr.amount, 0);
+    const effectiveCost = splitsSum > 0 && Math.abs(splitsSum - costVal) > 0.01 && costVal === 0
+      ? splitsSum
+      : costVal;
+
+    // Identify linked expense id to prevent duplicates
+    const linkedExpense = trip.expenses?.find(
+      (exp) =>
+        exp.activityId === editingActivity.activity.id ||
+        (editingActivity.activity.expenseId && exp.id === editingActivity.activity.expenseId) ||
+        (exp.title.trim().toLowerCase() === editingActivity.activity.title.trim().toLowerCase() &&
+          exp.receiptNote &&
+          exp.receiptNote.includes(`Ngày ${editingActivity.dayNumber}`))
+    );
+    const linkedExpenseId = editingActivity.activity.expenseId || linkedExpense?.id;
+
+    // 1. If activity is completed and onSaveActivityExpense exists, update both activity & expense in-place!
+    if (isCompleted && onSaveActivityExpense) {
+      // First update general activity properties (title, time, location, category, dayNumber, notes)
+      if (onEditActivity) {
+        onEditActivity(
+          editingActivity.dayNumber,
+          editingActivity.activity.id,
+          {
+            title: editTitle.trim(),
+            locationName: editLocationName.trim(),
+            time: editTime.trim() || '09:00 AM',
+            category: editCategory,
+            estimatedCost: effectiveCost,
+            actualCost: effectiveCost,
+            notes: editNotes.trim(),
+            paidBy: finalPayer,
+            splitWith: finalSplitWith,
+            memberSplits: splitsArray,
+            expenseId: linkedExpenseId,
+          },
+          editDayNumber
+        );
+      }
+
+      // Then save the expense information linked to this activity (in-place update, never duplicate)
+      onSaveActivityExpense(
+        editDayNumber,
+        editingActivity.activity.id,
+        {
+          amount: effectiveCost,
+          paidBy: finalPayer,
+          splitWith: finalSplitWith,
+          memberSplits: splitsArray,
+          recordExpense: editRecordExpense,
+          expenseId: linkedExpenseId,
+        }
+      );
+    } else if (onEditActivity) {
       onEditActivity(
         editingActivity.dayNumber,
         editingActivity.activity.id,
@@ -277,27 +714,20 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
           locationName: editLocationName.trim(),
           time: editTime.trim() || '09:00 AM',
           category: editCategory,
-          estimatedCost: editEstimatedCost ? parseFloat(editEstimatedCost) : 0,
+          estimatedCost: effectiveCost,
+          actualCost: isCompleted ? effectiveCost : effectiveCost,
           notes: editNotes.trim(),
+          ...(isCompleted
+            ? {
+                paidBy: finalPayer,
+                splitWith: finalSplitWith,
+                memberSplits: splitsArray,
+                expenseId: linkedExpenseId,
+              }
+            : {}),
         },
         editDayNumber
       );
-    }
-
-    // Also update viewing activity if it's currently open
-    if (viewingActivity && viewingActivity.activity.id === editingActivity.activity.id) {
-      setViewingActivity({
-        activity: {
-          ...viewingActivity.activity,
-          title: editTitle.trim(),
-          locationName: editLocationName.trim(),
-          time: editTime.trim() || '09:00 AM',
-          category: editCategory,
-          estimatedCost: editEstimatedCost ? parseFloat(editEstimatedCost) : 0,
-          notes: editNotes.trim(),
-        },
-        dayNumber: editDayNumber,
-      });
     }
 
     setEditingActivity(null);
@@ -321,12 +751,14 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || !locationName.trim()) return;
+    const finalLocation = locationName.trim();
+    const finalTitle = title.trim() || finalLocation;
+    if (!finalTitle) return;
 
     onAddActivity(targetDayNumber, {
       time: time || '10:00 AM',
-      title: title.trim(),
-      locationName: locationName.trim(),
+      title: finalTitle,
+      locationName: finalLocation || finalTitle,
       category,
       estimatedCost: estimatedCost ? parseFloat(estimatedCost) : 0,
       currency: trip.currency || 'VND',
@@ -398,7 +830,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                 <Calendar className="w-3.5 h-3.5 text-teal-600 shrink-0" />
                 <span className="truncate">
                   {activeDayTab === 'all'
-                    ? (isVi ? `Tất cả ngày (${totalActivitiesCount})` : `All Days (${totalActivitiesCount})`)
+                    ? (isVi ? 'Tất cả ngày' : 'All Days')
                     : (() => {
                         const selectedDayObj = trip.days.find((d) => d.dayNumber === activeDayTab);
                         const onlyD = selectedDayObj?.date ? selectedDayObj.date.split(' - ')[0].trim() : '';
@@ -465,7 +897,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                         : 'text-slate-700 hover:bg-slate-100'
                     }`}
                   >
-                    <span>{isVi ? `📅 Tất cả ngày (${totalActivitiesCount})` : `📅 All Days (${totalActivitiesCount})`}</span>
+                    <span>{isVi ? '📅 Tất cả ngày' : '📅 All Days'}</span>
                     {activeDayTab === 'all' && <span className="text-teal-600 text-xs">✓</span>}
                   </button>
 
@@ -637,6 +1069,21 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                       ))}
                     </div>
                   )}
+
+                  {/* Category Configuration Link */}
+                  <div className="pt-2 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsFilterDropdownOpen(false);
+                        setIsCategoryModalOpen(true);
+                      }}
+                      className="w-full flex items-center justify-center gap-1.5 py-1.5 px-2 text-xs font-bold text-teal-700 hover:text-teal-800 bg-teal-50/80 hover:bg-teal-100 rounded-lg transition-colors cursor-pointer"
+                    >
+                      <Tag className="w-3.5 h-3.5" />
+                      <span>{isVi ? 'Cấu hình Thể loại' : 'Manage Categories'}</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -678,7 +1125,10 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
             </span>
           </div>
 
-          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-50/90 border border-emerald-200/80 text-[11px] sm:text-xs">
+          <div
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-50/90 border border-emerald-200/80 text-[11px] sm:text-xs"
+            title={isVi ? 'Tổng tiền đã chi của tất cả hoạt động đã hoàn thành trong chuyến đi' : 'Total spent on all completed activities across all days'}
+          >
             <span className="text-slate-500 font-medium">{isVi ? 'Đã chi:' : 'Spent:'}</span>
             <span className="font-extrabold text-emerald-700">
               {formatMoney(totalSpent, trip.currency, lang)}
@@ -714,7 +1164,18 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               return null;
             }
 
-            const dayCost = day.activities.reduce((sum, a) => sum + (a.estimatedCost || 0), 0);
+            const dayCompletedCost = day.activities
+              .filter((a) => a.isCompleted)
+              .reduce((sum, a) => {
+                const matchedExpense = trip.expenses?.find(
+                  (e) =>
+                    e.title.trim().toLowerCase() === a.title.trim().toLowerCase() ||
+                    (e.receiptNote &&
+                      e.receiptNote.toLowerCase().includes(a.title.trim().toLowerCase()) &&
+                      e.receiptNote.includes(`Ngày ${day.dayNumber}`))
+                );
+                return sum + (matchedExpense ? matchedExpense.amount : (a.estimatedCost || 0));
+              }, 0);
             const formattedDate = formatToDDMMYYYY(day.date, day.dayNumber, trip.startDate);
             const cleanTitle = day.title ? day.title.replace(/^(ngày|day)\s*\d+[\s:–-]*/i, '').trim() : '';
             const isExpanded = !!expandedDays[day.dayNumber];
@@ -760,9 +1221,16 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                           {day.activities.length} {isVi ? 'hoạt động' : 'acts'}
                         </span>
 
-                        {dayCost > 0 && (
-                          <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-100">
-                            {formatMoney(dayCost, trip.currency, lang)}
+                        {day.activities.length > 0 && (
+                          <span
+                            className={`text-[11px] font-bold px-2 py-0.5 rounded-md border ${
+                              dayCompletedCost > 0
+                                ? 'text-emerald-700 bg-emerald-50 border-emerald-100'
+                                : 'text-slate-400 bg-slate-50 border-slate-200/70'
+                            }`}
+                            title={isVi ? 'Tổng số tiền hoạt động đã hoàn thành trong ngày' : 'Total money of completed activities in this day'}
+                          >
+                            {formatMoney(dayCompletedCost, trip.currency, lang)}
                           </span>
                         )}
                       </div>
@@ -781,14 +1249,14 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                         </button>
 
                         <div
-                          className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg transition-transform duration-200"
+                          className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg transition-colors"
                           title={isExpanded ? (isVi ? 'Thu gọn' : 'Collapse') : (isVi ? 'Xem chi tiết' : 'Expand')}
                         >
-                          <ChevronDown
-                            className={`w-4 h-4 transition-transform duration-200 ${
-                              isExpanded ? 'rotate-180 text-teal-600' : ''
-                            }`}
-                          />
+                          {isExpanded ? (
+                            <ChevronUp className="w-4 h-4 text-teal-600" />
+                          ) : (
+                            <ChevronDown className="w-4 h-4 text-slate-400" />
+                          )}
                         </div>
                       </div>
                     </div>
@@ -833,7 +1301,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                             key={act.id}
                             className={`group p-3 rounded-xl border transition-all ${
                               act.isCompleted
-                                ? 'bg-slate-50/60 border-slate-200/60 opacity-60'
+                                ? 'bg-emerald-50/30 border-emerald-200/80 shadow-2xs'
                                 : 'bg-white hover:bg-slate-50/40 border-slate-200 hover:border-teal-300 shadow-2xs'
                             }`}
                           >
@@ -841,7 +1309,13 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                             <div className="flex items-start justify-between gap-2">
                               <div className="flex items-start gap-2.5 min-w-0 flex-1">
                                 <button
-                                  onClick={() => onToggleActivityCheck(day.dayNumber, act.id)}
+                                  onClick={() => {
+                                    const nextState = !act.isCompleted;
+                                    onToggleActivityCheck(day.dayNumber, act.id);
+                                    if (nextState) {
+                                      handleOpenEditCompletedExpense(act, day.dayNumber);
+                                    }
+                                  }}
                                   className="mt-0.5 text-slate-400 hover:text-teal-600 transition-colors shrink-0 cursor-pointer p-0.5"
                                   title={act.isCompleted ? (isVi ? 'Đánh dấu chưa hoàn thành' : 'Mark incomplete') : (isVi ? 'Đánh dấu đã hoàn thành' : 'Mark complete')}
                                 >
@@ -879,18 +1353,8 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                                 </div>
                               </div>
 
-                              {/* Action Buttons: View Detail, Edit, Delete */}
+                              {/* Action Buttons: Edit, Delete */}
                               <div className="flex items-center gap-0.5 shrink-0">
-                                {/* View Detail */}
-                                <button
-                                  type="button"
-                                  onClick={() => setViewingActivity({ activity: act, dayNumber: day.dayNumber })}
-                                  className="p-1.5 text-slate-400 hover:text-teal-700 hover:bg-teal-50 rounded-lg transition-colors cursor-pointer"
-                                  title={isVi ? 'Xem chi tiết & Bản đồ Google' : 'View Details & Google Maps'}
-                                >
-                                  <Eye className="w-3.5 h-3.5" />
-                                </button>
-
                                 {/* Edit */}
                                 <button
                                   type="button"
@@ -904,7 +1368,10 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                                 {/* Delete */}
                                 <button
                                   type="button"
-                                  onClick={() => onDeleteActivity(day.dayNumber, act.id)}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActivityToDelete({ activity: act, dayNumber: day.dayNumber });
+                                  }}
                                   className="p-1.5 text-slate-300 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
                                   title={isVi ? 'Xóa hoạt động này' : 'Delete this activity'}
                                 >
@@ -917,10 +1384,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                             <div className="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-slate-100 text-xs">
                               <div className="flex items-center gap-1 text-slate-500 min-w-0 truncate">
                                 <MapPin className="w-3.5 h-3.5 text-teal-600 shrink-0" />
-                                <span
-                                  onClick={() => setViewingActivity({ activity: act, dayNumber: day.dayNumber })}
-                                  className="text-[11px] truncate font-medium hover:text-teal-700 cursor-pointer"
-                                >
+                                <span className="text-[11px] truncate font-medium text-slate-600">
                                   {act.locationName}
                                 </span>
                                 <a
@@ -945,6 +1409,60 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                                 </div>
                               )}
                             </div>
+
+                            {/* Row 3 (if completed): Display actual spent money, payer & participants + Edit button */}
+                            {act.isCompleted && (() => {
+                              const cardExpense = trip.expenses?.find(
+                                (e) =>
+                                  e.activityId === act.id ||
+                                  (act.expenseId && e.id === act.expenseId) ||
+                                  (e.title.trim().toLowerCase() === act.title.trim().toLowerCase() &&
+                                    e.receiptNote &&
+                                    e.receiptNote.includes(`Ngày ${day.dayNumber}`))
+                              );
+                              const cardCost =
+                                act.actualCost !== undefined
+                                  ? act.actualCost
+                                  : cardExpense
+                                  ? cardExpense.amount
+                                  : act.estimatedCost || 0;
+
+                              const cardPayerId = act.paidBy || cardExpense?.paidBy || trip.members[0]?.id;
+                              const isFundPayer = cardPayerId === 'fund';
+                              const cardPayer = isFundPayer ? null : trip.members.find((m) => m.id === cardPayerId);
+                              const cardSplitIds =
+                                act.splitWith && act.splitWith.length > 0
+                                  ? act.splitWith
+                                  : cardExpense?.splitWith && cardExpense.splitWith.length > 0
+                                  ? cardExpense.splitWith
+                                  : trip.members.map((m) => m.id);
+
+                              return (
+                                <div className="mt-2 pt-2 border-t border-emerald-100 flex flex-wrap items-center justify-between gap-1.5 text-[11px] bg-emerald-50/70 rounded-lg px-2.5 py-1.5 text-emerald-950">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className="font-extrabold text-emerald-700">
+                                      {isVi ? 'Đã chi:' : 'Spent:'} {formatMoney(cardCost, act.currency || trip.currency, lang)}
+                                    </span>
+                                    <span className="text-emerald-300">•</span>
+                                    {isFundPayer ? (
+                                      <span className="font-bold text-amber-800 bg-amber-100/80 px-1.5 py-0.5 rounded-md flex items-center gap-1">
+                                        <PiggyBank className="w-3 h-3 text-amber-700" />
+                                        {isVi ? 'Quỹ' : 'Group Fund'}
+                                      </span>
+                                    ) : (
+                                      <span className="font-semibold text-slate-700 flex items-center gap-1">
+                                        <CreditCard className="w-3 h-3 text-teal-600" />
+                                        {cardPayer?.name || (isVi ? 'Chưa gán' : 'Unassigned')}
+                                      </span>
+                                    )}
+                                    <span className="text-emerald-300">•</span>
+                                    <span className="text-slate-600 font-medium">
+                                      {cardSplitIds.length} {isVi ? 'người chia' : 'participants'}
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            })()}
                           </div>
                         ))}
                       </div>
@@ -965,7 +1483,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
             <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between">
               <div>
                 <h3 className="font-display font-bold text-sm sm:text-base">
-                  {t('itinerary.addNewTitle', { day: targetDayNumber })}
+                  {isVi ? 'Thêm Hoạt động' : 'Add Activity'}
                 </h3>
               </div>
               <button
@@ -998,20 +1516,20 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                 </select>
               </div>
 
-              {/* Location with Search-Like Droplist */}
+              {/* Location with Droplist */}
               <div className="relative" ref={locationDropdownRef}>
                 <div className="flex items-center justify-between mb-1">
                   <label className="block text-xs font-semibold text-slate-700">
                     {t('itinerary.fieldLocation')} *
                   </label>
-                  {savedPlaces && savedPlaces.length > 0 && (
+                  {tripSavedPlaces && tripSavedPlaces.length > 0 && (
                     <button
                       type="button"
                       onClick={() => setIsLocationDropdownOpen(!isLocationDropdownOpen)}
                       className="text-[11px] font-semibold text-teal-700 hover:text-teal-800 flex items-center gap-1 cursor-pointer"
                     >
-                      <BookmarkCheck className="w-3 h-3 text-teal-600" />
-                      <span>{isVi ? 'Gợi ý từ địa điểm đã lưu' : 'Saved places'}</span>
+                      <MapPin className="w-3 h-3 text-teal-600" />
+                      <span>{trip.destination || (isVi ? 'Điểm đến' : 'Destination')} ({tripSavedPlaces.length})</span>
                       <ChevronDown className={`w-3 h-3 transition-transform ${isLocationDropdownOpen ? 'rotate-180' : ''}`} />
                     </button>
                   )}
@@ -1021,14 +1539,14 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                   <input
                     type="text"
                     required
-                    placeholder={isVi ? 'Nhập tên quán, địa chỉ hoặc chọn từ droplist...' : 'Type location or pick from dropdown...'}
+                    placeholder={isVi ? `Nhập địa điểm tại ${trip.destination || 'chuyến đi'}...` : `Type location in ${trip.destination || 'trip'}...`}
                     value={locationName}
                     onChange={(e) => {
                       setLocationName(e.target.value);
                       setIsLocationDropdownOpen(true);
                     }}
                     onFocus={() => {
-                      if (savedPlaces && savedPlaces.length > 0) {
+                      if (tripSavedPlaces && tripSavedPlaces.length > 0) {
                         setIsLocationDropdownOpen(true);
                       }
                     }}
@@ -1045,12 +1563,12 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                   )}
                 </div>
 
-                {/* Search-Like Droplist of Saved Places */}
-                {isLocationDropdownOpen && savedPlaces && savedPlaces.length > 0 && (
+                {/* Droplist of Locations in Trip Destination */}
+                {isLocationDropdownOpen && tripSavedPlaces && tripSavedPlaces.length > 0 && (
                   <div className="absolute left-0 right-0 top-full mt-1 bg-white rounded-xl border border-slate-200 shadow-xl z-50 p-2 max-h-52 overflow-y-auto space-y-1 animate-in fade-in zoom-in-95 duration-100">
                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-2 py-0.5 flex items-center justify-between">
-                      <span>{isVi ? 'Gợi ý từ địa điểm đã lưu (Search Like)' : 'Saved places (Search Like)'}</span>
-                      <span>{matchingSavedPlaces.length} {isVi ? 'kết quả' : 'matches'}</span>
+                      <span>{trip.destination || (isVi ? 'Địa điểm' : 'Locations')}</span>
+                      <span>{matchingSavedPlaces.length}</span>
                     </div>
 
                     {matchingSavedPlaces.map((sp) => (
@@ -1083,26 +1601,11 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
 
                     {matchingSavedPlaces.length === 0 && (
                       <div className="text-center py-2 text-xs text-slate-400 italic">
-                        {isVi ? `Không có địa điểm đã lưu khớp với "${locationName}". Bạn có thể nhập tự do!` : `No saved place matches "${locationName}". You can type freely!`}
+                        {isVi ? `Không có địa điểm nào khớp với "${locationName}". Bạn có thể nhập tự do!` : `No location matches "${locationName}". You can type freely!`}
                       </div>
                     )}
                   </div>
                 )}
-              </div>
-
-              {/* Activity title */}
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  {t('itinerary.fieldTitle')} *
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder={isVi ? 'Ví dụ: Cà phê Túi Mơ To, Lẩu cá đuối...' : 'e.g., Tokyo Skytree Visit'}
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  className="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
-                />
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -1130,20 +1633,18 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                     onChange={(e) => setCategory(e.target.value as CategoryType)}
                     className="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
                   >
-                    <option value="food">{t('cat.food')}</option>
-                    <option value="sightseeing">{t('cat.sightseeing')}</option>
-                    <option value="activity">{t('cat.activity')}</option>
-                    <option value="transport">{t('cat.transport')}</option>
-                    <option value="stay">{t('cat.stay')}</option>
-                    <option value="shopping">{t('cat.shopping')}</option>
-                    <option value="other">{t('cat.other')}</option>
+                    {categoriesList.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.icon ? `${c.icon} ` : ''}{isVi ? c.nameVi : c.nameEn}
+                      </option>
+                    ))}
                   </select>
                 </div>
 
-                {/* Estimated Cost */}
+                {/* Cost */}
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    {isVi ? 'Chi phí dự kiến' : t('itinerary.fieldEstCost')}
+                    {isVi ? 'Chi phí' : t('itinerary.fieldEstCost')}
                   </label>
                   <input
                     type="number"
@@ -1176,7 +1677,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                   onClick={() => setIsAddModalOpen(false)}
                   className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
                 >
-                  {t('itinerary.cancel')}
+                  {isVi ? 'Hủy' : 'Cancel'}
                 </button>
                 <button
                   type="submit"
@@ -1192,195 +1693,631 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
         </div>
       )}
 
-      {/* 5. Activity Detail Modal (with direct Google Maps connection) */}
-      {viewingActivity && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 overflow-y-auto">
-          <div className="bg-white w-full max-w-lg rounded-2xl sm:rounded-3xl border border-slate-200 shadow-2xl overflow-hidden my-auto animate-in fade-in zoom-in-95 duration-150">
-            
-            {/* Header */}
-            <div className="px-5 py-4 bg-slate-900 text-white flex items-center justify-between">
+
+
+      {/* 5.5 Modal: Ghi nhận chi tiêu khi hoàn thành hoạt động */}
+      {completedActivityPrompt && (
+        <div className="fixed inset-0 z-60 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 overflow-y-auto">
+          <div className="bg-white w-full max-w-md max-h-[90vh] flex flex-col rounded-2xl sm:rounded-3xl border border-slate-200 shadow-2xl overflow-hidden my-auto animate-in fade-in zoom-in-95 duration-150">
+            {/* Header (fixed at top of modal) */}
+            <div className="px-5 py-3.5 bg-teal-800 text-white flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2">
-                <span className="px-2.5 py-1 rounded-lg bg-teal-600 text-white text-xs font-bold">
-                  {isVi ? `Ngày ${viewingActivity.dayNumber}` : `Day ${viewingActivity.dayNumber}`}
-                </span>
-                <span className="text-xs text-slate-300 font-semibold flex items-center gap-1">
-                  <Clock className="w-3.5 h-3.5 text-teal-400" />
-                  {viewingActivity.activity.time}
-                </span>
+                <div className="w-7 h-7 rounded-full bg-teal-600 flex items-center justify-center shrink-0">
+                  <DollarSign className="w-4 h-4 text-teal-100" />
+                </div>
+                <h3 className="text-sm sm:text-base font-bold leading-tight">
+                  {isVi
+                    ? (completedActivityPrompt.activity.isCompleted ? 'Cập nhật chi tiêu hoạt động' : 'Ghi nhận chi tiêu')
+                    : (completedActivityPrompt.activity.isCompleted ? 'Update Activity Expense' : 'Record Expense')}
+                </h3>
               </div>
               <button
-                onClick={() => setViewingActivity(null)}
-                className="p-1.5 rounded-xl hover:bg-white/10 text-slate-300 transition-colors cursor-pointer"
+                type="button"
+                onClick={() => setCompletedActivityPrompt(null)}
+                className="p-1 rounded-lg hover:bg-white/10 text-teal-100 transition-colors cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="p-5 sm:p-6 space-y-4">
-              
-              {/* Title & Category */}
-              <div>
-                <div className="flex items-center gap-2 mb-1.5">
-                  <span
-                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-semibold border ${
-                      CATEGORY_BADGES[viewingActivity.activity.category] || CATEGORY_BADGES.other
-                    }`}
-                  >
-                    {CATEGORY_ICONS[viewingActivity.activity.category]}
-                    <span>{t(`cat.${viewingActivity.activity.category}`) || viewingActivity.activity.category}</span>
-                  </span>
-
-                  {viewingActivity.activity.isCompleted && (
-                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                      {isVi ? 'Đã hoàn thành' : 'Completed'}
-                    </span>
+            {/* Form */}
+            <form
+              noValidate
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleSaveCompletedActivityPrompt();
+              }}
+              className="flex flex-col flex-1 overflow-hidden"
+            >
+              {/* Scrollable Form Content */}
+              <div className="p-5 space-y-4 text-slate-800 overflow-y-auto flex-1 overscroll-contain">
+                {/* Activity Info Banner */}
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200/80">
+                  <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                    {isVi ? `Hoạt động - Ngày ${completedActivityPrompt.dayNumber}` : `Activity - Day ${completedActivityPrompt.dayNumber}`}
+                  </div>
+                  <div className="text-xs font-bold text-slate-800 mt-0.5">
+                    {completedActivityPrompt.activity.title}
+                  </div>
+                  {completedActivityPrompt.activity.locationName && (
+                    <div className="text-[11px] text-slate-500 flex items-center gap-1 mt-0.5">
+                      <MapPin className="w-3 h-3 text-red-500 shrink-0" />
+                      <span className="truncate">{completedActivityPrompt.activity.locationName}</span>
+                    </div>
                   )}
                 </div>
 
-                <h3 className="text-base sm:text-lg font-bold text-slate-900 leading-snug">
-                  {viewingActivity.activity.title}
-                </h3>
-              </div>
-
-              {/* Location & Google Maps Connection */}
-              <div className="bg-slate-50 rounded-2xl p-3.5 border border-slate-200/80 space-y-2.5">
-                <div className="flex items-start gap-2">
-                  <MapPin className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                  <div>
-                    <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                      {isVi ? 'Địa điểm / Địa chỉ' : 'Location / Address'}
-                    </div>
-                    <div className="text-xs font-semibold text-slate-800 mt-0.5">
-                      {viewingActivity.activity.locationName}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Google Maps Actions */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-                  <a
-                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-                      viewingActivity.activity.locationName
-                        ? `${viewingActivity.activity.locationName}, ${trip.destination}`
-                        : viewingActivity.activity.title
-                    )}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="py-2.5 px-3 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer text-center"
-                  >
-                    <MapPin className="w-4 h-4" />
-                    <span>{isVi ? 'Mở trên Google Maps' : 'Open in Google Maps'}</span>
-                    <ExternalLink className="w-3.5 h-3.5 text-blue-200" />
-                  </a>
-
-                  <a
-                    href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(
-                      viewingActivity.activity.locationName
-                        ? `${viewingActivity.activity.locationName}, ${trip.destination}`
-                        : viewingActivity.activity.title
-                    )}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="py-2.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer text-center border border-slate-200"
-                  >
-                    <Navigation className="w-4 h-4 text-slate-600" />
-                    <span>{isVi ? 'Chỉ Đường Google Maps' : 'Directions'}</span>
-                    <ExternalLink className="w-3.5 h-3.5 text-slate-400" />
-                  </a>
-                </div>
-              </div>
-
-              {/* Estimated Cost */}
-              {viewingActivity.activity.estimatedCost !== undefined && (
-                <div className="flex items-center justify-between p-3 rounded-xl bg-emerald-50/70 border border-emerald-200/70">
-                  <span className="text-xs font-bold text-slate-700">
-                    {isVi ? 'Chi phí dự kiến:' : 'Estimated Cost:'}
-                  </span>
-                  <span className="text-sm font-extrabold text-emerald-700">
-                    {viewingActivity.activity.estimatedCost > 0
-                      ? formatMoney(viewingActivity.activity.estimatedCost, viewingActivity.activity.currency || trip.currency, lang)
-                      : (isVi ? 'Miễn phí' : 'Free')}
-                  </span>
-                </div>
-              )}
-
-              {/* Notes */}
-              {viewingActivity.activity.notes && (
-                <div className="p-3 bg-amber-50/70 rounded-xl border border-amber-200/70 space-y-1 text-xs">
-                  <div className="font-bold text-amber-900 flex items-center gap-1 text-[11px]">
-                    <Sparkles className="w-3.5 h-3.5 text-amber-600" />
-                    <span>{isVi ? 'Lưu ý & Ghi chú' : 'Notes & Tips'}</span>
-                  </div>
-                  <p className="text-slate-700 leading-relaxed">{viewingActivity.activity.notes}</p>
-                </div>
-              )}
-
-              {/* Footer Actions */}
-              <div className="flex items-center justify-between pt-3 border-t border-slate-100">
-                <button
-                  type="button"
+                {/* Radio button / Option: Ghi nhận chi tiêu */}
+                <div
                   onClick={() => {
-                    onToggleActivityCheck(viewingActivity.dayNumber, viewingActivity.activity.id);
-                    setViewingActivity({
-                      ...viewingActivity,
-                      activity: {
-                        ...viewingActivity.activity,
-                        isCompleted: !viewingActivity.activity.isCompleted,
-                      },
+                    setCompletedActivityPrompt({
+                      ...completedActivityPrompt,
+                      recordExpense: !completedActivityPrompt.recordExpense,
                     });
                   }}
-                  className="px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors flex items-center gap-1.5 cursor-pointer"
+                  className={`p-3 rounded-xl border flex items-center cursor-pointer select-none transition-colors ${
+                    completedActivityPrompt.recordExpense
+                      ? 'bg-teal-50/80 border-teal-300'
+                      : 'bg-slate-50 border-slate-200 hover:bg-slate-100/70'
+                  }`}
                 >
-                  <CheckCircle2 className="w-4 h-4 text-teal-600" />
-                  <span>
-                    {viewingActivity.activity.isCompleted
-                      ? (isVi ? 'Đánh dấu chưa làm' : 'Mark incomplete')
-                      : (isVi ? 'Đánh dấu đã xong' : 'Mark completed')}
-                  </span>
-                </button>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const act = viewingActivity.activity;
-                      const dayNum = viewingActivity.dayNumber;
-                      setViewingActivity(null);
-                      handleOpenEditModal(act, dayNum);
-                    }}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Edit3 className="w-3.5 h-3.5" />
-                    <span>{isVi ? 'Chỉnh Sửa' : 'Edit'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setViewingActivity(null)}
-                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl transition-colors cursor-pointer"
-                  >
-                    {isVi ? 'Đóng' : 'Close'}
-                  </button>
+                  <div className="flex items-center gap-2.5">
+                    <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors shrink-0 ${
+                      completedActivityPrompt.recordExpense
+                        ? 'border-teal-600 bg-teal-600'
+                        : 'border-slate-400 bg-white'
+                    }`}>
+                      {completedActivityPrompt.recordExpense && (
+                        <div className="w-2 h-2 rounded-full bg-white" />
+                      )}
+                    </div>
+                    <span className="text-xs font-bold text-slate-800">
+                      {isVi ? 'Ghi nhận chi tiêu' : 'Record Expense'}
+                    </span>
+                  </div>
                 </div>
+
+                {/* Expense Details: only shown when recordExpense is true */}
+                {completedActivityPrompt.recordExpense && (
+                  <div className="space-y-4 pt-1">
+                    {/* Amount Input */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-xs font-bold text-slate-700">
+                          {isVi ? `Chi phí (${trip.currency || 'VND'})` : `Cost (${trip.currency || 'USD'})`}
+                        </label>
+                        {completedActivityPrompt.unitPrice > 0 && (
+                          <span className="text-[11px] text-teal-700 font-semibold">
+                            {formatMoney(completedActivityPrompt.unitPrice, trip.currency, lang)} / {isVi ? 'người' : 'person'}
+                          </span>
+                        )}
+                      </div>
+                      
+                      <div className="relative">
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={completedActivityPrompt.amount}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            const num = parseFloat(val) || 0;
+                            // Mặc định chia đều cho các thành viên được tích tham gia
+                            const splits = calculateEvenSplits(num, completedActivityPrompt.splitWith);
+                            setCompletedActivityPrompt({
+                              ...completedActivityPrompt,
+                              amount: val,
+                              memberSplits: splits,
+                              isAmountManuallyEdited: true,
+                            });
+                          }}
+                          placeholder={completedActivityPrompt.unitPrice > 0 ? String(completedActivityPrompt.unitPrice * (completedActivityPrompt.splitWith.length || 1)) : '0'}
+                          className="w-full text-sm font-bold p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                        />
+                      </div>
+
+                      {/* Formula & Calculation helper badge */}
+                      {completedActivityPrompt.unitPrice > 0 && (
+                        <div className="mt-1.5 p-2 bg-emerald-50/80 border border-emerald-200/80 rounded-xl flex items-center justify-between text-xs">
+                          <div className="flex items-center gap-1.5 text-emerald-800 text-[11px] sm:text-xs">
+                            <span className="font-semibold">{formatMoney(completedActivityPrompt.unitPrice, trip.currency, lang)}</span>
+                            <span className="text-slate-400">×</span>
+                            <span className="font-semibold">{completedActivityPrompt.splitWith.length} {isVi ? 'người tham gia' : 'people'}</span>
+                            <span className="text-slate-400">=</span>
+                            <span className="font-extrabold text-emerald-700">
+                              {formatMoney(completedActivityPrompt.unitPrice * completedActivityPrompt.splitWith.length, trip.currency, lang)}
+                            </span>
+                          </div>
+                          {completedActivityPrompt.isAmountManuallyEdited && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCompletedActivityPrompt({
+                                  ...completedActivityPrompt,
+                                  amount: String(completedActivityPrompt.unitPrice * completedActivityPrompt.splitWith.length),
+                                  isAmountManuallyEdited: false,
+                                });
+                              }}
+                              className="text-[11px] text-teal-700 hover:text-teal-900 underline font-semibold cursor-pointer shrink-0 ml-2"
+                              title={isVi ? 'Tính lại theo số người' : 'Reset to formula'}
+                            >
+                              {isVi ? 'Đặt lại' : 'Reset'}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Paid By - Searchable Droplist with Checkbox */}
+                    <div ref={paidByRef} className="relative">
+                      <label className="block text-xs font-bold text-slate-700 mb-1">
+                        {isVi ? 'Người chi tiền' : 'Payer'}
+                      </label>
+                      
+                      {/* Trigger Button */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsPaidByDropdownOpen(!isPaidByDropdownOpen);
+                          setIsSplitWithDropdownOpen(false);
+                        }}
+                        className="w-full flex items-center justify-between p-2.5 bg-white rounded-xl border border-slate-200 hover:border-slate-300 text-left text-xs transition-colors cursor-pointer"
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          {completedActivityPrompt.paidBy === 'fund' ? (
+                            <>
+                              <div className="w-6 h-6 rounded-full bg-amber-100 flex items-center justify-center text-amber-700 border border-amber-300 shrink-0 font-bold">
+                                <PiggyBank className="w-3.5 h-3.5" />
+                              </div>
+                              <span className="font-bold text-amber-800 truncate">{isVi ? 'Quỹ' : 'Group Fund'}</span>
+                            </>
+                          ) : (() => {
+                            const selectedMember = trip.members.find((m) => m.id === completedActivityPrompt.paidBy) || trip.members[0];
+                            if (!selectedMember) return <span className="text-slate-400">{isVi ? 'Chọn người chi...' : 'Select member...'}</span>;
+                            return (
+                              <>
+                                <img
+                                  src={selectedMember.avatar}
+                                  alt={selectedMember.name}
+                                  className="w-6 h-6 rounded-full object-cover border border-slate-200 shrink-0"
+                                />
+                                <span className="font-semibold text-slate-800 truncate">{selectedMember.name}</span>
+                              </>
+                            );
+                          })()}
+                        </div>
+                        <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${isPaidByDropdownOpen ? 'rotate-180' : ''}`} />
+                      </button>
+
+                      {/* Dropdown Menu */}
+                      {isPaidByDropdownOpen && (
+                        <div className="absolute top-full left-0 right-0 mt-1 bg-white rounded-xl border border-slate-200 shadow-xl z-30 p-2 space-y-2 animate-in fade-in-50 duration-100">
+                          {/* Search Input */}
+                          <div className="relative">
+                            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                            <input
+                              type="text"
+                              autoFocus
+                              value={paidBySearch}
+                              onChange={(e) => setPaidBySearch(e.target.value)}
+                              placeholder={isVi ? 'Tìm tên người chi...' : 'Search payer...'}
+                              className="w-full text-xs pl-8 pr-2.5 py-1.5 rounded-lg border border-slate-200 focus:outline-hidden focus:border-teal-500"
+                            />
+                          </div>
+
+                          {/* Member Options with Checkboxes */}
+                          <div className="max-h-44 overflow-y-auto space-y-1">
+                            {/* Tùy chọn Quỹ */}
+                            {('quỹ'.includes(paidBySearch.toLowerCase()) || 'quy'.includes(paidBySearch.toLowerCase()) || 'fund'.includes(paidBySearch.toLowerCase()) || !paidBySearch) && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCompletedActivityPrompt({
+                                    ...completedActivityPrompt,
+                                    paidBy: 'fund',
+                                  });
+                                  setIsPaidByDropdownOpen(false);
+                                  setPaidBySearch('');
+                                }}
+                                className={`w-full flex items-center justify-between p-2 rounded-lg text-left transition-colors cursor-pointer ${
+                                  completedActivityPrompt.paidBy === 'fund' ? 'bg-amber-50 text-amber-950 font-bold border border-amber-200' : 'hover:bg-slate-50 text-slate-700'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <div className="w-6 h-6 rounded-full bg-amber-100 flex items-center justify-center text-amber-700 border border-amber-300 shrink-0">
+                                    <PiggyBank className="w-3.5 h-3.5" />
+                                  </div>
+                                  <span className="text-xs truncate font-semibold">{isVi ? 'Quỹ' : 'Group Fund'}</span>
+                                </div>
+                                <div className="shrink-0 ml-2">
+                                  {completedActivityPrompt.paidBy === 'fund' ? (
+                                    <CheckCircle2 className="w-4 h-4 text-amber-600" />
+                                  ) : (
+                                    <Circle className="w-4 h-4 text-slate-300" />
+                                  )}
+                                </div>
+                              </button>
+                            )}
+
+                            {trip.members
+                              .filter((m) => m.name.toLowerCase().includes(paidBySearch.toLowerCase()))
+                              .map((member) => {
+                                const isSelected = completedActivityPrompt.paidBy === member.id;
+                                return (
+                                  <button
+                                    key={member.id}
+                                    type="button"
+                                    onClick={() => {
+                                      setCompletedActivityPrompt({
+                                        ...completedActivityPrompt,
+                                        paidBy: member.id,
+                                      });
+                                      setIsPaidByDropdownOpen(false);
+                                      setPaidBySearch('');
+                                    }}
+                                    className={`w-full flex items-center justify-between p-2 rounded-lg text-left transition-colors cursor-pointer ${
+                                      isSelected ? 'bg-teal-50 text-teal-900 font-bold' : 'hover:bg-slate-50 text-slate-700'
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <img
+                                        src={member.avatar}
+                                        alt={member.name}
+                                        className="w-6 h-6 rounded-full object-cover border border-slate-200 shrink-0"
+                                      />
+                                      <span className="text-xs truncate">{member.name}</span>
+                                    </div>
+                                    <div className="shrink-0 ml-2">
+                                      {isSelected ? (
+                                        <CheckCircle2 className="w-4 h-4 text-teal-600" />
+                                      ) : (
+                                        <Circle className="w-4 h-4 text-slate-300" />
+                                      )}
+                                    </div>
+                                  </button>
+                                );
+                              })}
+                            {trip.members.filter((m) => m.name.toLowerCase().includes(paidBySearch.toLowerCase())).length === 0 && (
+                              <p className="text-xs text-center text-slate-400 py-2">
+                                {isVi ? 'Không tìm thấy người này' : 'No member found'}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Người tham gia - Hiển thị chia đều, nhập số tiền từng thành viên, ẩn/hiện bằng mũi nhọn, tích lên đầu */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label 
+                          onClick={() => setIsCompletedParticipantsExpanded(!isCompletedParticipantsExpanded)}
+                          className="text-xs font-bold text-slate-800 flex items-center gap-1.5 cursor-pointer select-none"
+                        >
+                          <Users className="w-3.5 h-3.5 text-teal-600" />
+                          <span>{isVi ? 'Người tham gia' : 'Participants'}</span>
+                          <span className="text-[11px] font-semibold text-teal-700 bg-teal-100/70 px-1.5 py-0.5 rounded-full">
+                            {completedActivityPrompt.splitWith.length}/{trip.members.length} {isVi ? 'người' : 'members'}
+                          </span>
+                        </label>
+
+                        <div className="flex items-center gap-1.5">
+                          {/* Nút Chọn tất cả / Bỏ chọn */}
+                          {isCompletedParticipantsExpanded && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const allIds = trip.members.map((m) => m.id);
+                                const isAll = completedActivityPrompt.splitWith.length === allIds.length;
+                                const fallbackPayer = completedActivityPrompt.paidBy && completedActivityPrompt.paidBy !== 'fund' ? completedActivityPrompt.paidBy : allIds[0];
+                                const nextSplitWith = isAll ? [fallbackPayer] : allIds;
+                                const num = parseFloat(completedActivityPrompt.amount) || 0;
+                                const nextSplits = calculateEvenSplits(num, nextSplitWith);
+                                setCompletedActivityPrompt({
+                                  ...completedActivityPrompt,
+                                  splitWith: nextSplitWith,
+                                  memberSplits: nextSplits,
+                                });
+                              }}
+                              className="text-[11px] text-teal-700 hover:text-teal-900 font-semibold px-2 py-0.5 rounded-md hover:bg-teal-100/60 cursor-pointer transition-colors"
+                            >
+                              {completedActivityPrompt.splitWith.length === trip.members.length
+                                ? (isVi ? 'Bỏ chọn' : 'Deselect all')
+                                : (isVi ? 'Chọn tất cả' : 'Select all')}
+                            </button>
+                          )}
+
+                          {/* Ẩn / hiện chỉ bằng icon mũi nhọn xuống / mũi nhọn lên */}
+                          <button
+                            type="button"
+                            onClick={() => setIsCompletedParticipantsExpanded(!isCompletedParticipantsExpanded)}
+                            className="p-1 rounded-lg text-teal-800 hover:bg-teal-100/80 cursor-pointer transition-colors border border-teal-300/80 bg-white shadow-2xs flex items-center justify-center"
+                            title={isCompletedParticipantsExpanded ? (isVi ? 'Thu gọn' : 'Collapse') : (isVi ? 'Mở rộng' : 'Expand')}
+                            aria-label={isCompletedParticipantsExpanded ? 'Collapse' : 'Expand'}
+                          >
+                            {isCompletedParticipantsExpanded ? (
+                              <ChevronUp className="w-4 h-4 text-teal-700" />
+                            ) : (
+                              <ChevronDown className="w-4 h-4 text-teal-700" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      {!isCompletedParticipantsExpanded ? (
+                        /* Khi Thu gọn: Hiển thị avatar stack các thành viên tham gia */
+                        <div
+                          onClick={() => setIsCompletedParticipantsExpanded(true)}
+                          className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between cursor-pointer hover:bg-slate-100/70 transition-colors shadow-2xs group"
+                        >
+                          <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0">
+                            <div className="flex -space-x-1.5 overflow-hidden shrink-0">
+                              {completedActivityPrompt.splitWith.slice(0, 6).map((id) => {
+                                const m = trip.members.find((mb) => mb.id === id);
+                                if (!m) return null;
+                                return (
+                                  <img
+                                    key={id}
+                                    src={m.avatar}
+                                    alt={m.name}
+                                    title={m.name}
+                                    className="w-5 h-5 rounded-full object-cover border-2 border-white ring-1 ring-teal-300"
+                                  />
+                                );
+                              })}
+                            </div>
+                            <span className="text-xs text-slate-700 font-medium truncate">
+                              {completedActivityPrompt.splitWith.length === trip.members.length
+                                ? (isVi ? 'Tất cả thành viên đang tham gia' : 'All members participating')
+                                : `${completedActivityPrompt.splitWith.length} ${isVi ? 'thành viên tham gia' : 'members participating'}`}
+                            </span>
+                          </div>
+                          <ChevronDown className="w-4 h-4 text-teal-700 shrink-0 ml-2 group-hover:translate-y-0.5 transition-transform" />
+                        </div>
+                      ) : (
+                        /* Khi Mở rộng */
+                        <div className="space-y-2">
+                          {trip.members.length > 3 && (
+                            <div className="flex items-center gap-2">
+                              <div className="relative flex-1">
+                                <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                                <input
+                                  type="text"
+                                  placeholder={isVi ? 'Tìm người tham gia...' : 'Search participants...'}
+                                  value={splitWithSearch}
+                                  onChange={(e) => setSplitWithSearch(e.target.value)}
+                                  className="w-full pl-8 pr-3 py-1.5 text-xs bg-white rounded-xl border border-slate-200 focus:outline-hidden focus:ring-2 focus:ring-teal-500"
+                                />
+                              </div>
+                              <div className="flex items-center gap-1 bg-white p-0.5 rounded-lg border border-slate-200 shrink-0 text-[10px] font-semibold">
+                                <button
+                                  type="button"
+                                  onClick={() => setCompletedParticipantsFilter('all')}
+                                  className={`px-2 py-1 rounded cursor-pointer transition-colors ${
+                                    completedParticipantsFilter === 'all'
+                                      ? 'bg-teal-600 text-white font-bold'
+                                      : 'text-slate-600 hover:text-slate-900'
+                                  }`}
+                                >
+                                  {isVi ? 'Tất cả' : 'All'} ({trip.members.length})
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setCompletedParticipantsFilter('selected')}
+                                  className={`px-2 py-1 rounded cursor-pointer transition-colors ${
+                                    completedParticipantsFilter === 'selected'
+                                      ? 'bg-teal-600 text-white font-bold'
+                                      : 'text-slate-600 hover:text-slate-900'
+                                  }`}
+                                >
+                                  {isVi ? 'Đã chọn' : 'Selected'} ({completedActivityPrompt.splitWith.length})
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Danh sách thành viên - Sắp xếp người có tích tham gia lên đầu & cho phép nhập số tiền */}
+                          <div className="max-h-48 overflow-y-auto space-y-1.5 p-2 bg-slate-50/80 rounded-xl border border-slate-200 overscroll-contain">
+                            {trip.members
+                              .filter((m) => {
+                                const matchSearch = m.name.toLowerCase().includes(splitWithSearch.toLowerCase());
+                                if (!matchSearch) return false;
+                                if (completedParticipantsFilter === 'selected') {
+                                  return completedActivityPrompt.splitWith.includes(m.id);
+                                }
+                                return true;
+                              })
+                              .sort((a, b) => {
+                                const aSelected = completedActivityPrompt.splitWith.includes(a.id) ? 1 : 0;
+                                const bSelected = completedActivityPrompt.splitWith.includes(b.id) ? 1 : 0;
+                                return bSelected - aSelected;
+                              })
+                              .map((member) => {
+                                const isSelected = completedActivityPrompt.splitWith.includes(member.id);
+                                return (
+                                  <div
+                                    key={member.id}
+                                    onClick={() => {
+                                      const current = completedActivityPrompt.splitWith;
+                                      const next = isSelected
+                                        ? current.filter((id) => id !== member.id)
+                                        : [...current, member.id];
+                                      const finalSplit = next.length > 0 ? next : [member.id];
+                                      const num = parseFloat(completedActivityPrompt.amount) || 0;
+                                      const nextSplits = calculateEvenSplits(num, finalSplit);
+                                      setCompletedActivityPrompt({
+                                        ...completedActivityPrompt,
+                                        splitWith: finalSplit,
+                                        memberSplits: nextSplits,
+                                      });
+                                    }}
+                                    className={`w-full flex items-center justify-between p-2 rounded-lg transition-colors cursor-pointer ${
+                                      isSelected
+                                        ? 'bg-teal-50/90 text-teal-950 font-semibold border border-teal-300'
+                                        : 'hover:bg-slate-100 text-slate-700 border border-transparent'
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                                      <div className="shrink-0">
+                                        {isSelected ? (
+                                          <CheckCircle2 className="w-4 h-4 text-teal-600" />
+                                        ) : (
+                                          <Circle className="w-4 h-4 text-slate-300" />
+                                        )}
+                                      </div>
+                                      <img
+                                        src={member.avatar}
+                                        alt={member.name}
+                                        className="w-6 h-6 rounded-full object-cover border border-slate-200 shrink-0"
+                                      />
+                                      <span className="text-xs truncate">{member.name}</span>
+                                    </div>
+
+                                    {/* Nhập số tiền của từng thành viên tham gia */}
+                                    {isSelected && (
+                                      <div 
+                                        className="shrink-0 ml-2"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          step="any"
+                                          value={completedActivityPrompt.memberSplits?.[member.id] ?? ''}
+                                          onChange={(e) => {
+                                            e.stopPropagation();
+                                            const val = e.target.value;
+                                            setCompletedActivityPrompt({
+                                              ...completedActivityPrompt,
+                                              memberSplits: {
+                                                ...(completedActivityPrompt.memberSplits || {}),
+                                                [member.id]: val,
+                                              },
+                                            });
+                                          }}
+                                          placeholder="0"
+                                          className="w-24 text-right text-xs font-bold px-2 py-1 bg-white border border-teal-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-teal-500 text-slate-800"
+                                        />
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                          </div>
+
+                          {/* Thanh đối chiếu: Tổng chi phí từng thành viên bằng chi phí */}
+                          {(() => {
+                            const memberSplitsTotal = completedActivityPrompt.splitWith.reduce((acc, mId) => {
+                              const val = parseFloat(completedActivityPrompt.memberSplits?.[mId] || '0');
+                              return acc + (isNaN(val) ? 0 : val);
+                            }, 0);
+                            const totalCostNum = parseFloat(completedActivityPrompt.amount) || 0;
+                            const diff = Math.round((memberSplitsTotal - totalCostNum) * 100) / 100;
+                            const isBalanced = Math.abs(diff) < 0.01;
+
+                            return (
+                              <div className={`p-3 rounded-xl border transition-colors text-xs ${
+                                isBalanced
+                                  ? 'bg-teal-50/80 border-teal-200 text-teal-900'
+                                  : 'bg-amber-50/80 border-amber-200 text-amber-900'
+                              }`}>
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-1.5 font-bold">
+                                    {isBalanced ? (
+                                      <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
+                                    ) : (
+                                      <span className="w-2.5 h-2.5 rounded-full bg-amber-500 shrink-0" />
+                                    )}
+                                    <span className="text-slate-600 font-semibold">{isVi ? 'Tổng:' : 'Total:'}</span>
+                                    <span className="font-extrabold text-slate-900">{formatMoney(memberSplitsTotal, trip.currency, lang)}</span>
+                                  </div>
+                                </div>
+
+                                {/* Dư / thiếu số tiền xuống hàng dưới tổng */}
+                                {!isBalanced && (
+                                  <div className="mt-1 pl-4 text-xs font-semibold text-amber-700">
+                                    {diff > 0 
+                                      ? (isVi ? `Dư: +${formatMoney(diff, trip.currency, lang)}` : `Over: +${formatMoney(diff, trip.currency, lang)}`) 
+                                      : (isVi ? `Thiếu: -${formatMoney(Math.abs(diff), trip.currency, lang)}` : `Short: -${formatMoney(Math.abs(diff), trip.currency, lang)}`)}
+                                  </div>
+                                )}
+
+                                {!isBalanced && (
+                                  <div className="grid grid-cols-2 gap-2 mt-2.5 pt-2.5 border-t border-amber-200/70">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setCompletedActivityPrompt({
+                                          ...completedActivityPrompt,
+                                          amount: String(memberSplitsTotal),
+                                        });
+                                      }}
+                                      className="flex items-center justify-center gap-1.5 py-1.5 px-2 bg-amber-600 hover:bg-amber-700 active:scale-[0.98] text-white rounded-lg font-bold text-xs transition-all cursor-pointer shadow-2xs text-center"
+                                    >
+                                      <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                                      <span className="truncate">{isVi ? 'Cập nhật' : 'Update'}</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const splits = calculateEvenSplits(totalCostNum, completedActivityPrompt.splitWith);
+                                        setCompletedActivityPrompt({
+                                          ...completedActivityPrompt,
+                                          memberSplits: splits,
+                                        });
+                                      }}
+                                      className="flex items-center justify-center gap-1.5 py-1.5 px-2 bg-white hover:bg-slate-100 active:scale-[0.98] text-slate-700 border border-slate-300 rounded-lg font-bold text-xs transition-all cursor-pointer shadow-2xs text-center"
+                                    >
+                                      <RotateCcw className="w-3.5 h-3.5 shrink-0 text-slate-500" />
+                                      <span className="truncate">{isVi ? 'Chia đều lại' : 'Split equally'}</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
 
-            </div>
-
+              {/* Action Buttons (Fixed Footer) */}
+              <div className="flex items-center justify-end gap-2 p-4 bg-slate-50/80 border-t border-slate-100 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setCompletedActivityPrompt(null)}
+                  className="px-4 py-2 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 font-semibold text-xs rounded-xl transition-colors cursor-pointer shadow-2xs"
+                >
+                  {isVi ? 'Đóng' : 'Close'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveCompletedActivityPrompt}
+                  className="px-5 py-2 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{isVi ? 'Lưu' : 'Save'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
 
       {/* 6. Activity Edit Modal */}
       {editingActivity && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 overflow-y-auto">
-          <div className="bg-white w-full max-w-lg rounded-2xl sm:rounded-3xl border border-slate-200 shadow-2xl overflow-hidden my-auto animate-in fade-in zoom-in-95 duration-150">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white w-full max-w-lg max-h-[92vh] flex flex-col rounded-2xl sm:rounded-3xl border border-slate-200 shadow-2xl overflow-hidden my-auto animate-in fade-in zoom-in-95 duration-150">
             
-            <div className="px-5 py-3.5 bg-blue-700 text-white flex items-center justify-between">
+            <div className="px-5 py-3.5 bg-blue-700 text-white flex items-center justify-between shrink-0">
               <h3 className="font-display font-bold text-sm sm:text-base flex items-center gap-1.5">
                 <Edit3 className="w-4 h-4" />
                 <span>{isVi ? 'Chỉnh Sửa Hoạt Động' : 'Edit Activity'}</span>
               </h3>
               <button
+                type="button"
                 onClick={() => setEditingActivity(null)}
                 className="p-1.5 rounded-xl hover:bg-white/10 text-white transition-colors cursor-pointer"
               >
@@ -1388,7 +2325,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleSaveEdit} className="p-4 sm:p-6 space-y-3.5">
+            <form onSubmit={handleSaveEdit} className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3.5">
               
               {/* Day selection */}
               <div>
@@ -1427,7 +2364,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               {/* Location */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  {isVi ? 'Địa điểm / Địa chỉ *' : 'Location / Address *'}
+                  {isVi ? 'Địa điểm *' : 'Location *'}
                 </label>
                 <input
                   type="text"
@@ -1462,26 +2399,33 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                     onChange={(e) => setEditCategory(e.target.value as CategoryType)}
                     className="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
                   >
-                    <option value="food">{t('cat.food')}</option>
-                    <option value="sightseeing">{t('cat.sightseeing')}</option>
-                    <option value="activity">{t('cat.activity')}</option>
-                    <option value="transport">{t('cat.transport')}</option>
-                    <option value="stay">{t('cat.stay')}</option>
-                    <option value="shopping">{t('cat.shopping')}</option>
-                    <option value="other">{t('cat.other')}</option>
+                    {categoriesList.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.icon ? `${c.icon} ` : ''}{isVi ? c.nameVi : c.nameEn}
+                      </option>
+                    ))}
                   </select>
                 </div>
 
-                {/* Estimated Cost */}
+                {/* Unified Cost (Chi phí) */}
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    {isVi ? 'Chi phí dự kiến' : 'Estimated Cost'}
+                    {isVi ? 'Chi phí' : 'Cost'} ({editingActivity.activity.currency || trip.currency || 'VND'})
                   </label>
                   <input
                     type="number"
+                    min="0"
+                    step="any"
                     value={editEstimatedCost}
-                    onChange={(e) => setEditEstimatedCost(e.target.value)}
-                    className="w-full text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                    onChange={(e) => {
+                      setEditEstimatedCost(e.target.value);
+                      setEditActualCost(e.target.value);
+                      const num = parseFloat(e.target.value) || 0;
+                      // Mặc định chia đều cho các thành viên được tích tham gia
+                      setEditMemberSplits(calculateEvenSplits(num, editSplitWith));
+                    }}
+                    placeholder="0"
+                    className="w-full text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 focus:outline-hidden font-semibold text-slate-800"
                   />
                 </div>
               </div>
@@ -1489,7 +2433,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               {/* Notes */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  {isVi ? 'Ghi chú & Lưu ý' : 'Notes'}
+                  {isVi ? 'Lưu ý' : 'Notes'}
                 </label>
                 <textarea
                   rows={2}
@@ -1499,21 +2443,461 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                 />
               </div>
 
+              {/* Merged Expense Management Section */}
+              {editingActivity.activity.isCompleted && (
+                <div className="pt-2 border-t border-slate-100">
+                  <div className="bg-emerald-50/70 border border-emerald-200/80 rounded-2xl p-4 space-y-3.5">
+                    <div className="flex items-center justify-between gap-2 pb-2 border-b border-emerald-200/60">
+                      <div className="flex items-center gap-2">
+                        <div className="w-6 h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                          <CreditCard className="w-3.5 h-3.5" />
+                        </div>
+                        <span className="text-xs font-bold text-emerald-950">
+                          {isVi ? 'Ghi nhận chi tiêu' : 'Record expense'}
+                        </span>
+                      </div>
+
+                      <label className="flex items-center gap-1.5 cursor-pointer text-xs font-bold text-emerald-900 select-none shrink-0">
+                        <input
+                          type="checkbox"
+                          checked={editRecordExpense}
+                          onChange={(e) => setEditRecordExpense(e.target.checked)}
+                          className="w-4 h-4 rounded-md border-emerald-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+                        />
+                        <span>{editRecordExpense ? (isVi ? 'Đang bật' : 'On') : (isVi ? 'Tắt' : 'Off')}</span>
+                      </label>
+                    </div>
+
+                    {editRecordExpense && (
+                      <div className="space-y-3.5">
+                        {/* Paid By Droplist */}
+                        <div ref={editPaidByRef} className="relative">
+                          <label className="block text-xs font-bold text-emerald-900 mb-1">
+                            {isVi ? 'Người chi tiền' : 'Payer'}
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsEditPaidByDropdownOpen(!isEditPaidByDropdownOpen);
+                            }}
+                            className="w-full flex items-center justify-between p-2.5 bg-white rounded-xl border border-emerald-300/80 hover:border-emerald-400 text-left text-xs transition-colors cursor-pointer shadow-2xs"
+                          >
+                            <div className="flex items-center gap-2 min-w-0 flex-1">
+                              {editPaidBy === 'fund' ? (
+                                <>
+                                  <div className="w-6 h-6 rounded-full bg-amber-100 flex items-center justify-center text-amber-700 border border-amber-300 shrink-0 font-bold">
+                                    <PiggyBank className="w-3.5 h-3.5" />
+                                  </div>
+                                  <span className="font-bold text-amber-800 truncate">{isVi ? 'Quỹ' : 'Group Fund'}</span>
+                                </>
+                              ) : (() => {
+                                const selectedMember = trip.members.find((m) => m.id === editPaidBy) || trip.members[0];
+                                if (!selectedMember) return <span className="text-slate-400">{isVi ? 'Chọn người chi...' : 'Select member...'}</span>;
+                                return (
+                                  <>
+                                    <img
+                                      src={selectedMember.avatar}
+                                      alt={selectedMember.name}
+                                      className="w-6 h-6 rounded-full object-cover border border-slate-200 shrink-0"
+                                    />
+                                    <span className="font-semibold text-slate-800 truncate">{selectedMember.name}</span>
+                                  </>
+                                );
+                              })()}
+                            </div>
+                            <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${isEditPaidByDropdownOpen ? 'rotate-180' : ''}`} />
+                          </button>
+
+                          {isEditPaidByDropdownOpen && (
+                            <div className="absolute left-0 right-0 top-full mt-1 bg-white rounded-xl border border-slate-200 shadow-xl p-2 z-50 animate-in fade-in zoom-in-95 duration-100">
+                              <div className="relative mb-2">
+                                <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                                <input
+                                  type="text"
+                                  placeholder={isVi ? 'Tìm thành viên...' : 'Search member...'}
+                                  value={editPaidBySearch}
+                                  onChange={(e) => setEditPaidBySearch(e.target.value)}
+                                  className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 rounded-lg border border-slate-200 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
+                                  autoFocus
+                                />
+                              </div>
+                              <div className="max-h-40 overflow-y-auto space-y-1">
+                                {/* Tùy chọn Quỹ */}
+                                {('quỹ'.includes(editPaidBySearch.toLowerCase()) || 'quy'.includes(editPaidBySearch.toLowerCase()) || 'fund'.includes(editPaidBySearch.toLowerCase()) || !editPaidBySearch) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditPaidBy('fund');
+                                      setIsEditPaidByDropdownOpen(false);
+                                      setEditPaidBySearch('');
+                                    }}
+                                    className={`w-full flex items-center justify-between p-2 rounded-lg text-left transition-colors cursor-pointer ${
+                                      editPaidBy === 'fund' ? 'bg-amber-50 text-amber-950 font-bold border border-amber-200' : 'hover:bg-slate-50 text-slate-700'
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <div className="w-6 h-6 rounded-full bg-amber-100 flex items-center justify-center text-amber-700 border border-amber-300 shrink-0">
+                                        <PiggyBank className="w-3.5 h-3.5" />
+                                      </div>
+                                      <span className="text-xs truncate font-semibold">{isVi ? 'Quỹ' : 'Group Fund'}</span>
+                                    </div>
+                                    <div className="shrink-0 ml-2">
+                                      {editPaidBy === 'fund' && <CheckCircle2 className="w-4 h-4 text-amber-600 shrink-0" />}
+                                    </div>
+                                  </button>
+                                )}
+
+                                {trip.members
+                                  .filter((m) => m.name.toLowerCase().includes(editPaidBySearch.toLowerCase()))
+                                  .map((member) => (
+                                    <button
+                                      key={member.id}
+                                      type="button"
+                                      onClick={() => {
+                                        setEditPaidBy(member.id);
+                                        setIsEditPaidByDropdownOpen(false);
+                                      }}
+                                      className={`w-full flex items-center justify-between p-2 rounded-lg text-left transition-colors cursor-pointer ${
+                                        editPaidBy === member.id ? 'bg-emerald-50 text-emerald-900 font-bold' : 'hover:bg-slate-50 text-slate-700'
+                                      }`}
+                                    >
+                                      <div className="flex items-center gap-2 min-w-0">
+                                        <img
+                                          src={member.avatar}
+                                          alt={member.name}
+                                          className="w-6 h-6 rounded-full object-cover border border-slate-200 shrink-0"
+                                        />
+                                        <span className="text-xs truncate">{member.name}</span>
+                                      </div>
+                                      {editPaidBy === member.id && <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />}
+                                    </button>
+                                  ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Người tham gia - Khung người tham gia có icon ẩn / hiện mũi nhọn lên / xuống & sắp xếp tích lên đầu */}
+                        <div>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <label 
+                              onClick={() => setIsEditParticipantsExpanded(!isEditParticipantsExpanded)}
+                              className="text-xs font-bold text-emerald-900 flex items-center gap-1.5 cursor-pointer select-none"
+                            >
+                              <Users className="w-3.5 h-3.5 text-emerald-600" />
+                              <span>{isVi ? 'Người tham gia' : 'Participants'}</span>
+                              <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-100/70 px-1.5 py-0.5 rounded-full">
+                                {editSplitWith.length}/{trip.members.length} {isVi ? 'người' : 'members'}
+                              </span>
+                            </label>
+
+                            <div className="flex items-center gap-1.5">
+                              {/* Nút Chọn tất cả / Bỏ chọn */}
+                              {isEditParticipantsExpanded && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const allIds = trip.members.map((m) => m.id);
+                                    const isAll = editSplitWith.length === allIds.length;
+                                    const fallbackPayer = editPaidBy && editPaidBy !== 'fund' ? editPaidBy : allIds[0];
+                                    const nextSplitWith = isAll ? [fallbackPayer] : allIds;
+                                    const num = parseFloat(editEstimatedCost) || 0;
+                                    setEditSplitWith(nextSplitWith);
+                                    setEditMemberSplits(calculateEvenSplits(num, nextSplitWith));
+                                  }}
+                                  className="text-[11px] text-emerald-700 hover:text-emerald-800 font-semibold px-2 py-0.5 rounded-md hover:bg-emerald-100/60 cursor-pointer transition-colors"
+                                >
+                                  {editSplitWith.length === trip.members.length
+                                    ? (isVi ? 'Bỏ chọn' : 'Deselect all')
+                                    : (isVi ? 'Chọn tất cả' : 'Select all')}
+                                </button>
+                              )}
+
+                              {/* Ẩn / hiện chỉ bằng icon mũi nhọn xuống / mũi nhọn lên */}
+                              <button
+                                type="button"
+                                onClick={() => setIsEditParticipantsExpanded(!isEditParticipantsExpanded)}
+                                className="p-1 rounded-lg text-emerald-800 hover:bg-emerald-100/80 cursor-pointer transition-colors border border-emerald-300/80 bg-white shadow-2xs flex items-center justify-center"
+                                title={isEditParticipantsExpanded ? (isVi ? 'Thu gọn' : 'Collapse') : (isVi ? 'Mở rộng' : 'Expand')}
+                                aria-label={isEditParticipantsExpanded ? 'Collapse' : 'Expand'}
+                              >
+                                {isEditParticipantsExpanded ? (
+                                  <ChevronUp className="w-4 h-4 text-emerald-700" />
+                                ) : (
+                                  <ChevronDown className="w-4 h-4 text-emerald-700" />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+
+                          {!isEditParticipantsExpanded ? (
+                            /* Khi Ẩn: Thu gọn với danh sách avatar và icon mũi nhọn xuống */
+                            <div
+                              onClick={() => setIsEditParticipantsExpanded(true)}
+                              className="p-2.5 bg-white rounded-xl border border-emerald-300/80 flex items-center justify-between cursor-pointer hover:bg-emerald-50/50 transition-colors shadow-2xs group"
+                            >
+                              <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0">
+                                <div className="flex -space-x-1.5 overflow-hidden shrink-0">
+                                  {editSplitWith.slice(0, 6).map((id) => {
+                                    const m = trip.members.find((mb) => mb.id === id);
+                                    if (!m) return null;
+                                    return (
+                                      <img
+                                        key={id}
+                                        src={m.avatar}
+                                        alt={m.name}
+                                        title={m.name}
+                                        className="w-5 h-5 rounded-full object-cover border-2 border-white ring-1 ring-emerald-300"
+                                      />
+                                    );
+                                  })}
+                                </div>
+                                <span className="text-xs text-slate-700 font-medium truncate">
+                                  {editSplitWith.length === trip.members.length
+                                    ? (isVi ? 'Tất cả thành viên đang tham gia' : 'All members participating')
+                                    : `${editSplitWith.length} ${isVi ? 'thành viên tham gia' : 'members participating'}`}
+                                </span>
+                              </div>
+                              <ChevronDown className="w-4 h-4 text-emerald-700 shrink-0 ml-2 group-hover:translate-y-0.5 transition-transform" />
+                            </div>
+                          ) : (
+                            /* Khi Hiện tất cả */
+                            <div className="space-y-2">
+                              {/* Search & Filter if members > 3 */}
+                              {trip.members.length > 3 && (
+                                <div className="flex items-center gap-2">
+                                  <div className="relative flex-1">
+                                    <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                                    <input
+                                      type="text"
+                                      placeholder={isVi ? 'Tìm người tham gia...' : 'Search participants...'}
+                                      value={editSplitWithSearch}
+                                      onChange={(e) => setEditSplitWithSearch(e.target.value)}
+                                      className="w-full pl-8 pr-3 py-1.5 text-xs bg-white rounded-xl border border-emerald-300/80 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+                                    />
+                                  </div>
+                                  <div className="flex items-center gap-1 bg-white p-0.5 rounded-lg border border-emerald-200/70 shrink-0 text-[10px] font-semibold">
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditParticipantsFilter('all')}
+                                      className={`px-2 py-1 rounded cursor-pointer transition-colors ${
+                                        editParticipantsFilter === 'all'
+                                          ? 'bg-emerald-600 text-white font-bold'
+                                          : 'text-slate-600 hover:text-slate-900'
+                                      }`}
+                                    >
+                                      {isVi ? 'Tất cả' : 'All'} ({trip.members.length})
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditParticipantsFilter('selected')}
+                                      className={`px-2 py-1 rounded cursor-pointer transition-colors ${
+                                        editParticipantsFilter === 'selected'
+                                          ? 'bg-emerald-600 text-white font-bold'
+                                          : 'text-slate-600 hover:text-slate-900'
+                                      }`}
+                                    >
+                                      {isVi ? 'Đã chọn' : 'Selected'} ({editSplitWith.length})
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Khung người tham gia - Sắp xếp người có tích tham gia lên đầu & cho phép nhập số tiền */}
+                              <div className="max-h-48 overflow-y-auto space-y-1.5 p-2 bg-white rounded-xl border border-emerald-300/80 shadow-2xs overscroll-contain">
+                                {trip.members
+                                  .filter((m) => {
+                                    const matchSearch = m.name.toLowerCase().includes(editSplitWithSearch.toLowerCase());
+                                    if (!matchSearch) return false;
+                                    if (editParticipantsFilter === 'selected') {
+                                      return editSplitWith.includes(m.id);
+                                    }
+                                    return true;
+                                  })
+                                  .sort((a, b) => {
+                                    const aSelected = editSplitWith.includes(a.id) ? 1 : 0;
+                                    const bSelected = editSplitWith.includes(b.id) ? 1 : 0;
+                                    // Sắp xếp người có tích tham gia lên đầu
+                                    if (aSelected !== bSelected) {
+                                      return bSelected - aSelected;
+                                    }
+                                    return 0;
+                                  })
+                                  .map((member) => {
+                                    const isSelected = editSplitWith.includes(member.id);
+                                    return (
+                                      <div
+                                        key={member.id}
+                                        onClick={() => {
+                                          const current = editSplitWith;
+                                          const next = isSelected
+                                            ? current.filter((id) => id !== member.id)
+                                            : [...current, member.id];
+                                          const finalSplit = next.length > 0 ? next : [member.id];
+                                          const num = parseFloat(editEstimatedCost) || 0;
+                                          setEditSplitWith(finalSplit);
+                                          setEditMemberSplits(calculateEvenSplits(num, finalSplit));
+                                        }}
+                                        className={`w-full flex items-center justify-between p-2 rounded-lg transition-colors cursor-pointer ${
+                                          isSelected
+                                            ? 'bg-emerald-50/90 text-emerald-950 font-semibold border border-emerald-300'
+                                            : 'hover:bg-slate-50 text-slate-700 border border-transparent'
+                                        }`}
+                                      >
+                                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                                          <div className="shrink-0">
+                                            {isSelected ? (
+                                              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                                            ) : (
+                                              <Circle className="w-4 h-4 text-slate-300" />
+                                            )}
+                                          </div>
+                                          <img
+                                            src={member.avatar}
+                                            alt={member.name}
+                                            className="w-6 h-6 rounded-full object-cover border border-slate-200 shrink-0"
+                                          />
+                                          <span className="text-xs truncate">{member.name}</span>
+                                        </div>
+
+                                        {/* Nhập số tiền của từng thành viên tham gia */}
+                                        {isSelected && (
+                                          <div 
+                                            className="shrink-0 ml-2"
+                                            onClick={(e) => e.stopPropagation()}
+                                          >
+                                            <input
+                                              type="number"
+                                              min="0"
+                                              step="any"
+                                              value={editMemberSplits[member.id] ?? ''}
+                                              onChange={(e) => {
+                                                e.stopPropagation();
+                                                const val = e.target.value;
+                                                setEditMemberSplits((prev) => ({
+                                                  ...prev,
+                                                  [member.id]: val,
+                                                }));
+                                              }}
+                                              placeholder="0"
+                                              className="w-24 text-right text-xs font-bold px-2 py-1 bg-white border border-emerald-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-emerald-500 text-slate-800"
+                                            />
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                {trip.members.filter((m) => m.name.toLowerCase().includes(editSplitWithSearch.toLowerCase())).length === 0 && (
+                                  <p className="text-xs text-center text-slate-400 py-2">
+                                    {isVi ? 'Không tìm thấy người này' : 'No participant found'}
+                                  </p>
+                                )}
+                              </div>
+
+                              {/* Thanh đối chiếu: Tổng chi phí từng thành viên bằng chi phí */}
+                              {(() => {
+                                const memberSplitsTotal = editSplitWith.reduce((acc, mId) => {
+                                  const val = parseFloat(editMemberSplits[mId] || '0');
+                                  return acc + (isNaN(val) ? 0 : val);
+                                }, 0);
+                                const totalCostNum = parseFloat(editEstimatedCost) || 0;
+                                const diff = Math.round((memberSplitsTotal - totalCostNum) * 100) / 100;
+                                const isBalanced = Math.abs(diff) < 0.01;
+
+                                return (
+                                  <div className={`p-3 rounded-xl border transition-colors text-xs ${
+                                    isBalanced
+                                      ? 'bg-emerald-50/80 border-emerald-200 text-emerald-900'
+                                      : 'bg-amber-50/80 border-amber-200 text-amber-900'
+                                  }`}>
+                                    <div className="flex items-center justify-between">
+                                      <div className="flex items-center gap-1.5 font-bold">
+                                        {isBalanced ? (
+                                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                                        ) : (
+                                          <span className="w-2.5 h-2.5 rounded-full bg-amber-500 shrink-0" />
+                                        )}
+                                        <span className="text-slate-600 font-semibold">{isVi ? 'Tổng:' : 'Total:'}</span>
+                                        <span className="font-extrabold text-slate-900">{formatMoney(memberSplitsTotal, trip.currency, lang)}</span>
+                                      </div>
+                                    </div>
+
+                                    {/* Dư / thiếu số tiền xuống hàng dưới tổng */}
+                                    {!isBalanced && (
+                                      <div className="mt-1 pl-4 text-xs font-semibold text-amber-700">
+                                        {diff > 0 
+                                          ? (isVi ? `Dư: +${formatMoney(diff, trip.currency, lang)}` : `Over: +${formatMoney(diff, trip.currency, lang)}`) 
+                                          : (isVi ? `Thiếu: -${formatMoney(Math.abs(diff), trip.currency, lang)}` : `Short: -${formatMoney(Math.abs(diff), trip.currency, lang)}`)}
+                                      </div>
+                                    )}
+
+                                    {!isBalanced && (
+                                      <div className="grid grid-cols-2 gap-2 mt-2.5 pt-2.5 border-t border-amber-200/70">
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setEditEstimatedCost(String(memberSplitsTotal));
+                                            setEditActualCost(String(memberSplitsTotal));
+                                          }}
+                                          className="flex items-center justify-center gap-1.5 py-1.5 px-2 bg-amber-600 hover:bg-amber-700 active:scale-[0.98] text-white rounded-lg font-bold text-xs transition-all cursor-pointer shadow-2xs text-center"
+                                        >
+                                          <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                                          <span className="truncate">{isVi ? 'Cập nhật' : 'Update'}</span>
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            const splits = calculateEvenSplits(totalCostNum, editSplitWith);
+                                            setEditMemberSplits(splits);
+                                          }}
+                                          className="flex items-center justify-center gap-1.5 py-1.5 px-2 bg-white hover:bg-slate-100 active:scale-[0.98] text-slate-700 border border-slate-300 rounded-lg font-bold text-xs transition-all cursor-pointer shadow-2xs text-center"
+                                        >
+                                          <RotateCcw className="w-3.5 h-3.5 shrink-0 text-slate-500" />
+                                          <span className="truncate">{isVi ? 'Chia đều lại' : 'Split equally'}</span>
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Actions */}
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+              <div className="flex items-center justify-between gap-2 pt-3 border-t border-slate-100 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setEditingActivity(null)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
+                  onClick={() => {
+                    if (editingActivity) {
+                      setActivityToDelete({ activity: editingActivity.activity, dayNumber: editingActivity.dayNumber });
+                    }
+                  }}
+                  className="px-3.5 py-2 text-xs font-semibold text-rose-600 hover:bg-rose-50 rounded-xl transition-colors cursor-pointer flex items-center gap-1.5"
                 >
-                  {isVi ? 'Hủy' : 'Cancel'}
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{isVi ? 'Xóa' : 'Delete'}</span>
                 </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
-                >
-                  {isVi ? 'Lưu' : 'Save'}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingActivity(null)}
+                    className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
+                  >
+                    {isVi ? 'Hủy' : 'Cancel'}
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+                  >
+                    {isVi ? 'Lưu' : 'Save'}
+                  </button>
+                </div>
               </div>
 
             </form>
@@ -1521,6 +2905,68 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* 7. Modal: Xác nhận xóa hoạt động */}
+      {activityToDelete && (
+        <div className="fixed inset-0 z-60 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white w-full max-w-sm rounded-2xl border border-slate-200 shadow-2xl p-5 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-display font-bold text-slate-900 text-sm sm:text-base">
+                  {isVi ? 'Xóa hoạt động?' : 'Delete Activity?'}
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {isVi
+                    ? `Bạn có chắc muốn xóa hoạt động "${activityToDelete.activity.title}" khỏi Ngày ${activityToDelete.dayNumber}?`
+                    : `Are you sure you want to delete "${activityToDelete.activity.title}" from Day ${activityToDelete.dayNumber}?`}
+                </p>
+              </div>
+            </div>
+
+            {activityToDelete.activity.isCompleted && (
+              <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-800">
+                {isVi
+                  ? 'Hoạt động này đã hoàn thành. Khi xóa, khoản chi tiêu liên kết với hoạt động này cũng sẽ được tự động xóa khỏi tab Chi tiêu.'
+                  : 'This activity is marked as completed. Deleting it will also remove its linked expense from the Expenses tab.'}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setActivityToDelete(null)}
+                className="px-3.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer transition-colors"
+              >
+                {isVi ? 'Hủy' : 'Cancel'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onDeleteActivity(activityToDelete.dayNumber, activityToDelete.activity.id);
+                  if (editingActivity?.activity.id === activityToDelete.activity.id) {
+                    setEditingActivity(null);
+                  }
+                  setActivityToDelete(null);
+                }}
+                className="px-4 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow-xs cursor-pointer transition-colors"
+              >
+                {isVi ? 'Xác nhận' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Category Settings Modal */}
+      <CategorySettingsModal
+        isOpen={isCategoryModalOpen}
+        onClose={() => setIsCategoryModalOpen(false)}
+        categories={categoriesList}
+        onUpdateCategories={(newCats) => setCategoriesList(newCats)}
+      />
 
     </div>
   );

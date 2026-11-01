@@ -1,4 +1,13 @@
-export type CategoryType = 'sightseeing' | 'food' | 'stay' | 'transport' | 'activity' | 'shopping' | 'flight' | 'other';
+export type StandardCategoryType = 'sightseeing' | 'food' | 'stay' | 'transport' | 'activity' | 'shopping' | 'flight' | 'other';
+export type CategoryType = StandardCategoryType | string;
+
+export interface CategoryConfig {
+  id: string;
+  nameVi: string;
+  nameEn: string;
+  icon?: string;
+  color?: string;
+}
 
 export interface ActivityItem {
   id: string;
@@ -12,6 +21,13 @@ export interface ActivityItem {
   currency?: string;
   notes?: string;
   isCompleted?: boolean;
+  openTime?: string;
+  closeTime?: string;
+  actualCost?: number;
+  paidBy?: string;
+  splitWith?: string[];
+  memberSplits?: { memberId: string; amount: number }[];
+  expenseId?: string;
 }
 
 export interface ItineraryDay {
@@ -30,8 +46,10 @@ export interface Expense {
   category: CategoryType;
   paidBy: string; // member id or name
   splitWith: string[]; // member ids or names
+  memberSplits?: { memberId: string; amount: number }[];
   date: string;
   receiptNote?: string;
+  activityId?: string;
 }
 
 export interface TripMember {
@@ -39,6 +57,7 @@ export interface TripMember {
   name: string;
   avatar: string;
   email?: string;
+  contributedAmount?: number; // Số tiền đã góp vào quỹ nhóm
 }
 
 export interface PackingItem {
@@ -53,11 +72,15 @@ export interface PackingItem {
 export interface TravelDocument {
   id: string;
   title: string;
-  docType: 'Flight Ticket' | 'Hotel Voucher' | 'Insurance' | 'Passport/Visa' | 'Other';
+  docType: 'Flight Ticket' | 'Hotel Voucher' | 'Bus Ticket' | 'Insurance' | 'Passport/Visa' | 'Other';
   codeOrNumber?: string;
   notes?: string;
   urlOrFilename?: string;
   date?: string;
+  cost?: number;
+  paidBy?: string; // member id or 'fund'
+  splitWith?: string[]; // member ids
+  expenseId?: string; // linked expense id in trip.expenses
 }
 
 export interface Trip {
@@ -81,6 +104,7 @@ export interface Trip {
     condition: string;
     icon: string; // emoji or code
   };
+  fundHolderId?: string; // ID thành viên đang giữ tiền đã góp của nhóm (thủ quỹ)
 }
 
 export interface SavedPlace {
@@ -94,6 +118,8 @@ export interface SavedPlace {
   rating?: number; // 1 to 5
   notes?: string;
   source?: string; // e.g. "Bạn bè mách", "TikTok", "Facebook"
+  openTime?: string;
+  closeTime?: string;
   createdAt: string;
 }
 
