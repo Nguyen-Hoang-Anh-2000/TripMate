@@ -329,8 +329,8 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                 </div>
               </div>
 
-              {/* Action Buttons: Edit & Delete */}
-              <div className="flex flex-col sm:flex-row items-center gap-1 shrink-0">
+              {/* Action Buttons: Edit & Delete (luôn nằm ngang nhau) */}
+              <div className="flex items-center gap-1 shrink-0">
                 <button
                   type="button"
                   onClick={() => handleOpenEditModal(doc)}

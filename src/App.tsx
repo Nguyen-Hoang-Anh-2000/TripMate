@@ -524,6 +524,15 @@ function AppContent() {
     }));
   };
 
+  const handleEditPackingItem = (itemId: string, updated: Partial<PackingItem>) => {
+    updateActiveTrip((trip) => ({
+      ...trip,
+      packingList: trip.packingList.map((i) =>
+        i.id === itemId ? { ...i, ...updated } : i
+      ),
+    }));
+  };
+
   const handleDeletePackingItem = (itemId: string) => {
     updateActiveTrip((trip) => ({
       ...trip,
@@ -564,6 +573,19 @@ function AppContent() {
       }
     } catch (err) {
       console.error(err);
+      // Fallback packing suggestions tailored for destination
+      const fallbackItems: PackingItem[] = [
+        { id: `ai-p-${Date.now()}-1`, category: 'Essentials', name: isVi ? 'Căn cước / Hộ chiếu' : 'ID / Passport', quantity: 1, isPacked: false },
+        { id: `ai-p-${Date.now()}-2`, category: 'Electronics', name: isVi ? 'Sạc dự phòng & cáp sạc' : 'Power bank & charger', quantity: 1, isPacked: false },
+        { id: `ai-p-${Date.now()}-3`, category: 'Clothing', name: isVi ? 'Áo khoác chống gió / ấm' : 'Light jacket / Warm coat', quantity: 1, isPacked: false },
+        { id: `ai-p-${Date.now()}-4`, category: 'Toiletries', name: isVi ? 'Bàn chải & kem đánh răng du lịch' : 'Travel toothbrush & toothpaste', quantity: 1, isPacked: false },
+        { id: `ai-p-${Date.now()}-5`, category: 'Essentials', name: isVi ? 'Thuốc cơ bản (cảm sốt, đau bụng)' : 'Basic medicine kit', quantity: 1, isPacked: false },
+        { id: `ai-p-${Date.now()}-6`, category: 'Gear', name: isVi ? 'Ô / Dù che mưa nắng gấp gọn' : 'Compact umbrella', quantity: 1, isPacked: false },
+      ];
+      updateActiveTrip((trip) => ({
+        ...trip,
+        packingList: [...trip.packingList, ...fallbackItems],
+      }));
     } finally {
       setIsAiPackingLoading(false);
     }
@@ -723,72 +745,76 @@ function AppContent() {
     return activeTrip.days.some((d) => d.activities.some((a) => a.isCompleted));
   }, [activeTrip]);
 
-  // 6c. Update Active Trip Details (Title, dates, destination, budget, cover...)
-  const handleUpdateTrip = (updatedFields: Partial<Trip> & { rearrangeAllDays?: boolean }) => {
-    updateActiveTrip((t) => {
-      const start = updatedFields.startDate || t.startDate;
-      const end = updatedFields.endDate || t.endDate;
+  // 6c. Update Trip Details (Title, dates, destination, budget, cover...)
+  const handleUpdateTrip = (tripId: string, updatedFields: Partial<Trip> & { rearrangeAllDays?: boolean }) => {
+    setTrips((prevTrips) =>
+      prevTrips.map((t) => {
+        if (t.id !== tripId) return t;
 
-      let newDays = t.days;
-      if (start && end) {
-        const s = new Date(start);
-        const e = new Date(end);
-        const diffTime = e.getTime() - s.getTime();
-        const newDaysCount = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1);
-        const oldDaysCount = t.days.length;
+        const start = updatedFields.startDate || t.startDate;
+        const end = updatedFields.endDate || t.endDate;
 
-        if (newDaysCount > oldDaysCount) {
-          if (updatedFields.rearrangeAllDays) {
-            // Collect all existing activities from all previous days
-            const allActivities = t.days.flatMap((d) => d.activities);
-            const actsPerDay = Math.ceil(allActivities.length / newDaysCount);
+        let newDays = t.days;
+        if (start && end) {
+          const s = new Date(start);
+          const e = new Date(end);
+          const diffTime = e.getTime() - s.getTime();
+          const newDaysCount = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1);
+          const oldDaysCount = t.days.length;
 
-            newDays = Array.from({ length: newDaysCount }, (_, idx) => {
-              const dayNum = idx + 1;
-              const dateObj = new Date(s);
-              dateObj.setDate(s.getDate() + idx);
-              const dateStr = dateObj.toISOString().split('T')[0];
+          if (newDaysCount > oldDaysCount) {
+            if (updatedFields.rearrangeAllDays) {
+              // Collect all existing activities from all previous days
+              const allActivities = t.days.flatMap((d) => d.activities);
+              const actsPerDay = Math.ceil(allActivities.length / newDaysCount);
 
-              const dayActs = actsPerDay > 0
-                ? allActivities.slice(idx * actsPerDay, (idx + 1) * actsPerDay)
-                : [];
+              newDays = Array.from({ length: newDaysCount }, (_, idx) => {
+                const dayNum = idx + 1;
+                const dateObj = new Date(s);
+                dateObj.setDate(s.getDate() + idx);
+                const dateStr = dateObj.toISOString().split('T')[0];
 
-              return {
-                dayNumber: dayNum,
-                date: dateStr,
-                title: isVi ? `Ngày ${dayNum}` : `Day ${dayNum}`,
-                summary: '',
-                activities: dayActs,
-              };
-            });
-          } else {
-            // Keep days 1 to oldDaysCount as they are, append new days (oldDaysCount + 1 to newDaysCount)
-            const addedDays = Array.from({ length: newDaysCount - oldDaysCount }, (_, idx) => {
-              const dayNum = oldDaysCount + idx + 1;
-              const dateObj = new Date(s);
-              dateObj.setDate(s.getDate() + oldDaysCount + idx);
-              const dateStr = dateObj.toISOString().split('T')[0];
+                const dayActs = actsPerDay > 0
+                  ? allActivities.slice(idx * actsPerDay, (idx + 1) * actsPerDay)
+                  : [];
 
-              return {
-                dayNumber: dayNum,
-                date: dateStr,
-                title: isVi ? `Ngày ${dayNum}` : `Day ${dayNum}`,
-                summary: '',
-                activities: [],
-              };
-            });
-            newDays = [...t.days, ...addedDays];
+                return {
+                  dayNumber: dayNum,
+                  date: dateStr,
+                  title: isVi ? `Ngày ${dayNum}` : `Day ${dayNum}`,
+                  summary: '',
+                  activities: dayActs,
+                };
+              });
+            } else {
+              // Keep days 1 to oldDaysCount as they are, append new days (oldDaysCount + 1 to newDaysCount)
+              const addedDays = Array.from({ length: newDaysCount - oldDaysCount }, (_, idx) => {
+                const dayNum = oldDaysCount + idx + 1;
+                const dateObj = new Date(s);
+                dateObj.setDate(s.getDate() + oldDaysCount + idx);
+                const dateStr = dateObj.toISOString().split('T')[0];
+
+                return {
+                  dayNumber: dayNum,
+                  date: dateStr,
+                  title: isVi ? `Ngày ${dayNum}` : `Day ${dayNum}`,
+                  summary: '',
+                  activities: [],
+                };
+              });
+              newDays = [...t.days, ...addedDays];
+            }
           }
         }
-      }
 
-      const { rearrangeAllDays, ...fieldsToUpdate } = updatedFields;
-      return {
-        ...t,
-        ...fieldsToUpdate,
-        days: newDays,
-      };
-    });
+        const { rearrangeAllDays, ...fieldsToUpdate } = updatedFields;
+        return {
+          ...t,
+          ...fieldsToUpdate,
+          days: newDays,
+        };
+      })
+    );
   };
 
   // 6d. Delete Active Trip (Only allowed if no activities are completed, with confirm)
@@ -1079,6 +1105,7 @@ function AppContent() {
               trip={activeTrip}
               onToggleItem={handleTogglePackingItem}
               onAddItem={handleAddPackingItem}
+              onEditItem={handleEditPackingItem}
               onDeleteItem={handleDeletePackingItem}
               onGenerateAiPackingList={handleGenerateAiPackingList}
               isAiLoading={isAiPackingLoading}
@@ -1119,12 +1146,15 @@ function AppContent() {
       />
 
       {/* Edit Trip Modal */}
-      <EditTripModal
-        isOpen={isEditTripModalOpen}
-        onClose={() => setIsEditTripModalOpen(false)}
-        trip={activeTrip}
-        onUpdateTrip={handleUpdateTrip}
-      />
+      {isEditTripModalOpen && (
+        <EditTripModal
+          key={activeTrip.id}
+          isOpen={isEditTripModalOpen}
+          onClose={() => setIsEditTripModalOpen(false)}
+          trip={activeTrip}
+          onUpdateTrip={handleUpdateTrip}
+        />
+      )}
 
     </div>
   );

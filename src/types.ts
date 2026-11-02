@@ -62,7 +62,7 @@ export interface TripMember {
 
 export interface PackingItem {
   id: string;
-  category: 'Essentials' | 'Clothing' | 'Electronics' | 'Toiletries' | 'Documents' | 'Gear';
+  category: 'Essentials' | 'Clothing' | 'Electronics' | 'Toiletries' | 'Documents' | 'Gear' | string;
   name: string;
   quantity: number;
   isPacked: boolean;
