@@ -18,7 +18,15 @@ import {
   CheckCircle2,
   Circle,
   Search,
-  PiggyBank
+  PiggyBank,
+  Lock,
+  Unlock,
+  KeyRound,
+  ShieldAlert,
+  Eye,
+  EyeOff,
+  Copy,
+  Check
 } from 'lucide-react';
 import { Trip, TravelDocument } from '../types';
 import { useLanguage } from '../context/LanguageContext';
@@ -61,6 +69,104 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
   const [isPaidByDropdownOpen, setIsPaidByDropdownOpen] = useState(false);
   const [paidBySearch, setPaidBySearch] = useState('');
   const paidByDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Security PIN states
+  const pinStorageKey = `tripmate_vault_pin_${trip.id}`;
+  const [savedPin, setSavedPin] = useState<string | null>(() => {
+    return localStorage.getItem(pinStorageKey) || null;
+  });
+  const [isUnlocked, setIsUnlocked] = useState<boolean>(() => {
+    return !localStorage.getItem(pinStorageKey);
+  });
+  const [enteredPin, setEnteredPin] = useState<string>('');
+  const [pinError, setPinError] = useState<string | null>(null);
+  const [isPinModalOpen, setIsPinModalOpen] = useState<boolean>(false);
+  const [newPin, setNewPin] = useState<string>('');
+  const [confirmPin, setConfirmPin] = useState<string>('');
+  const [pinModalError, setPinModalError] = useState<string | null>(null);
+  const [revealedDocCodes, setRevealedDocCodes] = useState<Record<string, boolean>>({});
+  const [copiedDocId, setCopiedDocId] = useState<string | null>(null);
+
+  const handlePinDigit = (digit: string) => {
+    if (enteredPin.length >= 4) return;
+    const nextPin = enteredPin + digit;
+    setEnteredPin(nextPin);
+    setPinError(null);
+
+    if (nextPin.length === 4) {
+      if (nextPin === savedPin) {
+        setIsUnlocked(true);
+        setEnteredPin('');
+      } else {
+        setPinError(isVi ? 'Mã PIN không đúng, vui lòng thử lại' : 'Incorrect PIN, please try again');
+        setTimeout(() => setEnteredPin(''), 500);
+      }
+    }
+  };
+
+  const handlePinBackspace = () => {
+    setEnteredPin((prev) => prev.slice(0, -1));
+    setPinError(null);
+  };
+
+  const handleSaveNewPin = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newPin.length !== 4 || !/^\d{4}$/.test(newPin)) {
+      setPinModalError(isVi ? 'Mã PIN phải gồm đúng 4 chữ số' : 'PIN must be exactly 4 digits');
+      return;
+    }
+    if (newPin !== confirmPin) {
+      setPinModalError(isVi ? 'Mã PIN xác nhận không khớp' : 'Confirm PIN does not match');
+      return;
+    }
+    localStorage.setItem(pinStorageKey, newPin);
+    setSavedPin(newPin);
+    setIsUnlocked(true);
+    setIsPinModalOpen(false);
+    setNewPin('');
+    setConfirmPin('');
+    setPinModalError(null);
+  };
+
+  const handleRemovePin = () => {
+    if (window.confirm(isVi ? 'Bạn có chắc chắn muốn gỡ bỏ mã PIN bảo vệ không?' : 'Are you sure you want to remove PIN protection?')) {
+      localStorage.removeItem(pinStorageKey);
+      setSavedPin(null);
+      setIsUnlocked(true);
+      setIsPinModalOpen(false);
+      setNewPin('');
+      setConfirmPin('');
+    }
+  };
+
+  // Keyboard support for desktop users on PIN unlock screen
+  useEffect(() => {
+    if (!savedPin || isUnlocked || isPinModalOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (/^[0-9]$/.test(e.key)) {
+        handlePinDigit(e.key);
+      } else if (e.key === 'Backspace' || e.key === 'Delete') {
+        handlePinBackspace();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [savedPin, isUnlocked, isPinModalOpen, enteredPin]);
+
+  const handleLockVault = () => {
+    setIsUnlocked(false);
+    setEnteredPin('');
+    setPinError(null);
+  };
+
+  const handleResetPinConfirm = () => {
+    if (window.confirm(isVi ? 'Bạn có muốn đặt lại mã PIN của két giấy tờ không?' : 'Do you want to reset the Vault PIN?')) {
+      localStorage.removeItem(pinStorageKey);
+      setSavedPin(null);
+      setIsUnlocked(true);
+      setEnteredPin('');
+    }
+  };
 
   // Close paidBy dropdown on click outside
   useEffect(() => {
@@ -222,76 +328,239 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
 
   return (
     <div className="space-y-4">
-      {/* Top Header & Action Row - Clean and compact without badge count */}
-      <div className="flex items-center justify-end">
-        <button
-          type="button"
-          onClick={handleOpenAddModal}
-          className="w-full sm:w-auto px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white font-semibold text-xs sm:text-sm rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer min-h-[38px] shrink-0"
-        >
-          <Plus className="w-4 h-4" />
-          <span>{isVi ? 'Thêm vé / giấy tờ' : 'Add Document'}</span>
-        </button>
-      </div>
-
-      {/* Documents Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4">
-        {trip.documents.length === 0 ? (
-          <div className="col-span-full text-center py-12 px-4 bg-white rounded-2xl border border-slate-200/80 shadow-2xs">
-            <FileText className="w-10 h-10 text-slate-300 mx-auto mb-2.5" />
-            <p className="text-sm font-bold text-slate-700">
-              {isVi ? 'Chưa có vé hoặc giấy tờ nào' : 'No documents saved yet'}
-            </p>
-            <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-              {isVi
-                ? 'Nhấn "Thêm vé / giấy tờ" để lưu thông tin vé máy bay, vé xe, khách sạn và đồng bộ chi phí.'
-                : 'Click "Add Document" to store flight, bus tickets, hotel vouchers, and sync expenses.'}
-            </p>
+      {/* Top Header & Security Status Row */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
+        <div className="flex items-center gap-2">
+          {savedPin ? (
+            <div className="flex items-center gap-1.5">
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-xl">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                <span>{isVi ? 'Đã bảo vệ bằng PIN' : 'PIN Protected'}</span>
+              </span>
+              <button
+                type="button"
+                onClick={handleLockVault}
+                className="px-2.5 py-1 text-xs font-medium text-slate-600 hover:text-slate-800 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl transition-colors flex items-center gap-1 cursor-pointer"
+                title={isVi ? 'Khóa két ngay' : 'Lock Vault now'}
+              >
+                <Lock className="w-3.5 h-3.5 text-slate-500" />
+                <span>{isVi ? 'Khóa ngay' : 'Lock'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsPinModalOpen(true)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                title={isVi ? 'Cài đặt mã PIN' : 'PIN Settings'}
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ) : (
             <button
               type="button"
-              onClick={handleOpenAddModal}
-              className="mt-4 px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white font-semibold text-xs rounded-xl shadow-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+              onClick={() => setIsPinModalOpen(true)}
+              className="px-3 py-1.5 text-xs font-medium text-slate-700 hover:text-teal-800 bg-white hover:bg-teal-50 border border-slate-200 hover:border-teal-300 rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
             >
-              <Plus className="w-4 h-4" />
-              <span>{isVi ? 'Thêm vé / giấy tờ' : 'Add Document'}</span>
+              <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
+              <span>{isVi ? 'Cài mã PIN bảo vệ' : 'Set PIN Lock'}</span>
+            </button>
+          )}
+        </div>
+
+        {(!savedPin || isUnlocked) && (
+          <button
+            type="button"
+            onClick={handleOpenAddModal}
+            className="w-full sm:w-auto px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white font-semibold text-xs sm:text-sm rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer min-h-[38px] shrink-0"
+          >
+            <Plus className="w-4 h-4" />
+            <span>{isVi ? 'Thêm vé / giấy tờ' : 'Add Document'}</span>
+          </button>
+        )}
+      </div>
+
+      {/* When Vault is Locked by PIN: Show Security Unlock Screen */}
+      {savedPin && !isUnlocked ? (
+        <div className="bg-white p-6 sm:p-10 rounded-2xl sm:rounded-3xl border border-slate-200/80 shadow-xs max-w-sm mx-auto text-center space-y-6 my-4">
+          <div className="w-16 h-16 rounded-2xl bg-teal-50 text-teal-600 flex items-center justify-center mx-auto shadow-2xs border border-teal-100">
+            <Lock className="w-8 h-8" />
+          </div>
+
+          <div>
+            <h3 className="text-base sm:text-lg font-bold text-slate-900">
+              {isVi ? 'Két giấy tờ được bảo vệ' : 'Travel Vault Protected'}
+            </h3>
+            <p className="text-xs text-slate-500 mt-1 max-w-xs mx-auto">
+              {isVi
+                ? 'Nhập mã PIN 4 chữ số để xem vé máy bay, phòng khách sạn và mã đặt chỗ.'
+                : 'Enter your 4-digit PIN to access tickets, vouchers, and reservation codes.'}
+            </p>
+          </div>
+
+          {/* 4 PIN Indicator Dots */}
+          <div className="flex items-center justify-center gap-3">
+            {[0, 1, 2, 3].map((idx) => {
+              const isFilled = idx < enteredPin.length;
+              return (
+                <div
+                  key={idx}
+                  className={`w-3.5 h-3.5 rounded-full transition-all duration-200 ${
+                    isFilled
+                      ? 'bg-teal-600 scale-110 shadow-xs'
+                      : 'border-2 border-slate-300 bg-slate-100'
+                  }`}
+                />
+              );
+            })}
+          </div>
+
+          {pinError && (
+            <p className="text-xs font-semibold text-red-600 animate-pulse">
+              {pinError}
+            </p>
+          )}
+
+          {/* Numeric Keypad */}
+          <div className="grid grid-cols-3 gap-2.5 max-w-[220px] mx-auto pt-1">
+            {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((digit) => (
+              <button
+                key={digit}
+                type="button"
+                onClick={() => handlePinDigit(digit)}
+                className="w-14 h-11 rounded-xl bg-slate-50 hover:bg-slate-100 active:bg-slate-200 text-slate-800 text-base font-bold transition-colors shadow-2xs flex items-center justify-center cursor-pointer select-none"
+              >
+                {digit}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={handleResetPinConfirm}
+              className="w-14 h-11 rounded-xl bg-slate-50 hover:bg-red-50 text-slate-400 hover:text-red-600 text-[11px] font-semibold transition-colors flex items-center justify-center cursor-pointer select-none"
+              title={isVi ? 'Quên PIN / Đặt lại' : 'Reset PIN'}
+            >
+              {isVi ? 'Quên?' : 'Reset'}
+            </button>
+            <button
+              type="button"
+              onClick={() => handlePinDigit('0')}
+              className="w-14 h-11 rounded-xl bg-slate-50 hover:bg-slate-100 active:bg-slate-200 text-slate-800 text-base font-bold transition-colors shadow-2xs flex items-center justify-center cursor-pointer select-none"
+            >
+              0
+            </button>
+            <button
+              type="button"
+              onClick={handlePinBackspace}
+              className="w-14 h-11 rounded-xl bg-slate-50 hover:bg-slate-100 active:bg-slate-200 text-slate-600 text-xs font-semibold transition-colors flex items-center justify-center cursor-pointer select-none"
+            >
+              ←
             </button>
           </div>
-        ) : (
-          trip.documents.map((doc) => (
-            <div
-              key={doc.id}
-              className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-2xs hover:shadow-xs transition-shadow flex items-start justify-between gap-3"
-            >
-              <div className="flex items-start gap-3 min-w-0 flex-1">
-                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 shrink-0 mt-0.5">
-                  {getDocIcon(doc.docType)}
-                </div>
-
-                <div className="min-w-0 flex-1 space-y-2">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[10px] font-bold text-teal-700 bg-teal-50 px-2 py-0.5 rounded-md border border-teal-100 uppercase tracking-wider">
-                      {getDocTypeLabel(doc.docType)}
-                    </span>
-                    {doc.date && (
-                      <span className="text-[11px] text-slate-400 flex items-center gap-1">
-                        <Calendar className="w-3 h-3" />
-                        {doc.date}
-                      </span>
-                    )}
+        </div>
+      ) : (
+        /* Documents Grid */
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4">
+          {trip.documents.length === 0 ? (
+            <div className="col-span-full text-center py-12 px-4 bg-white rounded-2xl border border-slate-200/80 shadow-2xs">
+              <FileText className="w-10 h-10 text-slate-300 mx-auto mb-2.5" />
+              <p className="text-sm font-bold text-slate-700">
+                {isVi ? 'Chưa có vé hoặc giấy tờ nào' : 'No documents saved yet'}
+              </p>
+              <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+                {isVi
+                  ? 'Nhấn "Thêm vé / giấy tờ" để lưu thông tin vé máy bay, vé xe, khách sạn và đồng bộ chi phí.'
+                  : 'Click "Add Document" to store flight, bus tickets, hotel vouchers, and sync expenses.'}
+              </p>
+              <button
+                type="button"
+                onClick={handleOpenAddModal}
+                className="mt-4 px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white font-semibold text-xs rounded-xl shadow-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>{isVi ? 'Thêm vé / giấy tờ' : 'Add Document'}</span>
+              </button>
+            </div>
+          ) : (
+            trip.documents.map((doc) => (
+              <div
+                key={doc.id}
+                className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-2xs hover:shadow-xs transition-shadow flex items-start justify-between gap-3"
+              >
+                <div className="flex items-start gap-3 min-w-0 flex-1">
+                  <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 shrink-0 mt-0.5">
+                    {getDocIcon(doc.docType)}
                   </div>
 
-                  <h4 className="text-xs sm:text-sm font-bold text-slate-900 break-words leading-snug">
-                    {doc.title}
-                  </h4>
-
-                  {/* Confirmation Code without copy button */}
-                  {doc.codeOrNumber && (
-                    <div className="flex items-center gap-2 pt-0.5">
-                      <span className="font-mono text-xs font-bold bg-slate-100 text-slate-800 px-2.5 py-1 rounded-lg border border-slate-200 select-all">
-                        {doc.codeOrNumber}
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[10px] font-bold text-teal-700 bg-teal-50 px-2 py-0.5 rounded-md border border-teal-100 uppercase tracking-wider">
+                        {getDocTypeLabel(doc.docType)}
                       </span>
+                      {doc.date && (
+                        <span className="text-[11px] text-slate-400 flex items-center gap-1">
+                          <Calendar className="w-3 h-3" />
+                          {doc.date}
+                        </span>
+                      )}
                     </div>
-                  )}
+
+                    <h4 className="text-xs sm:text-sm font-semibold text-slate-800 break-words leading-snug">
+                      {doc.title}
+                    </h4>
+
+                    {/* Confirmation Code with Masking and 1-Click Copy */}
+                    {doc.codeOrNumber && (
+                      <div className="flex items-center gap-1.5 pt-0.5">
+                        <span className="font-mono text-xs font-medium bg-slate-100 text-slate-800 px-2.5 py-1 rounded-lg border border-slate-200 select-all flex items-center gap-2">
+                          <span>
+                            {savedPin && !revealedDocCodes[doc.id]
+                              ? '••••••••'
+                              : doc.codeOrNumber}
+                          </span>
+                          {savedPin && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setRevealedDocCodes((prev) => ({
+                                  ...prev,
+                                  [doc.id]: !prev[doc.id],
+                                }))
+                              }
+                              className="text-slate-400 hover:text-teal-600 transition-colors p-0.5"
+                              title={
+                                revealedDocCodes[doc.id]
+                                  ? (isVi ? 'Ẩn mã' : 'Hide code')
+                                  : (isVi ? 'Hiện mã' : 'Reveal code')
+                              }
+                            >
+                              {revealedDocCodes[doc.id] ? (
+                                <EyeOff className="w-3.5 h-3.5" />
+                              ) : (
+                                <Eye className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          )}
+                        </span>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (doc.codeOrNumber) {
+                              navigator.clipboard.writeText(doc.codeOrNumber);
+                              setCopiedDocId(doc.id);
+                              setTimeout(() => setCopiedDocId(null), 1500);
+                            }
+                          }}
+                          className="p-1.5 text-slate-400 hover:text-teal-600 hover:bg-teal-50 rounded-lg transition-colors cursor-pointer"
+                          title={isVi ? 'Sao chép mã' : 'Copy code'}
+                        >
+                          {copiedDocId === doc.id ? (
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                          ) : (
+                            <Copy className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
+                    )}
 
                   {/* Expense Information if recorded */}
                   {doc.cost !== undefined && doc.cost > 0 && (
@@ -352,6 +621,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
           ))
         )}
       </div>
+      )}
 
       {/* Add / Edit Document Popup Modal */}
       {modalMode && (
@@ -843,6 +1113,118 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                 {isVi ? 'Xác nhận' : 'Confirm'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* PIN Security Settings Modal */}
+      {isPinModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div
+            className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200 shadow-2xl w-full max-w-sm p-5 sm:p-6 space-y-4 my-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-teal-50 text-teal-600 flex items-center justify-center">
+                  <KeyRound className="w-4 h-4" />
+                </div>
+                <h4 className="font-semibold text-slate-800 text-sm sm:text-base">
+                  {savedPin ? (isVi ? 'Đổi hoặc gỡ mã PIN' : 'Change or Remove PIN') : (isVi ? 'Thiết lập mã PIN 4 số' : 'Setup 4-Digit PIN')}
+                </h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsPinModalOpen(false);
+                  setNewPin('');
+                  setConfirmPin('');
+                  setPinModalError(null);
+                }}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveNewPin} className="space-y-3.5">
+              <p className="text-xs text-slate-500 leading-relaxed">
+                {isVi
+                  ? 'Mã PIN giúp bảo vệ số hộ chiếu, mã vé máy bay và giấy tờ đặt phòng của bạn khỏi người khác nhìn trộm.'
+                  : 'PIN protects your passports, flight tickets, and booking vouchers from prying eyes.'}
+              </p>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  {savedPin ? (isVi ? 'Nhập mã PIN mới (4 số)' : 'New PIN (4 digits)') : (isVi ? 'Nhập mã PIN (4 số)' : 'Enter 4-digit PIN')}
+                </label>
+                <input
+                  type="password"
+                  maxLength={4}
+                  pattern="\d{4}"
+                  inputMode="numeric"
+                  value={newPin}
+                  onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ''))}
+                  placeholder="••••"
+                  className="w-full text-center text-lg tracking-widest font-mono p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  {isVi ? 'Xác nhận lại mã PIN' : 'Confirm PIN'}
+                </label>
+                <input
+                  type="password"
+                  maxLength={4}
+                  pattern="\d{4}"
+                  inputMode="numeric"
+                  value={confirmPin}
+                  onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, ''))}
+                  placeholder="••••"
+                  className="w-full text-center text-lg tracking-widest font-mono p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                />
+              </div>
+
+              {pinModalError && (
+                <div className="p-2.5 bg-red-50 text-red-700 rounded-xl text-xs font-medium border border-red-200">
+                  {pinModalError}
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 pt-2">
+                {savedPin && (
+                  <button
+                    type="button"
+                    onClick={handleRemovePin}
+                    className="px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 rounded-xl transition-colors cursor-pointer border border-red-200"
+                  >
+                    {isVi ? 'Gỡ bỏ PIN' : 'Remove PIN'}
+                  </button>
+                )}
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsPinModalOpen(false);
+                    setNewPin('');
+                    setConfirmPin('');
+                    setPinModalError(null);
+                  }}
+                  className="px-3.5 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
+                >
+                  {isVi ? 'Hủy' : 'Cancel'}
+                </button>
+                <button
+                  type="submit"
+                  disabled={newPin.length !== 4 || confirmPin.length !== 4}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-teal-600 hover:bg-teal-700 disabled:opacity-50 rounded-xl shadow-xs transition-colors cursor-pointer"
+                >
+                  {isVi ? 'Lưu mã PIN' : 'Save PIN'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

@@ -4,7 +4,7 @@ import {
   Sparkles, Utensils, Hotel, Car, Camera, ShoppingBag, Compass, Tag, X,
   Search, Calendar, Filter, ChevronDown, ChevronUp, Edit3, ExternalLink,
   Navigation, BookmarkCheck, DollarSign, Users, ArrowRight, Check, CreditCard,
-  RotateCcw, RefreshCw, PiggyBank, AlertCircle
+  RotateCcw, RefreshCw, PiggyBank, AlertCircle, Upload, Image, Receipt
 } from 'lucide-react';
 import { Trip, ActivityItem, CategoryType, SavedPlace, Expense } from '../types';
 import { useLanguage } from '../context/LanguageContext';
@@ -31,6 +31,7 @@ interface ItineraryViewProps {
       recordExpense: boolean;
       unitPrice?: number;
       expenseId?: string;
+      receiptImageUrl?: string;
     }
   ) => void;
   onNavigateToExpenses?: () => void;
@@ -176,6 +177,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
     splitWith: string[];
     memberSplits: { [memberId: string]: string };
     recordExpense: boolean;
+    receiptImageUrl?: string;
   } | null>(null);
   const [paidBySearch, setPaidBySearch] = useState('');
   const [isPaidByDropdownOpen, setIsPaidByDropdownOpen] = useState(false);
@@ -185,6 +187,119 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   const [completedParticipantsFilter, setCompletedParticipantsFilter] = useState<'all' | 'selected'>('all');
   const paidByRef = useRef<HTMLDivElement>(null);
   const splitWithRef = useRef<HTMLDivElement>(null);
+
+  // Activity Receipt Scanning & Viewer states
+  const [isScanningActivityReceipt, setIsScanningActivityReceipt] = useState(false);
+  const [activityScanNotice, setActivityScanNotice] = useState<string | null>(null);
+  const [viewingActivityReceiptImage, setViewingActivityReceiptImage] = useState<string | null>(null);
+  const [pendingCostOverwrite, setPendingCostOverwrite] = useState<{
+    scannedTotal: number;
+    currentCost: number;
+  } | null>(null);
+  const itineraryCameraInputRef = useRef<HTMLInputElement>(null);
+  const itineraryFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Handle receipt image upload & AI OCR total cost extraction
+  const handleItineraryReceiptUpload = (file: File) => {
+    if (!completedActivityPrompt) return;
+    if (!file.type.startsWith('image/')) {
+      setActivityScanNotice(isVi ? 'Vui lòng chọn tệp hình ảnh (PNG, JPG, WEBP).' : 'Please select an image file.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const base64 = reader.result as string;
+      setIsScanningActivityReceipt(true);
+      setActivityScanNotice(null);
+      setPendingCostOverwrite(null);
+
+      try {
+        const res = await fetch('/api/gemini/scan-receipt', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            imageBase64: base64,
+            mimeType: file.type || 'image/jpeg',
+            language: isVi ? 'vi' : 'en',
+            currency: trip.currency || 'VND',
+          }),
+        });
+        const json = await res.json();
+        const scannedTotal = json?.data?.totalAmount ? Number(json.data.totalAmount) : 0;
+
+        const currentCostNum = parseFloat(completedActivityPrompt.amount);
+        const isCostZeroOrEmpty =
+          !completedActivityPrompt.amount ||
+          isNaN(currentCostNum) ||
+          currentCostNum === 0 ||
+          completedActivityPrompt.amount.trim() === '';
+
+        if (isCostZeroOrEmpty && scannedTotal > 0) {
+          // Rule 1: Nếu mục chi phí đang = 0 hoặc rỗng thì AI tự lấy tổng tiền trong hóa đơn điền vào!
+          const splits = calculateEvenSplits(scannedTotal, completedActivityPrompt.splitWith);
+          setCompletedActivityPrompt((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  amount: String(scannedTotal),
+                  memberSplits: splits,
+                  receiptImageUrl: base64,
+                  isAmountManuallyEdited: true,
+                }
+              : null
+          );
+          setActivityScanNotice(
+            isVi
+              ? `✓ Đã lưu hóa đơn. AI tự động điền tổng tiền: ${formatMoney(scannedTotal, trip.currency, lang)}`
+              : `✓ Receipt saved. AI auto-filled total: ${formatMoney(scannedTotal, trip.currency, lang)}`
+          );
+        } else {
+          // Rule 2: Mục chi phí đã có giá (> 0)
+          setCompletedActivityPrompt((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  receiptImageUrl: base64,
+                }
+              : null
+          );
+
+          if (scannedTotal > 0) {
+            if (Math.abs(scannedTotal - currentCostNum) >= 0.01) {
+              // Hỏi người dùng có muốn ghi đè lên chi phí hiện tại không
+              setPendingCostOverwrite({
+                scannedTotal,
+                currentCost: currentCostNum,
+              });
+            } else {
+              setActivityScanNotice(
+                isVi
+                  ? `✓ Đã lưu ảnh hóa đơn (khớp với chi phí hiện tại: ${formatMoney(currentCostNum, trip.currency, lang)}).`
+                  : `✓ Receipt attached (matches current cost: ${formatMoney(currentCostNum, trip.currency, lang)}).`
+              );
+            }
+          } else {
+            setActivityScanNotice(isVi ? '✓ Đã đính kèm ảnh hóa đơn thành công.' : '✓ Receipt image attached successfully.');
+          }
+        }
+      } catch (err) {
+        console.warn('[Activity Receipt Scan Error]:', err);
+        setCompletedActivityPrompt((prev) =>
+          prev
+            ? {
+                ...prev,
+                receiptImageUrl: base64,
+              }
+            : null
+        );
+        setActivityScanNotice(isVi ? '✓ Đã lưu ảnh hóa đơn vào hoạt động.' : '✓ Receipt image attached.');
+      } finally {
+        setIsScanningActivityReceipt(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
 
   // Open modal to view/edit expense details for completed activity
   const handleOpenEditCompletedExpense = (act: ActivityItem, dayNum: number) => {
@@ -233,6 +348,8 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
       initialSplits = calculateEvenSplits(initialAmount, initialSplitWith);
     }
 
+    const initialReceiptImage = act.receiptImageUrl || linkedExpense?.receiptImageUrl;
+
     setCompletedActivityPrompt({
       activity: act,
       dayNumber: dayNum,
@@ -243,7 +360,10 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
       splitWith: initialSplitWith,
       memberSplits: initialSplits,
       recordExpense: true,
+      receiptImageUrl: initialReceiptImage,
     });
+    setActivityScanNotice(null);
+    setPendingCostOverwrite(null);
     setPaidBySearch('');
     setIsPaidByDropdownOpen(false);
     setSplitWithSearch('');
@@ -302,6 +422,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
           memberSplits: memberSplitsArray,
           recordExpense: completedActivityPrompt.recordExpense,
           unitPrice: completedActivityPrompt.unitPrice,
+          receiptImageUrl: completedActivityPrompt.receiptImageUrl,
         }
       );
     } else {
@@ -316,6 +437,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
             splitWith: finalSplitWith,
             memberSplits: memberSplitsArray,
             isCompleted: true,
+            receiptImageUrl: completedActivityPrompt.receiptImageUrl,
           }
         );
       }
@@ -329,11 +451,14 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
           splitWith: finalSplitWith,
           memberSplits: memberSplitsArray,
           date: new Date().toISOString().split('T')[0],
+          activityId: completedActivityPrompt.activity.id,
+          receiptImageUrl: completedActivityPrompt.receiptImageUrl,
           receiptNote: `${isVi ? 'Chi tiêu tự động từ hoạt động:' : 'Auto-recorded from activity:'} ${completedActivityPrompt.activity.title} (${isVi ? `Ngày ${completedActivityPrompt.dayNumber}` : `Day ${completedActivityPrompt.dayNumber}`})`,
         });
       }
     }
 
+    setPendingCostOverwrite(null);
     setCompletedActivityPrompt(null);
   };
 
@@ -1196,10 +1321,10 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                     {/* Left: Badge + Date + Title */}
                     <div className="flex items-center gap-2.5 min-w-0 flex-1">
                       <div className="flex items-center gap-1.5 shrink-0">
-                        <span className="px-2.5 py-1 rounded-lg bg-teal-600 text-white font-bold text-xs shadow-2xs">
+                        <span className="px-2.5 py-1 rounded-lg bg-teal-600 text-white font-semibold text-xs shadow-2xs">
                           {isVi ? `Ngày ${day.dayNumber}` : `Day ${day.dayNumber}`}
                         </span>
-                        <span className="text-xs font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md flex items-center gap-1">
+                        <span className="text-xs font-normal text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md flex items-center gap-1">
                           <Calendar className="w-3 h-3 text-slate-400" />
                           {formattedDate}
                         </span>
@@ -1207,7 +1332,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
 
                       {cleanTitle ? (
                         <div className="min-w-0 flex-1">
-                          <h3 className="text-xs sm:text-sm font-bold text-slate-800 truncate" title={cleanTitle}>
+                          <h3 className="text-xs sm:text-sm font-semibold text-slate-800 truncate" title={cleanTitle}>
                             {cleanTitle}
                           </h3>
                         </div>
@@ -1217,13 +1342,13 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                     {/* Right: Activity count, Cost, Add button & Chevron */}
                     <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0 pt-1.5 sm:pt-0 border-t sm:border-t-0 border-slate-100">
                       <div className="flex items-center gap-1.5">
-                        <span className="text-[11px] font-semibold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">
+                        <span className="text-[11px] font-normal text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">
                           {day.activities.length} {isVi ? 'hoạt động' : 'acts'}
                         </span>
 
                         {day.activities.length > 0 && (
                           <span
-                            className={`text-[11px] font-bold px-2 py-0.5 rounded-md border ${
+                            className={`text-[11px] font-medium px-2 py-0.5 rounded-md border ${
                               dayCompletedCost > 0
                                 ? 'text-emerald-700 bg-emerald-50 border-emerald-100'
                                 : 'text-slate-400 bg-slate-50 border-slate-200/70'
@@ -1328,13 +1453,13 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
 
                                 <div className="min-w-0 flex-1">
                                   <div className="flex flex-wrap items-center gap-1.5 mb-1">
-                                    <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded-md">
+                                    <span className="inline-flex items-center gap-1 text-[10px] font-medium text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded-md">
                                       <Clock className="w-3 h-3 text-slate-400" />
                                       {act.time}
                                     </span>
 
                                     <span
-                                      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold border ${
+                                      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium border ${
                                         CATEGORY_BADGES[act.category] || CATEGORY_BADGES.other
                                       }`}
                                     >
@@ -1344,8 +1469,8 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                                   </div>
 
                                   <h4
-                                    className={`text-xs sm:text-sm font-bold text-slate-900 leading-snug break-words ${
-                                      act.isCompleted ? 'line-through text-slate-400' : ''
+                                    className={`text-xs sm:text-sm font-semibold text-slate-800 leading-snug break-words ${
+                                      act.isCompleted ? 'line-through text-slate-400 font-normal' : ''
                                     }`}
                                   >
                                     {act.title}
@@ -1459,7 +1584,34 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                                     <span className="text-slate-600 font-medium">
                                       {cardSplitIds.length} {isVi ? 'người chia' : 'participants'}
                                     </span>
+                                    {(act.receiptImageUrl || cardExpense?.receiptImageUrl) && (
+                                      <>
+                                        <span className="text-emerald-300">•</span>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setViewingActivityReceiptImage(act.receiptImageUrl || cardExpense?.receiptImageUrl || null);
+                                          }}
+                                          className="inline-flex items-center gap-1 font-semibold text-teal-800 hover:text-teal-950 bg-teal-100/70 hover:bg-teal-200/80 px-2 py-0.5 rounded-md cursor-pointer transition-colors shadow-2xs"
+                                          title={isVi ? 'Xem ảnh hóa đơn' : 'View receipt image'}
+                                        >
+                                          <Receipt className="w-3 h-3 text-teal-700" />
+                                          <span>{isVi ? 'Hóa đơn' : 'Receipt'}</span>
+                                        </button>
+                                      </>
+                                    )}
                                   </div>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleOpenEditCompletedExpense(act, day.dayNumber);
+                                    }}
+                                    className="text-[10px] font-semibold text-teal-700 hover:text-teal-900 underline cursor-pointer shrink-0 ml-auto"
+                                  >
+                                    {isVi ? 'Sửa chi tiêu' : 'Edit expense'}
+                                  </button>
                                 </div>
                               );
                             })()}
@@ -1713,7 +1865,10 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => setCompletedActivityPrompt(null)}
+                onClick={() => {
+                  setCompletedActivityPrompt(null);
+                  setPendingCostOverwrite(null);
+                }}
                 className="p-1 rounded-lg hover:bg-white/10 text-teal-100 transition-colors cursor-pointer"
               >
                 <X className="w-5 h-5" />
@@ -1844,6 +1999,202 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                               {isVi ? 'Đặt lại' : 'Reset'}
                             </button>
                           )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Receipt Photo Capture / Upload & AI Auto-fill */}
+                    <div className="p-3 bg-slate-50/80 rounded-xl border border-slate-200/90 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                          <Receipt className="w-3.5 h-3.5 text-teal-600" />
+                          <span>{isVi ? 'Ảnh hóa đơn / Biên lai' : 'Receipt Photo'}</span>
+                          <span className="text-[10px] font-normal text-slate-400">({isVi ? 'Tùy chọn' : 'Optional'})</span>
+                        </label>
+                        {completedActivityPrompt.receiptImageUrl && (
+                          <button
+                            type="button"
+                            onClick={() => setViewingActivityReceiptImage(completedActivityPrompt.receiptImageUrl || null)}
+                            className="text-[11px] text-teal-600 hover:text-teal-800 font-semibold cursor-pointer underline"
+                          >
+                            {isVi ? 'Xem ảnh' : 'View'}
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Hidden camera & file inputs */}
+                      <input
+                        ref={itineraryCameraInputRef}
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) handleItineraryReceiptUpload(file);
+                          e.target.value = '';
+                        }}
+                      />
+                      <input
+                        ref={itineraryFileInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) handleItineraryReceiptUpload(file);
+                          e.target.value = '';
+                        }}
+                      />
+
+                      {/* Uploaded state preview */}
+                      {completedActivityPrompt.receiptImageUrl ? (
+                        <div className="flex items-center gap-3 p-2 bg-white rounded-xl border border-teal-200">
+                          <img
+                            src={completedActivityPrompt.receiptImageUrl}
+                            alt="Receipt"
+                            onClick={() => setViewingActivityReceiptImage(completedActivityPrompt.receiptImageUrl || null)}
+                            className="w-14 h-14 rounded-lg object-cover border border-slate-200 cursor-pointer hover:opacity-90 shrink-0"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-xs font-semibold text-slate-800 flex items-center gap-1">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              <span className="truncate">{isVi ? 'Đã lưu ảnh hóa đơn' : 'Receipt attached'}</span>
+                            </div>
+                            <div className="flex items-center gap-2 mt-1.5">
+                              <button
+                                type="button"
+                                onClick={() => itineraryCameraInputRef.current?.click()}
+                                disabled={isScanningActivityReceipt}
+                                className="text-[11px] font-semibold text-teal-700 hover:text-teal-800 cursor-pointer"
+                              >
+                                {isVi ? 'Chụp lại' : 'Retake'}
+                              </button>
+                              <span className="text-slate-300">|</span>
+                              <button
+                                type="button"
+                                onClick={() => itineraryFileInputRef.current?.click()}
+                                disabled={isScanningActivityReceipt}
+                                className="text-[11px] font-semibold text-teal-700 hover:text-teal-800 cursor-pointer"
+                              >
+                                {isVi ? 'Tải ảnh khác' : 'Change'}
+                              </button>
+                              <span className="text-slate-300">|</span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCompletedActivityPrompt({
+                                    ...completedActivityPrompt,
+                                    receiptImageUrl: undefined,
+                                  });
+                                  setActivityScanNotice(null);
+                                  setPendingCostOverwrite(null);
+                                }}
+                                className="text-[11px] font-semibold text-red-600 hover:text-red-700 cursor-pointer"
+                              >
+                                {isVi ? 'Xóa' : 'Remove'}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        /* Capture & Upload action buttons */
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => itineraryCameraInputRef.current?.click()}
+                            disabled={isScanningActivityReceipt}
+                            className="flex items-center justify-center gap-1.5 py-2 px-2.5 bg-white hover:bg-slate-50 border border-slate-200 hover:border-teal-300 rounded-xl text-xs font-semibold text-slate-700 transition-colors cursor-pointer disabled:opacity-50"
+                          >
+                            <Camera className="w-4 h-4 text-teal-600 shrink-0" />
+                            <span className="truncate">{isVi ? 'Chụp ảnh' : 'Take Photo'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => itineraryFileInputRef.current?.click()}
+                            disabled={isScanningActivityReceipt}
+                            className="flex items-center justify-center gap-1.5 py-2 px-2.5 bg-white hover:bg-slate-50 border border-slate-200 hover:border-teal-300 rounded-xl text-xs font-semibold text-slate-700 transition-colors cursor-pointer disabled:opacity-50"
+                          >
+                            <Upload className="w-4 h-4 text-slate-500 shrink-0" />
+                            <span className="truncate">{isVi ? 'Tải ảnh lên' : 'Upload'}</span>
+                          </button>
+                        </div>
+                      )}
+
+                      {/* AI Scanning indicator */}
+                      {isScanningActivityReceipt && (
+                        <div className="flex items-center gap-2 p-2 bg-teal-50 border border-teal-200 rounded-lg text-xs text-teal-800 animate-pulse">
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin text-teal-600 shrink-0" />
+                          <span>{isVi ? 'AI đang đọc hóa đơn & trích xuất tổng tiền...' : 'AI scanning receipt for total amount...'}</span>
+                        </div>
+                      )}
+
+                      {/* Interactive prompt: Question asking if user wants to overwrite existing cost */}
+                      {pendingCostOverwrite && (
+                        <div className="p-3 bg-amber-50/90 border border-amber-300 rounded-xl space-y-2.5 animate-in fade-in-50">
+                          <div className="flex items-start gap-2">
+                            <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                            <div className="text-xs text-amber-950 leading-snug">
+                              <span className="font-bold">
+                                {isVi ? 'Hóa đơn có tổng tiền: ' : 'Receipt total detected: '}
+                              </span>
+                              <span className="font-extrabold text-amber-800">
+                                {formatMoney(pendingCostOverwrite.scannedTotal, trip.currency, lang)}
+                              </span>
+                              <div className="text-slate-600 text-[11px] mt-0.5">
+                                {isVi
+                                  ? `Chi phí hiện tại đang là ${formatMoney(pendingCostOverwrite.currentCost, trip.currency, lang)}. Bạn có muốn ghi đè chi phí này bằng số tiền trên hóa đơn không?`
+                                  : `Current cost is ${formatMoney(pendingCostOverwrite.currentCost, trip.currency, lang)}. Would you like to overwrite it with the amount from the receipt?`}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!completedActivityPrompt) return;
+                                const newTotal = pendingCostOverwrite.scannedTotal;
+                                const splits = calculateEvenSplits(newTotal, completedActivityPrompt.splitWith);
+                                setCompletedActivityPrompt({
+                                  ...completedActivityPrompt,
+                                  amount: String(newTotal),
+                                  memberSplits: splits,
+                                  isAmountManuallyEdited: true,
+                                });
+                                setActivityScanNotice(
+                                  isVi
+                                    ? `✓ Đã ghi đè chi phí theo hóa đơn: ${formatMoney(newTotal, trip.currency, lang)}`
+                                    : `✓ Cost overwritten from receipt: ${formatMoney(newTotal, trip.currency, lang)}`
+                                );
+                                setPendingCostOverwrite(null);
+                              }}
+                              className="py-1.5 px-2 bg-amber-600 hover:bg-amber-700 active:scale-[0.98] text-white rounded-lg font-bold text-xs transition-colors cursor-pointer text-center shadow-2xs truncate"
+                            >
+                              {isVi ? `Ghi đè (${formatMoney(pendingCostOverwrite.scannedTotal, trip.currency, lang)})` : 'Overwrite'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActivityScanNotice(
+                                  isVi
+                                    ? `✓ Đã giữ nguyên chi phí hiện tại (${formatMoney(pendingCostOverwrite.currentCost, trip.currency, lang)}). Đã lưu ảnh hóa đơn.`
+                                    : `✓ Retained current cost. Receipt image saved.`
+                                );
+                                setPendingCostOverwrite(null);
+                              }}
+                              className="py-1.5 px-2 bg-white hover:bg-slate-100 active:scale-[0.98] text-slate-700 border border-slate-300 rounded-lg font-semibold text-xs transition-colors cursor-pointer text-center shadow-2xs truncate"
+                            >
+                              {isVi ? 'Giữ nguyên' : 'Keep Current'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Scan feedback notice */}
+                      {activityScanNotice && (
+                        <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-lg text-[11px] text-emerald-800 font-medium leading-relaxed">
+                          {activityScanNotice}
                         </div>
                       )}
                     </div>
@@ -2287,7 +2638,10 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               <div className="flex items-center justify-end gap-2 p-4 bg-slate-50/80 border-t border-slate-100 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setCompletedActivityPrompt(null)}
+                  onClick={() => {
+                    setCompletedActivityPrompt(null);
+                    setPendingCostOverwrite(null);
+                  }}
                   className="px-4 py-2 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 font-semibold text-xs rounded-xl transition-colors cursor-pointer shadow-2xs"
                 >
                   {isVi ? 'Đóng' : 'Close'}
@@ -2967,6 +3321,42 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
         categories={categoriesList}
         onUpdateCategories={(newCats) => setCategoriesList(newCats)}
       />
+
+      {/* Fullscreen Receipt Image Viewer */}
+      {viewingActivityReceiptImage && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6"
+          onClick={() => setViewingActivityReceiptImage(null)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in zoom-in-95"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 bg-slate-50">
+              <div className="flex items-center gap-2">
+                <Receipt className="w-4 h-4 text-teal-600" />
+                <h4 className="font-bold text-xs sm:text-sm text-slate-800">
+                  {isVi ? 'Ảnh Hóa Đơn / Biên Lai' : 'Receipt Image'}
+                </h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewingActivityReceiptImage(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto p-3 flex items-center justify-center bg-slate-100/50">
+              <img
+                src={viewingActivityReceiptImage}
+                alt="Receipt Full Preview"
+                className="max-h-[75vh] w-auto max-w-full rounded-lg object-contain shadow-xs"
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

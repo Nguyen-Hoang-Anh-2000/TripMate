@@ -28,6 +28,7 @@ export interface ActivityItem {
   splitWith?: string[];
   memberSplits?: { memberId: string; amount: number }[];
   expenseId?: string;
+  receiptImageUrl?: string;
 }
 
 export interface ItineraryDay {
@@ -50,6 +51,8 @@ export interface Expense {
   date: string;
   receiptNote?: string;
   activityId?: string;
+  receiptImageUrl?: string;
+  receiptItems?: { name: string; price: number; quantity?: number }[];
 }
 
 export interface TripMember {

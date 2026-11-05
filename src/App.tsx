@@ -15,12 +15,13 @@ import { AIItineraryModal } from './components/AIItineraryModal';
 import { AIAssistantChat } from './components/AIAssistantChat';
 import { NewTripModal } from './components/NewTripModal';
 import { EditTripModal } from './components/EditTripModal';
+import { TravelHandbookModal } from './components/TravelHandbookModal';
 import { formatMoney } from './utils/formatCurrency';
 
 import { 
   Calendar, MapPin, DollarSign, CloudSun, Users, Compass, 
   Map as MapIcon, BookmarkCheck, CreditCard, CheckSquare, ShieldCheck, Sparkles, Plus, Share2,
-  Edit3, Trash2, Camera
+  Edit3, Trash2, Camera, Printer, Wifi, WifiOff
 } from 'lucide-react';
 
 type TabType = 'itinerary' | 'expenses' | 'map' | 'places' | 'vault' | 'packing';
@@ -36,8 +37,31 @@ function AppContent() {
   const [isNewTripModalOpen, setIsNewTripModalOpen] = useState(false);
   const [isEditTripModalOpen, setIsEditTripModalOpen] = useState(false);
   const [isAIModalOpen, setIsAIModalOpen] = useState(false);
+  const [aiTargetTrip, setAiTargetTrip] = useState<Trip | null>(null);
   const [isAiChatOpen, setIsAiChatOpen] = useState(false);
   const [isAiPackingLoading, setIsAiPackingLoading] = useState(false);
+  const [isHandbookModalOpen, setIsHandbookModalOpen] = useState(false);
+  const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
+  const [showOnlineToast, setShowOnlineToast] = useState<boolean>(false);
+
+  React.useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      setShowOnlineToast(true);
+      setTimeout(() => setShowOnlineToast(false), 3500);
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   // Active Trip reference
   const activeTrip = trips.find((t) => t.id === activeTripId) || trips[0];
@@ -201,6 +225,7 @@ function AppContent() {
       unitPrice?: number;
       expenseId?: string;
       memberSplits?: { memberId: string; amount: number }[];
+      receiptImageUrl?: string;
     }
   ) => {
     updateActiveTrip((trip) => {
@@ -250,6 +275,7 @@ function AppContent() {
                   splitWith: data.splitWith,
                   memberSplits: data.memberSplits,
                   expenseId: data.recordExpense ? determinedExpenseId : undefined,
+                  receiptImageUrl: 'receiptImageUrl' in data ? data.receiptImageUrl : a.receiptImageUrl,
                 };
               }
               return a;
@@ -275,6 +301,7 @@ function AppContent() {
           memberSplits: data.memberSplits,
           date: new Date().toISOString().split('T')[0],
           receiptNote: `${lang === 'vi' ? 'Chi tiêu tự động từ hoạt động:' : 'Auto-recorded from activity:'} ${targetActivity.title} (${lang === 'vi' ? `Ngày ${targetDayNum}` : `Day ${targetDayNum}`})`,
+          receiptImageUrl: 'receiptImageUrl' in data ? data.receiptImageUrl : targetActivity.receiptImageUrl,
         };
 
         if (existingExpenseIndex >= 0) {
@@ -361,6 +388,7 @@ function AppContent() {
     date?: string;
     dayNumber?: number;
     note?: string;
+    receiptImageUrl?: string;
   }) => {
     updateActiveTrip((trip) => {
       let updatedDays = [...trip.days];
@@ -415,6 +443,7 @@ function AppContent() {
         memberSplits: item.memberSplits,
         date: item.date || new Date().toISOString().split('T')[0],
         receiptNote: item.note,
+        receiptImageUrl: item.receiptImageUrl,
       };
 
       if (existingExpenseIndex >= 0) {
@@ -704,40 +733,165 @@ function AppContent() {
     });
   };
 
-  // 5. Apply AI Generated Itinerary
+  // 5. Apply AI Generated Itinerary & Selected Tabs Data
   const handleApplyGeneratedItinerary = (generatedData: any) => {
-    if (!generatedData || !generatedData.days) return;
+    if (!generatedData) return;
 
-    updateActiveTrip((trip) => {
-      const newDays = generatedData.days.map((d: any) => ({
-        dayNumber: d.dayNumber,
-        date: `Day ${d.dayNumber} - ${d.title}`,
-        title: d.title,
-        summary: d.summary,
-        activities: d.activities.map((a: any, idx: number) => ({
-          id: `ai-act-${Date.now()}-${d.dayNumber}-${idx}`,
-          time: a.time || '10:00 AM',
-          title: a.title,
-          locationName: a.locationName || trip.destination,
-          category: (a.category as any) || 'sightseeing',
-          estimatedCost: a.estimatedCost || 0,
-          notes: a.notes || '',
-          isCompleted: false,
-        })),
-      }));
+    const targetId = generatedData.targetTripId || activeTrip.id;
+    const selectedTabs: string[] = generatedData.selectedTabs || ['itinerary'];
 
-      return {
-        ...trip,
-        title: generatedData.destinationTitle || trip.title,
-        days: newDays,
-      };
-    });
+    setTrips((prevTrips) =>
+      prevTrips.map((trip) => {
+        if (trip.id !== targetId) return trip;
+
+        let updatedTrip = { ...trip };
+
+        // 1. Apply Itinerary Days
+        if (selectedTabs.includes('itinerary') && generatedData.days && Array.isArray(generatedData.days)) {
+          const s = trip.startDate ? new Date(trip.startDate) : new Date();
+          const newDays = generatedData.days.map((d: any, idx: number) => {
+            const dayNum = d.dayNumber || idx + 1;
+            const dateObj = new Date(s);
+            dateObj.setDate(s.getDate() + idx);
+            const dd = String(dateObj.getDate()).padStart(2, '0');
+            const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+            const yyyy = dateObj.getFullYear();
+            const formattedDate = `${dd}/${mm}/${yyyy}`;
+
+            const rawTitle = (d.title || '').trim();
+            const strippedTitle = rawTitle.replace(/^(ngày|day)\s*\d+[\s:–-]*/i, '').trim();
+            const dayPrefix = isVi ? `Ngày ${dayNum}` : `Day ${dayNum}`;
+            const finalTitle = strippedTitle && strippedTitle.toLowerCase() !== dayPrefix.toLowerCase()
+              ? `${dayPrefix}: ${strippedTitle}`
+              : dayPrefix;
+
+            return {
+              dayNumber: dayNum,
+              date: isVi ? `Ngày ${dayNum} - ${formattedDate}` : `Day ${dayNum} - ${formattedDate}`,
+              title: finalTitle,
+              summary: '',
+              activities: (d.activities || []).map((a: any, actIdx: number) => ({
+                id: `ai-act-${Date.now()}-${dayNum}-${actIdx}`,
+                time: a.time || '10:00 AM',
+                title: a.title,
+                locationName: a.locationName || trip.destination,
+                category: (a.category as any) || 'sightseeing',
+                estimatedCost: a.estimatedCost || 0,
+                notes: a.notes || '',
+                isCompleted: false,
+              })),
+            };
+          });
+
+          updatedTrip.days = newDays;
+        }
+
+        // 2. Apply Packing List
+        if (selectedTabs.includes('packing') && generatedData.packingItems && Array.isArray(generatedData.packingItems)) {
+          const newItems: PackingItem[] = generatedData.packingItems.map((item: any, idx: number) => ({
+            id: `p-gen-${Date.now()}-${idx}`,
+            category: item.category || 'Essentials',
+            name: item.name,
+            quantity: item.quantity || 1,
+            isPacked: false,
+          }));
+          const existingNames = new Set(updatedTrip.packingList.map((i) => i.name.toLowerCase()));
+          const filteredNew = newItems.filter((i) => !existingNames.has(i.name.toLowerCase()));
+          updatedTrip.packingList = [...updatedTrip.packingList, ...filteredNew];
+        }
+
+        // 3. Apply Sample Expenses
+        if (selectedTabs.includes('expenses') && generatedData.expenses && Array.isArray(generatedData.expenses)) {
+          let members = [...updatedTrip.members];
+          if (members.length === 0) {
+            members = [
+              {
+                id: 'm1',
+                name: isVi ? 'Bạn (Trưởng nhóm)' : 'Alex Rivera (You)',
+                avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80',
+              },
+            ];
+            updatedTrip.members = members;
+            updatedTrip.fundHolderId = 'm1';
+          }
+
+          const defaultPayer = members[0].id;
+          const allMemberIds = members.map((m) => m.id);
+
+          const newExpenses: Expense[] = generatedData.expenses.map((exp: any, idx: number) => ({
+            id: `exp-gen-${Date.now()}-${idx}`,
+            title: exp.title,
+            amount: exp.amount,
+            currency: exp.currency || updatedTrip.currency || 'USD',
+            category: exp.category || 'other',
+            paidBy: exp.paidBy || defaultPayer,
+            splitWith: exp.splitWith && exp.splitWith.length > 0 ? exp.splitWith : allMemberIds,
+            date: exp.date || updatedTrip.startDate || new Date().toISOString().split('T')[0],
+            receiptNote: exp.receiptNote || (isVi ? 'Dự toán chi tiêu gợi ý từ AI' : 'Suggested expense estimate from AI'),
+          }));
+
+          updatedTrip.expenses = [...newExpenses, ...updatedTrip.expenses];
+        }
+
+        // 4. Apply Travel Documents
+        if (selectedTabs.includes('vault') && generatedData.documents && Array.isArray(generatedData.documents)) {
+          const newDocs: TravelDocument[] = generatedData.documents.map((doc: any, idx: number) => ({
+            id: `doc-gen-${Date.now()}-${idx}`,
+            title: doc.title,
+            docType: doc.docType || 'Other',
+            codeOrNumber: doc.codeOrNumber || '',
+            date: doc.date || updatedTrip.startDate,
+            cost: doc.cost,
+            notes: doc.notes || '',
+            urlOrFilename: doc.urlOrFilename,
+          }));
+
+          updatedTrip.documents = [...newDocs, ...updatedTrip.documents];
+        }
+
+        if (generatedData.destinationTitle && (!updatedTrip.title || updatedTrip.title.startsWith('Chuyến đi'))) {
+          updatedTrip.title = generatedData.destinationTitle;
+        }
+
+        return updatedTrip;
+      })
+    );
+
+    // 5. Apply Saved Places (Global state)
+    if (selectedTabs.includes('places') && generatedData.savedPlaces && Array.isArray(generatedData.savedPlaces)) {
+      setSavedPlaces((prevPlaces) => {
+        const existingKeys = new Set(prevPlaces.map((p) => `${p.name.toLowerCase()}_${p.cityName.toLowerCase()}`));
+        const newPlaces: SavedPlace[] = generatedData.savedPlaces
+          .filter((p: any) => !existingKeys.has(`${p.name.toLowerCase()}_${(p.cityName || '').toLowerCase()}`))
+          .map((p: any, idx: number) => ({
+            id: `place-gen-${Date.now()}-${idx}`,
+            cityName: p.cityName || activeTrip.destination,
+            name: p.name,
+            category: p.category || 'sightseeing',
+            address: p.address || '',
+            estimatedCost: p.estimatedCost,
+            currency: p.currency || activeTrip.currency || 'USD',
+            rating: p.rating || 4.8,
+            notes: p.notes || '',
+            source: isVi ? 'AI gợi ý' : 'AI Recommendation',
+            openTime: p.openTime,
+            closeTime: p.closeTime,
+            createdAt: new Date().toISOString(),
+          }));
+        return [...newPlaces, ...prevPlaces];
+      });
+    }
   };
 
   // 6. Create New Trip
-  const handleCreateTrip = (newTrip: Trip) => {
+  const handleCreateTrip = (newTrip: Trip, openAiArchitect: boolean = false) => {
     setTrips((prev) => [newTrip, ...prev]);
     setActiveTripId(newTrip.id);
+    setActiveTab('itinerary');
+    if (openAiArchitect) {
+      setAiTargetTrip(newTrip);
+      setIsAIModalOpen(true);
+    }
   };
 
   // 6b. Check if active trip has any completed activities
@@ -930,6 +1084,22 @@ function AppContent() {
         isAiChatOpen={isAiChatOpen}
       />
 
+      {/* Offline Mode Indicator Banner */}
+      {!isOnline && (
+        <div className="bg-amber-600 text-white text-xs px-4 py-1.5 flex items-center justify-center gap-2 font-medium shadow-2xs select-none sticky top-0 z-40">
+          <WifiOff className="w-3.5 h-3.5" />
+          <span>{isVi ? 'Chế độ ngoại tuyến • Lịch trình & dữ liệu của bạn đã được lưu cục bộ an toàn' : 'Offline Mode • Your itinerary and data are safely cached offline'}</span>
+        </div>
+      )}
+
+      {/* Online Toast Notification */}
+      {showOnlineToast && (
+        <div className="fixed bottom-5 right-5 z-50 bg-emerald-700 text-white text-xs px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 duration-200">
+          <Wifi className="w-4 h-4 text-emerald-200" />
+          <span className="font-semibold">{isVi ? 'Đã kết nối lại Internet' : 'Internet connection restored'}</span>
+        </div>
+      )}
+
       {/* Main Container - Mobile Optimized */}
       <main className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 pt-3 sm:pt-6 space-y-4 sm:space-y-5">
         
@@ -963,14 +1133,14 @@ function AppContent() {
 
             {/* Quick Action Buttons */}
             <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
-              {/* Change Photo Button */}
+              {/* Export Travel Handbook / Print PDF */}
               <button
-                onClick={() => setIsEditTripModalOpen(true)}
-                className="p-1.5 sm:px-2.5 sm:py-1.5 bg-black/40 hover:bg-black/60 text-white rounded-lg sm:rounded-xl text-xs font-semibold backdrop-blur-md border border-white/10 flex items-center gap-1 transition-all cursor-pointer shadow-sm"
-                title={isVi ? 'Đổi ảnh' : 'Change photo'}
+                onClick={() => setIsHandbookModalOpen(true)}
+                className="p-1.5 sm:px-2.5 sm:py-1.5 bg-white/20 hover:bg-white/30 text-white rounded-lg sm:rounded-xl text-xs font-semibold backdrop-blur-md border border-white/20 flex items-center gap-1 transition-all cursor-pointer shadow-sm"
+                title={isVi ? 'Xuất cẩm nang / In PDF' : 'Travel Handbook / Print PDF'}
               >
-                <Camera className="w-3.5 h-3.5" />
-                <span className="hidden md:inline">{isVi ? 'Đổi ảnh' : 'Photo'}</span>
+                <Printer className="w-3.5 h-3.5 text-white" />
+                <span className="hidden md:inline">{isVi ? 'Cẩm nang' : 'Handbook'}</span>
               </button>
 
               {/* Edit Trip Button */}
@@ -1001,14 +1171,17 @@ function AppContent() {
                 <span className="hidden md:inline">{isVi ? 'Xóa' : 'Delete'}</span>
               </button>
 
-              {/* AI Action Icon */}
+              {/* AI Itinerary Architect Button - Đồng bộ tên gọi với lúc tạo mới */}
               <button
-                onClick={() => setIsAIModalOpen(true)}
-                className="p-1.5 sm:px-2.5 sm:py-1.5 bg-teal-500 hover:bg-teal-600 text-white border border-teal-400/40 rounded-lg sm:rounded-xl transition-all flex items-center gap-1 cursor-pointer shadow-sm group/ai"
-                title={isVi ? 'Tùy chỉnh với AI' : 'Customize with AI'}
+                onClick={() => {
+                  setAiTargetTrip(activeTrip);
+                  setIsAIModalOpen(true);
+                }}
+                className="p-1.5 sm:px-2.5 sm:py-1.5 bg-teal-500 hover:bg-teal-600 text-white border border-teal-400/40 rounded-lg sm:rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-sm group/ai"
+                title={isVi ? 'Kiến trúc sư Lịch trình AI' : 'AI Itinerary Architect'}
               >
                 <Sparkles className="w-3.5 h-3.5 text-white group-hover/ai:rotate-12 transition-transform" />
-                <span className="text-[11px] font-extrabold tracking-wide uppercase text-white hidden xs:inline">AI</span>
+                <span className="text-[11px] font-bold tracking-wide text-white hidden xs:inline">{isVi ? 'Kiến trúc sư AI' : 'AI Architect'}</span>
               </button>
             </div>
           </div>
@@ -1064,7 +1237,10 @@ function AppContent() {
               onEditActivity={handleEditActivity}
               onToggleActivityCheck={handleToggleActivityCheck}
               onDeleteActivity={handleDeleteActivity}
-              onOpenAIModal={() => setIsAIModalOpen(true)}
+              onOpenAIModal={() => {
+                setAiTargetTrip(activeTrip);
+                setIsAIModalOpen(true);
+              }}
               onAddExpense={handleAddExpense}
               onSaveActivityExpense={handleSaveActivityExpense}
               onNavigateToExpenses={() => setActiveTab('expenses')}
@@ -1126,9 +1302,17 @@ function AppContent() {
 
       {/* AI Itinerary Generator Modal */}
       <AIItineraryModal
+        key={aiTargetTrip?.id || activeTrip?.id}
         isOpen={isAIModalOpen}
-        onClose={() => setIsAIModalOpen(false)}
+        onClose={() => {
+          setIsAIModalOpen(false);
+          setAiTargetTrip(null);
+        }}
         onApplyGeneratedItinerary={handleApplyGeneratedItinerary}
+        targetTrip={aiTargetTrip || activeTrip}
+        initialDestination={aiTargetTrip ? aiTargetTrip.destination : activeTrip?.destination}
+        initialDurationDays={aiTargetTrip ? aiTargetTrip.days.length : (activeTrip?.days?.length || 3)}
+        initialBudget={aiTargetTrip ? aiTargetTrip.budgetTotal : activeTrip?.budgetTotal}
       />
 
       {/* Floating AI Assistant Chat */}
@@ -1153,6 +1337,15 @@ function AppContent() {
           onClose={() => setIsEditTripModalOpen(false)}
           trip={activeTrip}
           onUpdateTrip={handleUpdateTrip}
+        />
+      )}
+
+      {/* Travel Handbook / Print PDF Modal */}
+      {isHandbookModalOpen && (
+        <TravelHandbookModal
+          trip={activeTrip}
+          isOpen={isHandbookModalOpen}
+          onClose={() => setIsHandbookModalOpen(false)}
         />
       )}
 
