@@ -1,0 +1,74 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Registered user profile information in TripMate",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "displayName": { "type": "string", "maxLength": 150 },
+        "email": { "type": "string", "maxLength": 200 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "avatar": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "displayName", "email"]
+    },
+    "Trip": {
+      "title": "Trip Itinerary and Financial Data",
+      "description": "Complete collaborative trip data including itinerary and expenses",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "creatorId": { "type": "string", "maxLength": 128 },
+        "creatorName": { "type": "string", "maxLength": 150 },
+        "title": { "type": "string", "maxLength": 200 },
+        "destination": { "type": "string", "maxLength": 200 },
+        "country": { "type": "string", "maxLength": 100 },
+        "startDate": { "type": "string", "maxLength": 50 },
+        "endDate": { "type": "string", "maxLength": 50 },
+        "currency": { "type": "string", "maxLength": 10 },
+        "memberUids": { "type": "array" },
+        "members": { "type": "array" },
+        "days": { "type": "array" },
+        "expenses": { "type": "array" },
+        "packingList": { "type": "array" },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "creatorId", "title", "destination"]
+    },
+    "Invitation": {
+      "title": "Trip Invitation",
+      "description": "Invitation sent to registered or invited users to join a trip",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "tripId": { "type": "string", "maxLength": 128 },
+        "tripTitle": { "type": "string", "maxLength": 200 },
+        "tripDestination": { "type": "string", "maxLength": 200 },
+        "inviterId": { "type": "string", "maxLength": 128 },
+        "inviterName": { "type": "string", "maxLength": 150 },
+        "inviteeEmail": { "type": "string", "maxLength": 200 },
+        "inviteePhone": { "type": "string", "maxLength": 30 },
+        "inviteeUid": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "createdAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "tripId", "inviterId", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Collection of registered user profiles"
+    },
+    "/trips/{tripId}": {
+      "schema": "Trip",
+      "description": "Collection of trips created by users"
+    },
+    "/invitations/{invitationId}": {
+      "schema": "Invitation",
+      "description": "Collection of trip invitations sent between users"
+    }
+  }
+}

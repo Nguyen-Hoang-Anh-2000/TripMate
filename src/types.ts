@@ -60,7 +60,36 @@ export interface TripMember {
   name: string;
   avatar: string;
   email?: string;
+  phone?: string;
+  uid?: string; // Link to registered Firebase Auth user UID
+  isRegistered?: boolean;
+  invitationStatus?: 'accepted' | 'pending' | 'offline';
+  invitationId?: string;
   contributedAmount?: number; // Số tiền đã góp vào quỹ nhóm
+}
+
+export interface UserProfile {
+  id: string;
+  displayName: string;
+  email: string;
+  phone?: string;
+  avatar: string;
+  createdAt: string;
+}
+
+export interface TripInvitation {
+  id: string;
+  tripId: string;
+  tripTitle: string;
+  tripDestination: string;
+  tripDates: string;
+  inviterId: string;
+  inviterName: string;
+  inviteeEmail?: string;
+  inviteePhone?: string;
+  inviteeUid?: string;
+  status: 'pending' | 'accepted' | 'declined';
+  createdAt: string;
 }
 
 export interface PackingItem {
@@ -108,6 +137,9 @@ export interface Trip {
     icon: string; // emoji or code
   };
   fundHolderId?: string; // ID thành viên đang giữ tiền đã góp của nhóm (thủ quỹ)
+  creatorId?: string; // UID of user who created the trip
+  creatorName?: string;
+  memberUids?: string[]; // UIDs of members who accepted the invitation
 }
 
 export interface SavedPlace {

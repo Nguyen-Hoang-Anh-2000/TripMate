@@ -3,6 +3,7 @@ import { SAMPLE_TRIPS } from './data/sampleTrips';
 import { Trip, ActivityItem, Expense, PackingItem, TravelDocument, SavedPlace, TripMember } from './types';
 import { INITIAL_SAVED_PLACES } from './data/savedPlacesData';
 import { LanguageProvider, useLanguage } from './context/LanguageContext';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import { Navbar } from './components/Navbar';
 import { ItineraryView } from './components/ItineraryView';
 import { InteractiveMapView } from './components/InteractiveMapView';
@@ -16,6 +17,9 @@ import { AIAssistantChat } from './components/AIAssistantChat';
 import { NewTripModal } from './components/NewTripModal';
 import { EditTripModal } from './components/EditTripModal';
 import { TravelHandbookModal } from './components/TravelHandbookModal';
+import { AuthModal } from './components/AuthModal';
+import { NotificationsModal } from './components/NotificationsModal';
+import { AuthScreen } from './components/AuthScreen';
 import { formatMoney } from './utils/formatCurrency';
 
 import { 
@@ -28,6 +32,15 @@ type TabType = 'itinerary' | 'expenses' | 'map' | 'places' | 'vault' | 'packing'
 
 function AppContent() {
   const { lang, t, isVi } = useLanguage();
+  const { 
+    userProfile, 
+    isLoading,
+    isAuthModalOpen, 
+    setIsAuthModalOpen, 
+    isNotificationsModalOpen, 
+    setIsNotificationsModalOpen 
+  } = useAuth();
+
   const [trips, setTrips] = useState<Trip[]>(SAMPLE_TRIPS);
   const [activeTripId, setActiveTripId] = useState<string>(SAMPLE_TRIPS[0].id);
   const [activeTab, setActiveTab] = useState<TabType>('itinerary');
@@ -43,6 +56,80 @@ function AppContent() {
   const [isHandbookModalOpen, setIsHandbookModalOpen] = useState(false);
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
   const [showOnlineToast, setShowOnlineToast] = useState<boolean>(false);
+  const [invitationToast, setInvitationToast] = useState<string | null>(null);
+
+  // Listen to in-app invitation acceptance
+  React.useEffect(() => {
+    const handleInvitationResponded = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail) return;
+      const { tripId, accept, userProfile: responderProfile, invitationId } = detail;
+
+      if (accept && responderProfile) {
+        setTrips((prevTrips) => {
+          return prevTrips.map((t) => {
+            if (t.id === tripId) {
+              const existingIdx = t.members.findIndex(
+                (m) =>
+                  (invitationId && m.invitationId === invitationId) ||
+                  (m.uid && m.uid === responderProfile.id) ||
+                  (m.email && m.email.toLowerCase() === responderProfile.email.toLowerCase()) ||
+                  (responderProfile.phone && m.phone === responderProfile.phone)
+              );
+
+              let updatedMembers = [...t.members];
+              if (existingIdx >= 0) {
+                updatedMembers[existingIdx] = {
+                  ...updatedMembers[existingIdx],
+                  uid: responderProfile.id,
+                  name: responderProfile.displayName,
+                  avatar: responderProfile.avatar || updatedMembers[existingIdx].avatar,
+                  email: responderProfile.email,
+                  phone: responderProfile.phone,
+                  isRegistered: true,
+                  invitationStatus: 'accepted',
+                };
+              } else {
+                updatedMembers.push({
+                  id: `m-${responderProfile.id}`,
+                  name: responderProfile.displayName,
+                  avatar: responderProfile.avatar,
+                  email: responderProfile.email,
+                  phone: responderProfile.phone,
+                  uid: responderProfile.id,
+                  isRegistered: true,
+                  invitationStatus: 'accepted',
+                  contributedAmount: 0,
+                });
+              }
+
+              const memberUids = Array.from(new Set([...(t.memberUids || []), responderProfile.id]));
+              return {
+                ...t,
+                members: updatedMembers,
+                memberUids,
+              };
+            }
+            return t;
+          });
+        });
+
+        // Switch to the accepted trip so the user can immediately explore all information
+        setActiveTripId(tripId);
+        setInvitationToast(
+          isVi
+            ? `🎉 Bạn đã chính thức tham gia chuyến đi! Đã mở toàn bộ lịch trình, chi tiêu và bản đồ.`
+            : `🎉 You have officially joined the trip! Full itinerary, expenses and map unlocked.`
+        );
+        setTimeout(() => setInvitationToast(null), 5000);
+      }
+    };
+
+    window.addEventListener('tripmate_invitation_responded', handleInvitationResponded);
+    return () => {
+      window.removeEventListener('tripmate_invitation_responded', handleInvitationResponded);
+    };
+  }, [isVi]);
 
   React.useEffect(() => {
     const handleOnline = () => {
@@ -1061,6 +1148,30 @@ function AppContent() {
     setActiveTab('itinerary');
   };
 
+  // 1. Loading splash screen while verifying auth session
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-[#07090E] flex flex-col items-center justify-center p-4">
+        <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-teal-500 to-emerald-400 p-0.5 shadow-xl shadow-teal-500/20 flex items-center justify-center animate-pulse">
+          <div className="w-full h-full bg-slate-950 rounded-[14px] flex items-center justify-center text-teal-400">
+            <Compass className="w-6 h-6 animate-spin" />
+          </div>
+        </div>
+        <div className="mt-4 text-xs font-semibold text-slate-400 tracking-wider">
+          TripMate
+        </div>
+      </div>
+    );
+  }
+
+  // 2. USER REQUIREMENT:
+  // "lúc tk chưa login sẽ không hiển thị thông tin gì 
+  // chỉ hiển thị màn hình login có thêm nút đăng ký dành cho người chưa đăng ký 
+  // backgound màn hình login này phải đẹp chuyên nghiệp đơn giản và sang trọng"
+  if (!userProfile) {
+    return <AuthScreen />;
+  }
+
   const tabs = [
     { id: 'itinerary', label: t('tab.itinerary'), icon: <Compass className="w-4 h-4" /> },
     { id: 'expenses', label: t('tab.expenses'), icon: <CreditCard className="w-4 h-4" /> },
@@ -1349,15 +1460,51 @@ function AppContent() {
         />
       )}
 
+      {/* Auth / Profile Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+      />
+
+      {/* In-app Notifications / Trip Invitations Modal */}
+      <NotificationsModal
+        isOpen={isNotificationsModalOpen}
+        onClose={() => setIsNotificationsModalOpen(false)}
+        onSelectTrip={(tripId) => {
+          setActiveTripId(tripId);
+          setActiveTab('expenses');
+        }}
+      />
+
+      {/* Floating Invitation Acceptance Toast */}
+      {invitationToast && (
+        <div className="fixed bottom-6 right-6 z-50 max-w-md bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-2xl border border-teal-500/40 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-3 duration-200">
+          <div className="w-8 h-8 rounded-full bg-teal-500/20 text-teal-400 flex items-center justify-center shrink-0">
+            <Sparkles className="w-4 h-4" />
+          </div>
+          <p className="text-xs font-semibold leading-relaxed flex-1">
+            {invitationToast}
+          </p>
+          <button
+            onClick={() => setInvitationToast(null)}
+            className="text-slate-400 hover:text-white p-1 rounded-lg"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
     </div>
   );
 }
 
 export function App() {
   return (
-    <LanguageProvider>
-      <AppContent />
-    </LanguageProvider>
+    <AuthProvider>
+      <LanguageProvider>
+        <AppContent />
+      </LanguageProvider>
+    </AuthProvider>
   );
 }
 

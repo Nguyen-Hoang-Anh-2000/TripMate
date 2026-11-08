@@ -39,7 +39,7 @@
   box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
 }
 
-/* Dedicated Print Styles for Travel Handbook */
+/* Dedicated Print Styles for Travel Handbook & Expense Invoices */
 @media print {
   body {
     background: white !important;
@@ -49,10 +49,13 @@
     visibility: hidden;
   }
   .travel-handbook-printable,
-  .travel-handbook-printable * {
+  .travel-handbook-printable *,
+  .expense-invoice-printable,
+  .expense-invoice-printable * {
     visibility: visible;
   }
-  .travel-handbook-printable {
+  .travel-handbook-printable,
+  .expense-invoice-printable {
     position: absolute;
     left: 0;
     top: 0;

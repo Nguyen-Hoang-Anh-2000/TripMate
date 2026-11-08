@@ -1,7 +1,8 @@
 import React from 'react';
-import { Compass, Plus, MessageSquare, Globe, ChevronDown } from 'lucide-react';
+import { Compass, Plus, MessageSquare, Globe, ChevronDown, Bell, User, LogOut } from 'lucide-react';
 import { Trip } from '../types';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 
 interface NavbarProps {
   trips: Trip[];
@@ -22,6 +23,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   isAiChatOpen,
 }) => {
   const { lang, setLang } = useLanguage();
+  const { userProfile, unreadInvitationsCount, setIsAuthModalOpen, setIsNotificationsModalOpen, logout } = useAuth();
 
   const toggleLanguage = () => {
     setLang(lang === 'en' ? 'vi' : 'en');
@@ -87,6 +89,49 @@ export const Navbar: React.FC<NavbarProps> = ({
               <MessageSquare className="w-4 h-4 text-teal-600" />
               <span className="hidden md:inline">{isVi ? 'Trợ lý AI' : 'AI Assistant'}</span>
             </button>
+
+            {/* In-app Notifications Bell for Trip Invitations */}
+            <button
+              onClick={() => setIsNotificationsModalOpen(true)}
+              className="relative inline-flex items-center justify-center p-2 rounded-xl text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 border border-slate-200 transition-colors cursor-pointer min-h-[36px]"
+              title={isVi ? `Lời mời chuyến đi (${unreadInvitationsCount} mới)` : `Trip Invitations (${unreadInvitationsCount} unread)`}
+            >
+              <Bell className="w-4 h-4 text-slate-700" />
+              {unreadInvitationsCount > 0 && (
+                <span className="absolute -top-1 -right-1 flex h-4 min-w-[16px] px-1 items-center justify-center rounded-full bg-rose-600 text-[9px] font-extrabold text-white shadow-xs animate-pulse">
+                  {unreadInvitationsCount}
+                </span>
+              )}
+            </button>
+
+            {/* User Account / Profile & Sign Out */}
+            {userProfile ? (
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => setIsAuthModalOpen(true)}
+                  className="inline-flex items-center gap-1.5 p-1 sm:px-2.5 sm:py-1 rounded-xl text-xs font-semibold bg-teal-50 hover:bg-teal-100/80 text-teal-900 border border-teal-200 transition-colors cursor-pointer min-h-[36px]"
+                  title={userProfile.displayName}
+                >
+                  <img
+                    src={userProfile.avatar}
+                    alt={userProfile.displayName}
+                    className="w-6 h-6 rounded-full object-cover border border-teal-400 shrink-0"
+                  />
+                  <span className="hidden sm:inline max-w-[110px] truncate font-bold text-teal-900">
+                    {userProfile.displayName}
+                  </span>
+                </button>
+                <button
+                  onClick={async () => {
+                    await logout();
+                  }}
+                  className="inline-flex items-center justify-center p-2 rounded-xl text-slate-500 hover:text-rose-600 hover:bg-rose-50 border border-slate-200 transition-colors cursor-pointer min-h-[36px]"
+                  title={isVi ? 'Đăng xuất' : 'Sign Out'}
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              </div>
+            ) : null}
 
             {/* Language Switcher */}
             <button

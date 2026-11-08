@@ -3,11 +3,15 @@ import {
   DollarSign, Plus, Users, CreditCard, ArrowRight, Trash2, CheckCircle, CheckCircle2, Circle,
   Receipt, ArrowUpRight, ShieldCheck, Wallet, PiggyBank, Edit2, Edit3, Check, X, 
   AlertCircle, UserPlus, Eye, RefreshCw, Calendar, Tag, FileText, ChevronRight, ChevronDown, ChevronUp,
-  Search, RotateCcw, Download, Sparkles, Copy, SlidersHorizontal, Image, Camera, FileSpreadsheet
+  Search, RotateCcw, Download, Sparkles, Copy, SlidersHorizontal, Image, Camera, FileSpreadsheet, Printer,
+  Mail, Phone, UserCheck, Clock, Send
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { Trip, Expense, CategoryType, TripMember } from '../types';
+import { collection, doc, setDoc } from 'firebase/firestore';
+import { db } from '../firebase';
+import { Trip, Expense, CategoryType, TripMember, UserProfile } from '../types';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 import { formatMoney } from '../utils/formatCurrency';
 import { calculateEvenSplits } from './ItineraryView';
 import { ReceiptScannerModal, ScannedReceiptData } from './ReceiptScannerModal';
@@ -94,11 +98,19 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   const [editNote, setEditNote] = useState('');
   const [expenseToDelete, setExpenseToDelete] = useState<UnifiedExpenseItem | null>(null);
 
-  // Close paidBy dropdown on click outside
+  // Export dropdown & PDF report modal states
+  const [isExportDropdownOpen, setIsExportDropdownOpen] = useState(false);
+  const [isPdfModalOpen, setIsPdfModalOpen] = useState(false);
+  const exportDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdowns on click outside
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (editPaidByRef.current && !editPaidByRef.current.contains(e.target as Node)) {
         setIsEditPaidByDropdownOpen(false);
+      }
+      if (exportDropdownRef.current && !exportDropdownRef.current.contains(e.target as Node)) {
+        setIsExportDropdownOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -109,9 +121,41 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   const [editingContribMemberId, setEditingContribMemberId] = useState<string | null>(null);
   const [editingContribValue, setEditingContribValue] = useState<string>('');
 
-  // Add Member form state
+  // Auth & Add Member form state with registered user lookup
+  const { userProfile, searchRegisteredUser } = useAuth();
+  const [newMemberContact, setNewMemberContact] = useState('');
+  const [matchedUser, setMatchedUser] = useState<UserProfile | null>(null);
+  const [isSearchingUser, setIsSearchingUser] = useState(false);
   const [newMemberName, setNewMemberName] = useState('');
   const [newMemberContributed, setNewMemberContributed] = useState('0');
+  const [memberActionToast, setMemberActionToast] = useState<string | null>(null);
+
+  // Debounced search for registered users by email or phone
+  useEffect(() => {
+    const trimmed = newMemberContact.trim();
+    if (!trimmed || trimmed.length < 3) {
+      setMatchedUser(null);
+      setIsSearchingUser(false);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setIsSearchingUser(true);
+      try {
+        const found = await searchRegisteredUser(trimmed);
+        setMatchedUser(found);
+        if (found && !newMemberName.trim()) {
+          setNewMemberName(found.displayName);
+        }
+      } catch (err) {
+        console.warn('User search error:', err);
+      } finally {
+        setIsSearchingUser(false);
+      }
+    }, 350);
+
+    return () => clearTimeout(timer);
+  }, [newMemberContact]);
 
   // Add Expense form state
   const [title, setTitle] = useState('');
@@ -573,6 +617,9 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   // Active settlements based on user toggle
   const activeSettlements = isSimplifiedDebts ? simplifiedSettlements : settlements;
 
+  // Normalized title for file exports
+  const safeTitle = trip.title.replace(/[^a-zA-Z0-9\u00C0-\u024F\u1EA0-\u1EF9]/g, '_').trim() || 'ChuyenDi';
+
   // Export genuine Excel (.xlsx) workbook
   const handleExportExcel = () => {
     const wb = XLSX.utils.book_new();
@@ -676,10 +723,192 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     ];
     XLSX.utils.book_append_sheet(wb, wsExpenses, 'Chi_Tiet_Hoa_Don');
 
-    const safeTitle = trip.title.replace(/[^a-zA-Z0-9\u00C0-\u024F\u1EA0-\u1EF9]/g, '_').trim() || 'ChuyenDi';
     const fileName = `Hoa_Don_Chi_Tieu_${safeTitle}_${new Date().toISOString().split('T')[0]}.xlsx`;
-
     XLSX.writeFile(wb, fileName, { bookType: 'xlsx' });
+  };
+
+  // Export genuine CSV format with UTF-8 BOM for 100% Vietnamese font compatibility
+  const handleExportCSV = () => {
+    const lines: string[] = [];
+    const escapeCsv = (val: any) => {
+      if (val === undefined || val === null) return '""';
+      const str = String(val).replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    // 1. Header info
+    lines.push([escapeCsv('BÁO CÁO QUẢN LÝ TÀI CHÍNH & HÓA ĐƠN CHI TIÊU DU LỊCH')].join(','));
+    lines.push([escapeCsv('Tên chuyến đi:'), escapeCsv(trip.title)].join(','));
+    lines.push([escapeCsv('Điểm đến:'), escapeCsv(`${trip.destination}, ${trip.country}`)].join(','));
+    lines.push([escapeCsv('Thời gian:'), escapeCsv(`${trip.startDate} đến ${trip.endDate}`)].join(','));
+    lines.push([escapeCsv('Tổng chi phí thực tế:'), escapeCsv(totalSpent)].join(','));
+    lines.push([escapeCsv('Tổng tiền đã đóng quỹ:'), escapeCsv(totalContributed)].join(','));
+    lines.push([escapeCsv('Số dư quỹ nhóm hiện tại:'), escapeCsv(fundRemaining)].join(','));
+    lines.push([escapeCsv('Đơn vị tiền tệ:'), escapeCsv(trip.currency || 'VND')].join(','));
+    lines.push([escapeCsv('Người giữ quỹ nhóm:'), escapeCsv(fundHolder.name)].join(','));
+    lines.push([escapeCsv('Thời gian xuất file:'), escapeCsv(new Date().toLocaleString('vi-VN'))].join(','));
+    lines.push('');
+
+    // 2. Settlement section
+    lines.push([escapeCsv(`BẢNG QUYẾT TOÁN CÔNG NỢ ${isSimplifiedDebts ? '(ĐÃ TỐI ƯU HÓA RÚT GỌN GIAO DỊCH)' : '(TIÊU CHUẨN)'}`)].join(','));
+    lines.push([escapeCsv('STT'), escapeCsv('Người chuyển'), escapeCsv('Người nhận'), escapeCsv(`Số tiền (${trip.currency || 'VND'})`), escapeCsv('Nội dung chuyển khoản')].join(','));
+
+    if (activeSettlements.length === 0) {
+      lines.push([escapeCsv(1), escapeCsv('Tất cả thành viên'), escapeCsv('Không ai nợ ai'), escapeCsv(0), escapeCsv('Đã cân bằng toàn bộ tài chính')].join(','));
+    } else {
+      activeSettlements.forEach((s, idx) => {
+        const fromName = getMemberName(s.from);
+        const toName = getMemberName(s.to);
+        lines.push([
+          escapeCsv(idx + 1),
+          escapeCsv(fromName),
+          escapeCsv(toName),
+          escapeCsv(s.amount),
+          escapeCsv(`Chuyển tiền quyết toán chuyến đi ${trip.title}`),
+        ].join(','));
+      });
+    }
+
+    lines.push('');
+
+    // 3. Member balances
+    lines.push([escapeCsv('BẢNG TỔNG KẾT TÀI CHÍNH TỪNG THÀNH VIÊN')].join(','));
+    lines.push([
+      escapeCsv('STT'),
+      escapeCsv('Tên thành viên'),
+      escapeCsv('Tiền đã đóng quỹ'),
+      escapeCsv('Tiền tự chi riêng'),
+      escapeCsv('Tổng tiền đã bỏ ra'),
+      escapeCsv('Phần chi phí phải chịu'),
+      escapeCsv('Số dư ròng (Chênh lệch)'),
+    ].join(','));
+
+    memberStats.forEach((s, idx) => {
+      const totalOut = s.contributed + s.paidDirectly;
+      lines.push([
+        escapeCsv(idx + 1),
+        escapeCsv(s.member.name),
+        escapeCsv(s.contributed),
+        escapeCsv(s.paidDirectly),
+        escapeCsv(totalOut),
+        escapeCsv(s.consumedTotal),
+        escapeCsv(s.remainingBalance),
+      ].join(','));
+    });
+
+    lines.push('');
+
+    // 4. Invoices / Expenses itemized list
+    lines.push([escapeCsv('DANH SÁCH CHI TIẾT TỪNG KHOẢN CHI & HÓA ĐƠN')].join(','));
+    lines.push([
+      escapeCsv('STT'),
+      escapeCsv('Ngày'),
+      escapeCsv('Danh mục'),
+      escapeCsv('Tên khoản chi / Hoạt động'),
+      escapeCsv(`Số tiền (${trip.currency || 'VND'})`),
+      escapeCsv('Người thanh toán'),
+      escapeCsv('Thành viên cùng chia'),
+      escapeCsv('Nguồn phát sinh'),
+      escapeCsv('Ghi chú'),
+    ].join(','));
+
+    unifiedExpenses.forEach((exp, idx) => {
+      const payerName = exp.paidBy === 'fund'
+        ? `Quỹ chung (${fundHolder.name} giữ)`
+        : (trip.members.find((m) => m.id === exp.paidBy)?.name || exp.paidBy);
+      const splitNames = exp.splitWith.map((id) => trip.members.find((m) => m.id === id)?.name || id).join(', ');
+      const source = exp.sourceType === 'completed_activity' ? 'Hoạt động lịch trình' : 'Chi tiêu thủ công/Hóa đơn';
+      lines.push([
+        escapeCsv(idx + 1),
+        escapeCsv(exp.date || ''),
+        escapeCsv(exp.category),
+        escapeCsv(exp.title),
+        escapeCsv(exp.amount),
+        escapeCsv(payerName),
+        escapeCsv(splitNames),
+        escapeCsv(source),
+        escapeCsv(exp.note || ''),
+      ].join(','));
+    });
+
+    const csvContent = '\uFEFF' + lines.join('\r\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Hoa_Don_Chi_Tieu_${safeTitle}_${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Generate self-contained standalone printable A4 HTML invoice
+  const generatePrintableInvoiceHtml = () => {
+    const printableElement = document.querySelector('.expense-invoice-printable');
+    const content = printableElement ? printableElement.innerHTML : '';
+
+    return `<!DOCTYPE html>
+<html lang="${isVi ? 'vi' : 'en'}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${trip.title} - ${isVi ? 'Hóa đơn & Quyết toán chi tiêu' : 'Expense & Settlement Report'}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { box-sizing: border-box; font-family: 'Be Vietnam Pro', -apple-system, sans-serif; }
+    body { margin: 0; padding: 24px; color: #0f172a; background: #fff; font-size: 13px; line-height: 1.5; }
+    @page { size: A4 portrait; margin: 1.2cm; }
+    @media print {
+      body { padding: 0; }
+      .no-print { display: none !important; }
+      .break-inside-avoid { break-inside: avoid; page-break-inside: avoid; }
+    }
+    .no-print-bar { background: #f0fdf4; border: 1px solid #bbf7d0; padding: 12px 16px; border-radius: 10px; margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between; gap: 12px; font-weight: 500; font-size: 13px; color: #166534; }
+    .print-btn { background: #0d9488; color: white; border: none; padding: 9px 18px; border-radius: 8px; font-weight: 600; font-size: 13px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+    .print-btn:hover { background: #0f766e; }
+  </style>
+  <script>
+    window.onload = function() {
+      setTimeout(function() {
+        try { window.print(); } catch (e) {}
+      }, 300);
+    };
+  </script>
+</head>
+<body>
+  <div class="no-print no-print-bar">
+    <span>💡 <strong>${isVi ? 'Mẹo lưu file PDF:' : 'Tip:'}</strong> ${isVi ? 'Tại hộp thoại in, chọn mục Đích (Destination) là "Lưu dưới dạng PDF" (Save as PDF).' : 'In print dialog, choose "Save as PDF" to save file.'}</span>
+    <button class="print-btn" onclick="window.print()">🖨️ ${isVi ? 'In / Lưu PDF ngay' : 'Print / Save PDF'}</button>
+  </div>
+  ${content}
+</body>
+</html>`;
+  };
+
+  const handleDownloadPrintableHtml = () => {
+    const html = generatePrintableInvoiceHtml();
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Hoa_Don_Quyet_Toan_${safeTitle}_${new Date().toISOString().split('T')[0]}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handlePrintPdf = () => {
+    try {
+      window.print();
+    } catch (e) {
+      console.warn('Direct print blocked by sandbox, downloading:', e);
+      handleDownloadPrintableHtml();
+    }
   };
 
   // Copy settlement summary for chat apps
@@ -788,22 +1017,100 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     setShowExpenseForm(false);
   };
 
-  const handleSaveAddMember = (e: React.FormEvent) => {
+  const handleSaveAddMember = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMemberName.trim()) return;
+    const finalName = newMemberName.trim() || matchedUser?.displayName || '';
+    if (!finalName) return;
 
     const contributed = parseFloat(newMemberContributed) || 0;
-    const defaultAvatar = `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(newMemberName.trim())}`;
+    const defaultAvatar = matchedUser?.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(finalName)}`;
+    const contactVal = newMemberContact.trim();
+    const isEmail = contactVal.includes('@');
 
-    if (onAddMember) {
-      onAddMember({
-        name: newMemberName.trim(),
-        avatar: defaultAvatar,
-        contributedAmount: contributed,
-      });
+    if (matchedUser) {
+      // 1. User is already registered on TripMate -> Send In-App Invitation
+      try {
+        const invRef = doc(collection(db, 'invitations'));
+        await setDoc(invRef, {
+          tripId: trip.id,
+          tripTitle: trip.title,
+          tripDestination: trip.destination,
+          tripDates: `${trip.startDate} - ${trip.endDate}`,
+          inviterId: userProfile?.id || trip.creatorId || 'creator',
+          inviterName: userProfile?.displayName || trip.creatorName || (isVi ? 'Trưởng đoàn' : 'Trip Leader'),
+          inviteeEmail: matchedUser.email,
+          inviteePhone: matchedUser.phone || '',
+          inviteeUid: matchedUser.id,
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+        });
+
+        if (onAddMember) {
+          onAddMember({
+            name: matchedUser.displayName,
+            avatar: defaultAvatar,
+            email: matchedUser.email,
+            phone: matchedUser.phone,
+            uid: matchedUser.id,
+            isRegistered: true,
+            invitationStatus: 'pending',
+            invitationId: invRef.id,
+            contributedAmount: contributed,
+          });
+        }
+
+        setMemberActionToast(
+          isVi
+            ? `✉️ Đã gửi lời mời tham gia qua app tới "${matchedUser.displayName}". Thành viên sẽ chính thức gia nhập chuyến đi khi bấm "Đồng ý"!`
+            : `✉️ Sent in-app invitation to "${matchedUser.displayName}". They will join the trip once accepted!`
+        );
+      } catch (err) {
+        console.error('Error sending invitation:', err);
+        // Fallback local add with pending status
+        if (onAddMember) {
+          onAddMember({
+            name: matchedUser.displayName,
+            avatar: defaultAvatar,
+            email: matchedUser.email,
+            phone: matchedUser.phone,
+            uid: matchedUser.id,
+            isRegistered: true,
+            invitationStatus: 'pending',
+            contributedAmount: contributed,
+          });
+        }
+        setMemberActionToast(
+          isVi
+            ? `✉️ Đã ghi nhận lời mời tới "${matchedUser.displayName}".`
+            : `✉️ Recorded invitation for "${matchedUser.displayName}".`
+        );
+      }
+    } else {
+      // 2. User is NOT registered -> Add directly as normal offline member
+      if (onAddMember) {
+        onAddMember({
+          name: finalName,
+          avatar: defaultAvatar,
+          email: isEmail ? contactVal : undefined,
+          phone: !isEmail && contactVal ? contactVal : undefined,
+          isRegistered: false,
+          invitationStatus: 'offline',
+          contributedAmount: contributed,
+        });
+      }
+
+      setMemberActionToast(
+        isVi
+          ? `✓ Đã thêm "${finalName}" vào danh sách thành viên ngoại tuyến.`
+          : `✓ Added "${finalName}" as an offline member.`
+      );
     }
 
+    setTimeout(() => setMemberActionToast(null), 4500);
+
     setNewMemberName('');
+    setNewMemberContact('');
+    setMatchedUser(null);
     setNewMemberContributed('0');
     setShowAddMemberModal(false);
   };
@@ -843,7 +1150,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     <div className="space-y-4 sm:space-y-6">
       {/* Top Action Bar */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-        {/* Left: Quick Actions (Quét hóa đơn AI & Xuất Excel / CSV) */}
+        {/* Left: Quick Actions (Quét hóa đơn & Xuất file dropdown) */}
         <div className="flex items-center gap-2 flex-wrap">
           <button
             type="button"
@@ -852,18 +1159,77 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
             title={isVi ? 'Quét hóa đơn tự động bằng AI Gemini Vision' : 'Scan receipt using AI Vision'}
           >
             <Sparkles className="w-4 h-4 text-violet-200" />
-            <span>{isVi ? 'Quét hóa đơn AI' : 'Scan Receipt AI'}</span>
+            <span>{isVi ? 'Quét hóa đơn' : 'Scan Receipt'}</span>
           </button>
 
-          <button
-            type="button"
-            onClick={handleExportExcel}
-            className="px-3.5 py-2.5 bg-white hover:bg-emerald-50/60 border border-slate-200/90 hover:border-emerald-300 text-slate-700 hover:text-emerald-800 font-semibold text-xs sm:text-sm rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer"
-            title={isVi ? 'Xuất toàn bộ hóa đơn và quyết toán chi tiêu dạng file Excel (.xlsx)' : 'Export expense invoices to Excel (.xlsx)'}
-          >
-            <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-            <span>{isVi ? 'Xuất hóa đơn Excel' : 'Export Excel (.xlsx)'}</span>
-          </button>
+          {/* Xuất file Droplist */}
+          <div ref={exportDropdownRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setIsExportDropdownOpen(!isExportDropdownOpen)}
+              className="px-3.5 py-2.5 bg-white hover:bg-slate-50 active:scale-[0.98] border border-slate-200/90 hover:border-slate-300 text-slate-700 font-semibold text-xs sm:text-sm rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer"
+              title={isVi ? 'Xuất dữ liệu hóa đơn và quyết toán chi tiêu' : 'Export expense invoices & settlements'}
+            >
+              <Download className="w-4 h-4 text-teal-600" />
+              <span>{isVi ? 'Xuất file' : 'Export File'}</span>
+              <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isExportDropdownOpen ? 'rotate-180' : ''}`} />
+            </button>
+
+            {isExportDropdownOpen && (
+              <div className="absolute top-full left-0 mt-1.5 w-36 sm:w-40 bg-white rounded-xl border border-slate-200 shadow-xl z-30 p-1 space-y-0.5 animate-in fade-in-50 zoom-in-95 duration-100">
+                {/* 1. Excel */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsExportDropdownOpen(false);
+                    handleExportExcel();
+                  }}
+                  className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left hover:bg-emerald-50 text-slate-700 hover:text-emerald-800 transition-colors cursor-pointer group"
+                >
+                  <div className="w-6 h-6 rounded-md bg-emerald-100 flex items-center justify-center text-emerald-700 shrink-0 group-hover:scale-105 transition-transform">
+                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                  </div>
+                  <span className="text-xs font-bold">
+                    Excel
+                  </span>
+                </button>
+
+                {/* 2. PDF */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsExportDropdownOpen(false);
+                    setIsPdfModalOpen(true);
+                  }}
+                  className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left hover:bg-rose-50 text-slate-700 hover:text-rose-800 transition-colors cursor-pointer group"
+                >
+                  <div className="w-6 h-6 rounded-md bg-rose-100 flex items-center justify-center text-rose-700 shrink-0 group-hover:scale-105 transition-transform">
+                    <FileText className="w-3.5 h-3.5" />
+                  </div>
+                  <span className="text-xs font-bold">
+                    PDF
+                  </span>
+                </button>
+
+                {/* 3. CSV */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsExportDropdownOpen(false);
+                    handleExportCSV();
+                  }}
+                  className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left hover:bg-blue-50 text-slate-700 hover:text-blue-800 transition-colors cursor-pointer group"
+                >
+                  <div className="w-6 h-6 rounded-md bg-blue-100 flex items-center justify-center text-blue-700 shrink-0 group-hover:scale-105 transition-transform">
+                    <Download className="w-3.5 h-3.5" />
+                  </div>
+                  <span className="text-xs font-bold">
+                    CSV
+                  </span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Right: Thêm chi tiêu button */}
@@ -1127,7 +1493,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                       className="w-9 h-9 rounded-full object-cover border-2 border-white shadow-2xs shrink-0" 
                     />
                     <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="font-bold text-xs sm:text-sm text-slate-900 truncate">{member.name}</span>
                         {isTreasurer && (
                           <span className="text-[10px] font-bold text-blue-700 bg-blue-100/90 px-1.5 py-0.2 rounded-full shrink-0 flex items-center gap-0.5">
@@ -1135,9 +1501,30 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                             <span>{isVi ? 'Giữ quỹ' : 'Treasurer'}</span>
                           </span>
                         )}
+                        {member.invitationStatus === 'pending' && (
+                          <span className="text-[10px] font-bold text-amber-700 bg-amber-100/90 border border-amber-200 px-1.5 py-0.2 rounded-full shrink-0 flex items-center gap-1" title={isVi ? 'Đang chờ người này bấm đồng ý trong app' : 'Waiting for in-app acceptance'}>
+                            <Clock className="w-2.5 h-2.5 text-amber-600 animate-pulse" />
+                            <span>{isVi ? 'Chờ đồng ý' : 'Pending'}</span>
+                          </span>
+                        )}
+                        {(member.invitationStatus === 'accepted' || (member.isRegistered && member.invitationStatus !== 'pending')) && (
+                          <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100/90 border border-emerald-200 px-1.5 py-0.2 rounded-full shrink-0 flex items-center gap-0.5" title={isVi ? 'Đã tham gia chuyến đi' : 'Joined member'}>
+                            <UserCheck className="w-2.5 h-2.5 text-emerald-600" />
+                            <span>{isVi ? 'Đã tham gia' : 'Joined'}</span>
+                          </span>
+                        )}
+                        {member.invitationStatus === 'offline' && (
+                          <span className="text-[10px] font-medium text-slate-500 bg-slate-100 border border-slate-200 px-1.5 py-0.2 rounded-full shrink-0">
+                            {isVi ? 'Ngoại tuyến' : 'Offline'}
+                          </span>
+                        )}
                       </div>
-                      {member.email && (
-                        <p className="text-[11px] text-slate-400 truncate">{member.email}</p>
+                      {(member.email || member.phone) && (
+                        <p className="text-[11px] text-slate-400 truncate flex items-center gap-1 mt-0.5">
+                          {member.email && <span>{member.email}</span>}
+                          {member.email && member.phone && <span>•</span>}
+                          {member.phone && <span>{member.phone}</span>}
+                        </p>
                       )}
                     </div>
                   </div>
@@ -1978,18 +2365,30 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
         </div>
       )}
 
-      {/* 4. Modal: Thêm thành viên mới */}
+      {/* 4. Modal: Thêm thành viên mới bằng Email hoặc SĐT */}
       {showAddMemberModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
           <div className="bg-white w-full max-w-md rounded-2xl border border-slate-200 shadow-2xl p-5 space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <h3 className="font-display font-bold text-slate-900 text-base flex items-center gap-2">
-                <UserPlus className="w-4 h-4 text-teal-600" />
-                <span>{isVi ? 'Thêm thành viên vào chuyến đi' : 'Add Trip Member'}</span>
-              </h3>
+              <div>
+                <h3 className="font-display font-bold text-slate-900 text-base flex items-center gap-2">
+                  <UserPlus className="w-4 h-4 text-teal-600" />
+                  <span>{isVi ? 'Thêm thành viên vào chuyến đi' : 'Add Trip Member'}</span>
+                </h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  {isVi 
+                    ? 'Nhập Email hoặc SĐT để kết nối tài khoản hoặc thêm ngoại tuyến.' 
+                    : 'Enter Email or Phone to invite registered user or add offline.'}
+                </p>
+              </div>
               <button
                 type="button"
-                onClick={() => setShowAddMemberModal(false)}
+                onClick={() => {
+                  setShowAddMemberModal(false);
+                  setNewMemberContact('');
+                  setMatchedUser(null);
+                  setNewMemberName('');
+                }}
                 className="text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
               >
                 <X className="w-4 h-4" />
@@ -1997,9 +2396,83 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
             </div>
 
             <form onSubmit={handleSaveAddMember} className="space-y-4">
+              {/* Input: Email hoặc Số điện thoại */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <Mail className="w-3.5 h-3.5 text-teal-600" />
+                    <span>{isVi ? 'Email hoặc Số điện thoại' : 'Email or Phone Number'}</span>
+                  </span>
+                  <span className="text-[10px] text-slate-400">
+                    {isVi ? 'Tra cứu tài khoản tự động' : 'Auto account lookup'}
+                  </span>
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    placeholder={isVi ? 'Ví dụ: linhchi@tripmate.app hoặc 0912345678' : 'e.g. user@example.com or 0912345678'}
+                    value={newMemberContact}
+                    onChange={(e) => setNewMemberContact(e.target.value)}
+                    className="w-full text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                    autoFocus
+                  />
+                  {isSearchingUser && (
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1 text-[11px] text-teal-600 font-medium">
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>{isVi ? 'Đang tìm...' : 'Searching...'}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Account Match Status Card */}
+                {matchedUser && (
+                  <div className="mt-2.5 p-3 bg-emerald-50/80 rounded-xl border border-emerald-200 text-xs animate-in fade-in duration-150 space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-md">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                        <span>{isVi ? 'Đã có tài khoản TripMate' : 'Registered TripMate Account'}</span>
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2.5 pt-0.5">
+                      <img
+                        src={matchedUser.avatar}
+                        alt={matchedUser.displayName}
+                        className="w-8 h-8 rounded-full object-cover border border-emerald-300 shrink-0"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="font-bold text-slate-900 truncate">{matchedUser.displayName}</div>
+                        <div className="text-[11px] text-slate-500 truncate">{matchedUser.email} {matchedUser.phone ? `• ${matchedUser.phone}` : ''}</div>
+                      </div>
+                    </div>
+                    <div className="p-2 bg-white rounded-lg border border-emerald-100 text-[11px] text-emerald-900 leading-relaxed">
+                      💡 {isVi 
+                        ? 'Hệ thống sẽ gửi thông báo Lời mời tham gia chuyến đi trong ứng dụng tới người này. Sau khi họ nhấn Đồng ý, họ sẽ chính thức tham gia và xem được tất cả lịch trình, chi tiêu và bản đồ.'
+                        : 'An in-app invitation notification will be sent. Once accepted, they will officially join and access all trip details.'}
+                    </div>
+                  </div>
+                )}
+
+                {!matchedUser && !isSearchingUser && newMemberContact.trim().length >= 3 && (
+                  <div className="mt-2 p-2.5 bg-slate-50 rounded-xl border border-slate-200 text-[11px] text-slate-600 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-semibold text-slate-800">
+                        {isVi ? 'Chưa tìm thấy tài khoản đã đăng ký: ' : 'Unregistered contact: '}
+                      </span>
+                      <span>
+                        {isVi 
+                          ? 'Thành viên sẽ được thêm vào danh sách ngoại tuyến bình thường để cùng tính toán quỹ và phân chia chi phí.'
+                          : 'This member will be added as an offline participant to split expenses normally.'}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Input: Tên thành viên */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  {isVi ? 'Tên thành viên' : 'Member Name'} <span className="text-rose-500">*</span>
+                  {isVi ? 'Tên thành viên hiển thị' : 'Member Display Name'} <span className="text-rose-500">*</span>
                 </label>
                 <input
                   type="text"
@@ -2008,10 +2481,10 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                   value={newMemberName}
                   onChange={(e) => setNewMemberName(e.target.value)}
                   className="w-full text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
-                  autoFocus
                 />
               </div>
 
+              {/* Input: Đóng góp quỹ */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   {isVi ? `Số tiền đã góp vào quỹ (${trip.currency || 'VND'})` : `Initial Contribution (${trip.currency || 'VND'})`}
@@ -2030,19 +2503,39 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                 </p>
               </div>
 
+              {/* Footer Buttons */}
               <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setShowAddMemberModal(false)}
+                  onClick={() => {
+                    setShowAddMemberModal(false);
+                    setNewMemberContact('');
+                    setMatchedUser(null);
+                    setNewMemberName('');
+                  }}
                   className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer transition-colors"
                 >
                   {isVi ? 'Hủy' : 'Cancel'}
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-bold text-white bg-teal-600 hover:bg-teal-700 rounded-xl shadow-xs cursor-pointer transition-colors"
+                  className={`px-4 py-2 text-xs font-bold text-white rounded-xl shadow-xs cursor-pointer transition-colors flex items-center gap-1.5 ${
+                    matchedUser 
+                      ? 'bg-emerald-600 hover:bg-emerald-700' 
+                      : 'bg-teal-600 hover:bg-teal-700'
+                  }`}
                 >
-                  {isVi ? 'Thêm thành viên' : 'Add Member'}
+                  {matchedUser ? (
+                    <>
+                      <Send className="w-3.5 h-3.5" />
+                      <span>{isVi ? 'Gửi lời mời tham gia qua App' : 'Send In-App Invitation'}</span>
+                    </>
+                  ) : (
+                    <>
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>{isVi ? 'Thêm thành viên ngoại tuyến' : 'Add Offline Member'}</span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>
@@ -2725,6 +3218,353 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                 className="max-h-[78vh] w-auto object-contain rounded-lg shadow-md"
               />
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* PDF Invoice & Settlement Printable Preview Modal */}
+      {isPdfModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
+          <div className="bg-white w-full max-w-4xl max-h-[95vh] rounded-2xl sm:rounded-3xl border border-slate-200 shadow-2xl overflow-hidden flex flex-col animate-in fade-in zoom-in-95 duration-150 my-auto">
+            
+            {/* Modal Header Controls (Hidden during print) */}
+            <div className="px-5 py-3.5 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-3 shrink-0 print:hidden">
+              <div className="flex items-center gap-2 min-w-0">
+                <FileText className="w-5 h-5 text-rose-400 shrink-0" />
+                <div>
+                  <h3 className="font-display font-bold text-sm sm:text-base leading-tight">
+                    {isVi ? 'Hóa Đơn & Quyết Toán Chi Tiêu (Bản In A4)' : 'Expense & Settlement Invoice (A4 Print)'}
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    {isVi ? 'Xem trước và in ấn hoặc lưu PDF chất lượng cao' : 'Preview and print or save high-resolution PDF'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handlePrintPdf}
+                  className="px-3.5 py-1.5 bg-teal-600 hover:bg-teal-700 active:scale-[0.98] text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                  title={isVi ? 'Mở hộp thoại in của trình duyệt để lưu PDF' : 'Open print dialog to save as PDF'}
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>{isVi ? 'In / Lưu PDF ngay' : 'Print / Save PDF'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleDownloadPrintableHtml}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 active:scale-[0.98] border border-slate-700 text-slate-200 font-semibold text-xs rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+                  title={isVi ? 'Tải tệp HTML độc lập có lệnh in sẵn' : 'Download standalone A4 printable HTML'}
+                >
+                  <Download className="w-3.5 h-3.5 text-teal-400" />
+                  <span className="hidden sm:inline">{isVi ? 'Tải file in (.html)' : 'Download HTML'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIsPdfModalOpen(false)}
+                  className="p-1.5 rounded-xl hover:bg-white/10 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Scrollable Document Container */}
+            <div className="flex-1 overflow-y-auto p-4 sm:p-8 bg-slate-100/60 print:bg-white print:p-0">
+              <div className="expense-invoice-printable bg-white p-6 sm:p-10 rounded-2xl shadow-sm border border-slate-200/80 max-w-3xl mx-auto space-y-6 text-slate-800 print:shadow-none print:border-none print:p-0">
+                
+                {/* 1. Official Header */}
+                <div className="border-b-2 border-slate-900 pb-5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-[10px] font-extrabold uppercase tracking-widest text-teal-700">
+                        TripMate • Travel Finance Report
+                      </div>
+                      <h1 className="text-xl sm:text-2xl font-black text-slate-900 mt-1 uppercase">
+                        {isVi ? 'Báo Cáo Quản Lý Tài Chính & Quyết Toán' : 'Travel Expense & Settlement Report'}
+                      </h1>
+                      <div className="text-xs text-slate-600 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <span><strong>{isVi ? 'Chuyến đi:' : 'Trip:'}</strong> {trip.title}</span>
+                        <span>•</span>
+                        <span><strong>{isVi ? 'Điểm đến:' : 'Destination:'}</strong> {trip.destination}, {trip.country}</span>
+                        <span>•</span>
+                        <span><strong>{isVi ? 'Thời gian:' : 'Dates:'}</strong> {trip.startDate} - {trip.endDate}</span>
+                      </div>
+                    </div>
+
+                    <div className="text-right shrink-0">
+                      <div className="inline-block px-2.5 py-1 bg-slate-900 text-white rounded-lg font-mono font-bold text-xs">
+                        #{safeTitle.slice(0, 8).toUpperCase()}-{new Date().getFullYear()}
+                      </div>
+                      <div className="text-[11px] text-slate-500 mt-1.5">
+                        {isVi ? 'Ngày lập:' : 'Date:'} {new Date().toLocaleDateString('vi-VN')}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {isVi ? 'Người giữ quỹ:' : 'Fund Holder:'} <strong>{fundHolder.name}</strong>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2. Key Metrics Summary Cards */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="p-3 bg-emerald-50/80 border border-emerald-200 rounded-xl">
+                    <div className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider">
+                      {isVi ? 'Tổng chi phí thực tế' : 'Total Spent'}
+                    </div>
+                    <div className="text-sm sm:text-base font-black text-emerald-900 mt-1">
+                      {formatMoney(totalSpent, trip.currency, lang)}
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-teal-50/80 border border-teal-200 rounded-xl">
+                    <div className="text-[10px] font-bold text-teal-800 uppercase tracking-wider">
+                      {isVi ? 'Tổng tiền đã đóng quỹ' : 'Fund Collected'}
+                    </div>
+                    <div className="text-sm sm:text-base font-black text-teal-900 mt-1">
+                      {formatMoney(totalContributed, trip.currency, lang)}
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl">
+                    <div className="text-[10px] font-bold text-amber-800 uppercase tracking-wider">
+                      {isVi ? 'Số dư quỹ nhóm' : 'Fund Balance'}
+                    </div>
+                    <div className="text-sm sm:text-base font-black text-amber-900 mt-1">
+                      {formatMoney(fundRemaining, trip.currency, lang)}
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-blue-50/80 border border-blue-200 rounded-xl">
+                    <div className="text-[10px] font-bold text-blue-800 uppercase tracking-wider">
+                      {isVi ? 'Thành viên tham gia' : 'Members'}
+                    </div>
+                    <div className="text-sm sm:text-base font-black text-blue-900 mt-1">
+                      {trip.members.length} {isVi ? 'người' : 'pax'}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. Section: BẢNG QUYẾT TOÁN CÔNG NỢ */}
+                <div className="break-inside-avoid">
+                  <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-200">
+                    <h2 className="text-xs sm:text-sm font-black text-slate-900 uppercase flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-teal-600 inline-block" />
+                      <span>{isVi ? '1. Phương Án Quyết Toán Công Nợ Giữa Các Thành Viên' : '1. Debt Settlement Plan'}</span>
+                      <span className="text-[10px] font-normal text-slate-500 normal-case">
+                        {isSimplifiedDebts ? (isVi ? '(Đã tối ưu hóa rút gọn giao dịch)' : '(Optimized)') : (isVi ? '(Tiêu chuẩn)' : '(Standard)')}
+                      </span>
+                    </h2>
+                  </div>
+
+                  {activeSettlements.length === 0 ? (
+                    <div className="p-3 bg-emerald-50 text-emerald-800 rounded-xl border border-emerald-200 text-xs font-semibold text-center">
+                      ✓ {isVi ? 'Tất cả thành viên đều có số dư cân bằng, không ai nợ ai!' : 'All member balances are balanced. No debts remaining!'}
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead>
+                          <tr className="bg-slate-100 text-slate-700 text-[11px] font-bold border-y border-slate-200">
+                            <th className="py-2 px-2.5 w-10 text-center">STT</th>
+                            <th className="py-2 px-3">{isVi ? 'Người chuyển' : 'From'}</th>
+                            <th className="py-2 px-3 text-center w-8">👉</th>
+                            <th className="py-2 px-3">{isVi ? 'Người nhận' : 'To'}</th>
+                            <th className="py-2 px-3 text-right">{isVi ? 'Số tiền' : 'Amount'}</th>
+                            <th className="py-2 px-3">{isVi ? 'Nội dung chuyển khoản' : 'Note'}</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {activeSettlements.map((s, idx) => (
+                            <tr key={idx} className="hover:bg-slate-50/60">
+                              <td className="py-2 px-2.5 text-center text-slate-400 font-mono text-[11px]">{idx + 1}</td>
+                              <td className="py-2 px-3 font-semibold text-slate-800">{getMemberName(s.from)}</td>
+                              <td className="py-2 px-3 text-center text-teal-600 font-bold">→</td>
+                              <td className="py-2 px-3 font-semibold text-slate-800">{getMemberName(s.to)}</td>
+                              <td className="py-2 px-3 text-right font-black text-rose-600">
+                                {formatMoney(s.amount, trip.currency, lang)}
+                              </td>
+                              <td className="py-2 px-3 text-slate-600 text-[11px]">
+                                {isVi ? `Quyết toán chuyến đi ${trip.title}` : `Settlement for ${trip.title}`}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* 4. Section: BẢNG TỔNG KẾT TÀI CHÍNH TỪNG THÀNH VIÊN */}
+                <div className="break-inside-avoid">
+                  <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-200">
+                    <h2 className="text-xs sm:text-sm font-black text-slate-900 uppercase flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-blue-600 inline-block" />
+                      <span>{isVi ? '2. Tổng Kết Tài Chính Từng Thành Viên' : '2. Member Financial Breakdown'}</span>
+                    </h2>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-100 text-slate-700 text-[11px] font-bold border-y border-slate-200">
+                          <th className="py-2 px-2.5 w-10 text-center">STT</th>
+                          <th className="py-2 px-3">{isVi ? 'Thành viên' : 'Member'}</th>
+                          <th className="py-2 px-3 text-right">{isVi ? 'Đóng quỹ' : 'Fund Paid'}</th>
+                          <th className="py-2 px-3 text-right">{isVi ? 'Tự chi riêng' : 'Direct Paid'}</th>
+                          <th className="py-2 px-3 text-right font-bold">{isVi ? 'Tổng đã bỏ' : 'Total Paid'}</th>
+                          <th className="py-2 px-3 text-right">{isVi ? 'Phần chịu' : 'Consumed'}</th>
+                          <th className="py-2 px-3 text-right font-bold">{isVi ? 'Số dư ròng' : 'Net Balance'}</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {memberStats.map((s, idx) => {
+                          const totalOut = s.contributed + s.paidDirectly;
+                          const isSurplus = s.remainingBalance > 0.01;
+                          const isDeficit = s.remainingBalance < -0.01;
+                          return (
+                            <tr key={s.member.id} className="hover:bg-slate-50/60">
+                              <td className="py-2 px-2.5 text-center text-slate-400 font-mono text-[11px]">{idx + 1}</td>
+                              <td className="py-2 px-3 font-semibold text-slate-800">
+                                {s.member.name}
+                                {s.member.id === fundHolder.id && (
+                                  <span className="ml-1 text-[10px] text-amber-700 bg-amber-100 px-1 rounded font-normal">
+                                    {isVi ? 'Thủ quỹ' : 'Treasurer'}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2 px-3 text-right text-slate-600 font-mono">{formatMoney(s.contributed, trip.currency, lang)}</td>
+                              <td className="py-2 px-3 text-right text-slate-600 font-mono">{formatMoney(s.paidDirectly, trip.currency, lang)}</td>
+                              <td className="py-2 px-3 text-right font-bold text-slate-900 font-mono">{formatMoney(totalOut, trip.currency, lang)}</td>
+                              <td className="py-2 px-3 text-right text-slate-600 font-mono">{formatMoney(s.consumedTotal, trip.currency, lang)}</td>
+                              <td className={`py-2 px-3 text-right font-black font-mono ${
+                                isSurplus ? 'text-emerald-700' : isDeficit ? 'text-rose-600' : 'text-slate-500'
+                              }`}>
+                                {isSurplus ? `+${formatMoney(s.remainingBalance, trip.currency, lang)}` : formatMoney(s.remainingBalance, trip.currency, lang)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* 5. Section: CHI TIẾT TỪNG KHOẢN CHI TIÊU & HÓA ĐƠN */}
+                <div className="break-inside-avoid">
+                  <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-200">
+                    <h2 className="text-xs sm:text-sm font-black text-slate-900 uppercase flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-indigo-600 inline-block" />
+                      <span>{isVi ? '3. Chi Tiết Danh Sách Hóa Đơn & Khoản Chi' : '3. Itemized Expenses & Invoices'}</span>
+                      <span className="text-[10px] font-normal text-slate-500">({unifiedExpenses.length} {isVi ? 'mục' : 'items'})</span>
+                    </h2>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead>
+                        <tr className="bg-slate-100 text-slate-700 text-[11px] font-bold border-y border-slate-200">
+                          <th className="py-2 px-2.5 w-10 text-center">STT</th>
+                          <th className="py-2 px-2.5 w-20">{isVi ? 'Ngày' : 'Date'}</th>
+                          <th className="py-2 px-2.5">{isVi ? 'Khoản chi / Dịch vụ' : 'Expense / Title'}</th>
+                          <th className="py-2 px-2.5">{isVi ? 'Người thanh toán' : 'Paid By'}</th>
+                          <th className="py-2 px-2.5 text-right font-bold">{isVi ? 'Số tiền' : 'Amount'}</th>
+                          <th className="py-2 px-2.5">{isVi ? 'Người cùng chia' : 'Split With'}</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {unifiedExpenses.map((exp, idx) => {
+                          const payerName = exp.paidBy === 'fund'
+                            ? (isVi ? `Quỹ chung (${fundHolder.name})` : `Fund (${fundHolder.name})`)
+                            : (trip.members.find((m) => m.id === exp.paidBy)?.name || exp.paidBy);
+                          const splitNames = exp.splitWith.map((id) => trip.members.find((m) => m.id === id)?.name || id).join(', ');
+                          return (
+                            <tr key={exp.id} className="hover:bg-slate-50/60">
+                              <td className="py-2 px-2.5 text-center text-slate-400 font-mono text-[11px]">{idx + 1}</td>
+                              <td className="py-2 px-2.5 text-slate-500 font-mono text-[11px] whitespace-nowrap">{exp.date || '-'}</td>
+                              <td className="py-2 px-2.5">
+                                <div className="font-semibold text-slate-900">{exp.title}</div>
+                                {exp.note && <div className="text-[10px] text-slate-400 truncate max-w-xs">{exp.note}</div>}
+                              </td>
+                              <td className="py-2 px-2.5 text-slate-700 text-[11px] font-medium">{payerName}</td>
+                              <td className="py-2 px-2.5 text-right font-black text-slate-900 font-mono">
+                                {formatMoney(exp.amount, trip.currency, lang)}
+                              </td>
+                              <td className="py-2 px-2.5 text-slate-500 text-[11px] truncate max-w-[180px]" title={splitNames}>
+                                {splitNames}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      <tfoot>
+                        <tr className="bg-slate-100/90 font-bold border-t-2 border-slate-300 text-xs">
+                          <td colSpan={4} className="py-2.5 px-3 uppercase text-slate-800">
+                            {isVi ? 'TỔNG CỘNG TẤT CẢ KHOẢN CHI:' : 'TOTAL EXPENSES:'}
+                          </td>
+                          <td className="py-2.5 px-2.5 text-right font-black text-emerald-800 font-mono text-sm">
+                            {formatMoney(totalSpent, trip.currency, lang)}
+                          </td>
+                          <td className="py-2.5 px-2.5" />
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </div>
+
+                {/* 6. Footer & Signatures */}
+                <div className="pt-6 border-t border-slate-200 text-xs text-slate-500 break-inside-avoid">
+                  <div className="grid grid-cols-2 gap-8 text-center pt-2 pb-6">
+                    <div>
+                      <div className="font-bold text-slate-800 mb-12">{isVi ? 'ĐẠI DIỆN ĐOÀN DU LỊCH' : 'TRIP REPRESENTATIVE'}</div>
+                      <div className="border-t border-slate-300 w-36 mx-auto pt-1 text-[11px] text-slate-400">
+                        {isVi ? '(Ký & ghi rõ họ tên)' : '(Sign & full name)'}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="font-bold text-slate-800 mb-12">
+                        {isVi ? 'THỦ QUỸ CHUYẾN ĐI' : 'TREASURER'}
+                      </div>
+                      <div className="border-t border-slate-300 w-36 mx-auto pt-1 font-semibold text-slate-800 text-xs">
+                        {fundHolder.name}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="text-center text-[11px] text-slate-400 pt-3 border-t border-slate-100">
+                    {isVi
+                      ? 'Báo cáo được tạo tự động bởi TripMate AI Travel Companion • Chúc bạn có những chuyến đi tuyệt vời!'
+                      : 'Generated by TripMate AI Travel Companion • Wishing you wonderful journeys!'}
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* Member Action Toast */}
+      {memberActionToast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 max-w-md w-full px-4 animate-in fade-in slide-in-from-bottom-3 duration-200 pointer-events-none">
+          <div className="bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-2xl border border-teal-500/40 flex items-center gap-3 pointer-events-auto">
+            <div className="w-8 h-8 rounded-full bg-teal-500/20 text-teal-400 flex items-center justify-center shrink-0">
+              <Sparkles className="w-4 h-4" />
+            </div>
+            <p className="text-xs font-semibold leading-relaxed flex-1">
+              {memberActionToast}
+            </p>
+            <button
+              onClick={() => setMemberActionToast(null)}
+              className="text-slate-400 hover:text-white p-1 rounded-lg"
+            >
+              ✕
+            </button>
           </div>
         </div>
       )}
