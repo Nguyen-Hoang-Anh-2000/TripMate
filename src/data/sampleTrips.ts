@@ -11,6 +11,7 @@ export const SAMPLE_TRIPS: Trip[] = [
     coverImage: 'https://images.unsplash.com/photo-1583417319070-4a69db38a482?auto=format&fit=crop&w=1200&q=80',
     budgetTotal: 6000000,
     currency: 'VND',
+    creatorId: 'm1',
     fundHolderId: 'm1',
     members: [
       { id: 'm1', name: 'Minh Tuấn', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80', contributedAmount: 2000000 },
@@ -182,6 +183,7 @@ export const SAMPLE_TRIPS: Trip[] = [
     coverImage: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1200&q=80',
     budgetTotal: 4500000,
     currency: 'VND',
+    creatorId: 'm1',
     members: [
       { id: 'm1', name: 'Minh Tuấn', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80' },
       { id: 'm4', name: 'Ngọc Mai', avatar: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=150&q=80' }
@@ -304,6 +306,7 @@ export const SAMPLE_TRIPS: Trip[] = [
     coverImage: 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?auto=format&fit=crop&w=1200&q=80',
     budgetTotal: 9500000,
     currency: 'VND',
+    creatorId: 'm1',
     members: [
       { id: 'm1', name: 'Minh Tuấn', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80' },
       { id: 'm2', name: 'Thùy Trang', avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=150&q=80' },
@@ -415,6 +418,7 @@ export const SAMPLE_TRIPS: Trip[] = [
     coverImage: 'https://images.unsplash.com/photo-1503899036084-c55cdd92da26?auto=format&fit=crop&w=1200&q=80',
     budgetTotal: 2200,
     currency: 'USD',
+    creatorId: 'm1',
     members: [
       { id: 'm1', name: 'Minh Tuấn', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80' },
       { id: 'm2', name: 'Thùy Trang', avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=150&q=80' }

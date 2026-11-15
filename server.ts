@@ -1,41 +1,187 @@
 import express from 'express';
 import path from 'path';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
+import {
+  mergeSavedAndGeneratedIntoDays,
+  convertCurrencyApprox,
+  computePraiseScore,
+  rankSavedPlacesForTrip,
+  areSimilarPlaceNames,
+  type RankedPlaceCandidate,
+} from './src/utils/itineraryPlannerUtils.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(express.json({ limit: '12mb' }));
-app.use(express.urlencoded({ extended: true, limit: '12mb' }));
+app.use(express.json({ limit: '4mb' }));
+app.use(express.urlencoded({ extended: true, limit: '4mb' }));
 
-// Initialize Google GenAI client
-const getAiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.warn('[Gemini] GEMINI_API_KEY is not set in environment variables.');
+// Handle PayloadTooLarge and SyntaxErrors gracefully as JSON
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+    return res.status(413).json({
+      success: false,
+      error: 'Dung lượng tải lên vượt quá giới hạn (tối đa 4MB). Vui lòng chọn ảnh có kích thước nhỏ hơn.',
+    });
   }
-  return new GoogleGenAI({
-    apiKey: apiKey || '',
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
-};
+  if (err instanceof SyntaxError) {
+    return res.status(400).json({ success: false, error: 'Dữ liệu JSON không hợp lệ.' });
+  }
+  next(err);
+});
+
+// In-memory IP rate limiter to protect Gemini quota & abuse
+const ipRequestCounts = new Map<string, { count: number; resetTime: number }>();
+app.use('/api', (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const windowMs = 60 * 1000;
+  const maxRequests = 60; // 60 requests per minute
+
+  const record = ipRequestCounts.get(ip);
+  if (!record || now > record.resetTime) {
+    ipRequestCounts.set(ip, { count: 1, resetTime: now + windowMs });
+    return next();
+  }
+
+  record.count += 1;
+  if (record.count > maxRequests) {
+    return res.status(429).json({
+      success: false,
+      error: 'Quá nhiều yêu cầu từ thiết bị này. Vui lòng chờ 1 phút trước khi thử lại.',
+    });
+  }
+  next();
+});
 
 // Health Check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
+function getAiClient() {
+  return new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+}
+
 // Helper for timing out slow upstream requests
-function withTimeout<T>(promise: Promise<T>, ms: number = 7000): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, ms: number = 12000): Promise<T> {
   let timer: NodeJS.Timeout;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`Upstream request timed out after ${ms}ms`)), ms);
   });
   return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
+}
+
+// --- Gemini Quota Resilience: Model Fallback Chain, 429 Cooldown & TTL Cache ---
+const GEMINI_MODEL_CHAIN = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'] as const;
+const modelCooldownUntil = new Map<string, number>();
+const geminiResponseCache = new Map<string, { expiresAt: number; data: any }>();
+
+function isQuotaOrRateLimitError(err: any): boolean {
+  const status = err?.status ?? err?.code;
+  if (status === 429) return true;
+  const msg = String(err?.message || err || '');
+  return (
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.includes('"code":429') ||
+    msg.toLowerCase().includes('quota exceeded') ||
+    msg.toLowerCase().includes('rate limit')
+  );
+}
+
+function parseRetryDelayMs(err: any): number {
+  const msg = String(err?.message || '');
+  const match = msg.match(/retryDelay["']?\s*[:=]\s*["']?(\d+(?:\.\d+)?)s/i);
+  if (match) {
+    const seconds = Number(match[1]);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return Math.min(60 * 60 * 1000, Math.max(60 * 1000, seconds * 1000));
+    }
+  }
+  return 15 * 60 * 1000;
+}
+
+function getCachedGeminiResponse<T>(key: string): T | null {
+  const hit = geminiResponseCache.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expiresAt) {
+    geminiResponseCache.delete(key);
+    return null;
+  }
+  return hit.data as T;
+}
+
+function setCachedGeminiResponse(key: string, data: any, ttlMs: number = 10 * 60 * 1000) {
+  if (geminiResponseCache.size >= 150) {
+    const firstKey = geminiResponseCache.keys().next().value;
+    if (firstKey !== undefined) geminiResponseCache.delete(firstKey);
+  }
+  geminiResponseCache.set(key, { expiresAt: Date.now() + ttlMs, data });
+}
+
+async function generateWithModelFallback(
+  ai: GoogleGenAI,
+  params: {
+    contents: any;
+    config?: Record<string, any>;
+    timeoutMs?: number;
+    allowThinking?: boolean;
+  }
+) {
+  const now = Date.now();
+  let lastError: any = null;
+  let quotaHit = false;
+
+  for (const model of GEMINI_MODEL_CHAIN) {
+    const cooldownUntil = modelCooldownUntil.get(model) ?? 0;
+    if (cooldownUntil > now) {
+      quotaHit = true;
+      continue;
+    }
+
+    const baseConfig = params.config ? { ...params.config } : {};
+    if (params.allowThinking) {
+      baseConfig.thinkingConfig = {
+        thinkingLevel: model === 'gemini-4-hydrogen' ? ThinkingLevel.LOW : ThinkingLevel.MINIMAL,
+      };
+    } else {
+      delete baseConfig.thinkingConfig;
+    }
+
+    try {
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model,
+          contents: params.contents,
+          config: baseConfig,
+        }),
+        params.timeoutMs ?? 12000
+      );
+      return { response, modelUsed: model };
+    } catch (err: any) {
+      lastError = err;
+      if (isQuotaOrRateLimitError(err)) {
+        quotaHit = true;
+        const delayMs = parseRetryDelayMs(err);
+        modelCooldownUntil.set(model, Date.now() + delayMs);
+        console.info(`[Gemini Quota] ${model} reached rate limit; switching to fallback model for ${Math.round(delayMs / 60000)}m.`);
+        continue;
+      }
+      // Retry transient non-quota error on secondary model once
+      continue;
+    }
+  }
+
+  const finalError: any = new Error(quotaHit ? 'GEMINI_QUOTA_EXCEEDED' : (lastError?.message || 'GEMINI_UPSTREAM_UNAVAILABLE'));
+  finalError.isQuotaExceeded = quotaHit;
+  throw finalError;
 }
 
 // --- Inlined Resilient Fallback Generators ---
@@ -66,15 +212,18 @@ interface FallbackItinerary {
   isAiGenerated?: boolean;
 }
 
+interface DestinationHighlight {
+  title: { vi: string; en: string };
+  location: string;
+  category: 'sightseeing' | 'food' | 'stay' | 'transport' | 'activity' | 'shopping';
+  costUSD: number;
+  rating: number;
+  notes: { vi: string; en: string };
+}
+
 interface DestinationData {
   country: { vi: string; en: string };
-  highlights: Array<{
-    title: { vi: string; en: string };
-    location: string;
-    category: 'sightseeing' | 'food' | 'stay' | 'transport' | 'activity' | 'shopping';
-    costUSD: number;
-    notes: { vi: string; en: string };
-  }>;
+  highlights: DestinationHighlight[];
 }
 
 const DESTINATION_PROFILES: Record<string, DestinationData> = {
@@ -86,6 +235,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Khu vực Trung tâm & Đồi Dã Chiến, Đà Lạt',
         category: 'stay',
         costUSD: 30,
+        rating: 4.8,
         notes: { vi: 'Nhận phòng, nghỉ ngơi và ngắm mây lãng đãng tại quán cà phê trên cao.', en: 'Check-in, relax and enjoy the misty mountain view.' },
       },
       {
@@ -93,6 +243,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Hồ Xuân Hương, Đà Lạt',
         category: 'sightseeing',
         costUSD: 5,
+        rating: 4.9,
         notes: { vi: 'Chụp ảnh với nụ hoa Atiso và hoa dã quỳ khổng lồ biểu tượng.', en: 'Iconic artichoke bud landmark and refreshing lakeside walk.' },
       },
       {
@@ -100,6 +251,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Đường 3 Tháng 4, Phường 3, Đà Lạt',
         category: 'food',
         costUSD: 15,
+        rating: 4.9,
         notes: { vi: 'Món lẩu trứ danh làm ấm người giữa không khí se lạnh buổi tối.', en: 'Steaming hotpot with wild lemon basil leaves, a Dalat specialty.' },
       },
       {
@@ -107,6 +259,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Chợ Đêm Đà Lạt, Nguyễn Thị Minh Khai',
         category: 'shopping',
         costUSD: 10,
+        rating: 4.7,
         notes: { vi: 'Thưởng thức sữa đậu nành nóng hổi, mua mứt dâu và áo len.', en: 'Hot soymilk, strawberry jam, and cozy local souvenirs.' },
       },
       {
@@ -114,6 +267,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Cầu Đất, Xuân Trường, Đà Lạt',
         category: 'activity',
         costUSD: 12,
+        rating: 5.0,
         notes: { vi: 'Nên xuất phát từ 05:00 sáng để bắt trọn biển mây bồng bềnh tuyệt đẹp.', en: 'Depart early around 5 AM to catch breathtaking sea of clouds.' },
       },
       {
@@ -121,6 +275,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Triệu Việt Vương, Phường 4, Đà Lạt',
         category: 'sightseeing',
         costUSD: 8,
+        rating: 4.7,
         notes: { vi: 'Kiến trúc Pháp cổ kính cùng không gian lịch sử hoàng gia triều Nguyễn.', en: 'Historic royal French-architecture residence surrounded by pines.' },
       },
       {
@@ -128,6 +283,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Quốc lộ 20 Đèo Prenn, Đà Lạt',
         category: 'activity',
         costUSD: 20,
+        rating: 4.8,
         notes: { vi: 'Hệ thống máng trượt dài nhất Đông Nam Á băng qua rừng nguyên sinh.', en: 'Exciting alpine coaster ride through dense pine forests.' },
       },
     ],
@@ -140,6 +296,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Bãi Sau (Thùy Vân), Vũng Tàu',
         category: 'stay',
         costUSD: 35,
+        rating: 4.7,
         notes: { vi: 'Bãi biển dài trong xanh, sóng êm thích hợp tắm biển buổi chiều.', en: 'Long golden sand beach ideal for swimming.' },
       },
       {
@@ -147,6 +304,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: '14 Nguyễn Trường Tộ, Phường 2, Vũng Tàu',
         category: 'food',
         costUSD: 10,
+        rating: 4.9,
         notes: { vi: 'Bánh khọt tôm tươi giòn rụm cuốn rau sống và nước mắm chua ngọt.', en: 'Iconic crisp pancake with fresh shrimp and herbs.' },
       },
       {
@@ -154,6 +312,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Núi Nhỏ, Phường 2, Vũng Tàu',
         category: 'sightseeing',
         costUSD: 0,
+        rating: 4.9,
         notes: { vi: 'Leo gần 1.000 bậc thang để lên tay tượng Chúa ngắm trọn vẹn vịnh biển.', en: 'Climb to the shoulders for a breathtaking 360 ocean view.' },
       },
       {
@@ -161,6 +320,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Đường Hạ Long, Phường 2, Vũng Tàu',
         category: 'sightseeing',
         costUSD: 0,
+        rating: 4.9,
         notes: { vi: 'Điểm đón gió mát rượi với góc chụp hoàng hôn siêu đẹp.', en: 'Scenic windy cliff with dramatic sunset photography.' },
       },
       {
@@ -168,6 +328,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Sau khách sạn Imperial, Bãi Sau, Vũng Tàu',
         category: 'food',
         costUSD: 25,
+        rating: 4.8,
         notes: { vi: 'Mực trứng nướng sa tế, ốc hương rang muối ớt, cua hấp sả bia.', en: 'Grilled squid, spicy butter snails, and steamed local crab.' },
       },
       {
@@ -175,6 +336,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Đỉnh núi Nhỏ, Vũng Tàu',
         category: 'sightseeing',
         costUSD: 5,
+        rating: 4.8,
         notes: { vi: 'Thưởng thức yaourt và trứng lòng đào trứ danh Cô Tiên.', en: 'Visit historic 1862 lighthouse and sample traditional yogurt.' },
       },
     ],
@@ -187,6 +349,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Bãi biển Mỹ Khê, Đà Nẵng',
         category: 'activity',
         costUSD: 10,
+        rating: 4.9,
         notes: { vi: 'Bãi cát trắng mịn, nước trong veo với rặng dừa xanh mướt.', en: 'World-renowned pristine white-sand coastline.' },
       },
       {
@@ -194,6 +357,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Bà Nà Hills, Hòa Ninh, Hòa Vang',
         category: 'sightseeing',
         costUSD: 45,
+        rating: 4.9,
         notes: { vi: 'Check-in Cầu Vàng nâng bởi bàn tay khổng lồ và Làng Pháp.', en: 'Walk along the world-famous colossal hand-held sky bridge.' },
       },
       {
@@ -201,6 +365,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Trần Bình Trọng, Hải Châu, Đà Nẵng',
         category: 'food',
         costUSD: 8,
+        rating: 4.8,
         notes: { vi: 'Mì Quảng tôm thịt đậm đà ăn kèm bánh đa nướng giòn.', en: 'Signature turmeric noodles with savory broth and crispy crackers.' },
       },
       {
@@ -208,6 +373,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Bán đảo Sơn Trà, Thọ Quang, Đà Nẵng',
         category: 'sightseeing',
         costUSD: 0,
+        rating: 4.9,
         notes: { vi: 'Tượng Phật Bà Quan Âm cao 67m hướng nhìn ra biển cả.', en: '67m towering Lady Buddha statue overlooking Danang Bay.' },
       },
       {
@@ -215,6 +381,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Cầu Rồng, Phước Ninh, Hải Châu',
         category: 'sightseeing',
         costUSD: 15,
+        rating: 4.8,
         notes: { vi: 'Trình diễn phun lửa và phun nước độc đáo vào 21:00 cuối tuần.', en: 'Spectacular weekend fire and water-breathing dragon performance.' },
       },
     ],
@@ -227,6 +394,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Bãi Sao, An Thới, Phú Quốc',
         category: 'activity',
         costUSD: 10,
+        rating: 4.9,
         notes: { vi: 'Nước biển êm ả như ngọc bích, check-in xích đu cây dừa huyền thoại.', en: 'Crystal clear calm turquoise bay with palm-tree swings.' },
       },
       {
@@ -234,6 +402,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Ga Ánh Dương, An Thới, Phú Quốc',
         category: 'sightseeing',
         costUSD: 30,
+        rating: 4.9,
         notes: { vi: 'Chiêm ngưỡng toàn cảnh quần đảo An Thới ngoạn mục từ trên cao.', en: 'Longest sea-crossing three-wire cable car with panoramic views.' },
       },
       {
@@ -241,6 +410,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: '28 Bạch Đằng, Dương Đông, Phú Quốc',
         category: 'food',
         costUSD: 8,
+        rating: 4.8,
         notes: { vi: 'Tự tay pha nước chấm theo khẩu vị, sợi bún tươi làm tại chỗ.', en: 'Famous DIY dipping sauce noodles with fresh shrimp and calamari.' },
       },
       {
@@ -248,6 +418,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Grand World, Gành Dầu, Phú Quốc',
         category: 'sightseeing',
         costUSD: 25,
+        rating: 4.8,
         notes: { vi: 'Dạo thuyền Gondola trên sông Venice và xem show nhạc nước rực rỡ.', en: 'Venice canals, water taxi rides, and grand cultural shows.' },
       },
       {
@@ -255,6 +426,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Khu 1, Dương Đông, Phú Quốc',
         category: 'shopping',
         costUSD: 20,
+        rating: 4.7,
         notes: { vi: 'Hải sản phong phú, kem cuộn Thái Lan, kẹo chỉ và ngọc trai.', en: 'Vibrant night market packed with seafood grills and pearl souvenirs.' },
       },
     ],
@@ -267,6 +439,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Shibuya, Tokyo',
         category: 'sightseeing',
         costUSD: 0,
+        rating: 4.9,
         notes: { vi: 'Ngã tư đông đúc nhất thế giới và biểu tượng lòng trung thành Hachiko.', en: 'World’s busiest pedestrian crossing with vibrant neon skyline.' },
       },
       {
@@ -274,6 +447,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Asakusa, Taito City, Tokyo',
         category: 'sightseeing',
         costUSD: 10,
+        rating: 4.9,
         notes: { vi: 'Ngôi chùa cổ nhất Tokyo với đèn lồng Kaminarimon đỏ khổng lồ.', en: 'Tokyo’s oldest temple with traditional craft and snack stalls.' },
       },
       {
@@ -281,6 +455,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Tsukiji, Chuo City, Tokyo',
         category: 'food',
         costUSD: 25,
+        rating: 4.9,
         notes: { vi: 'Sushi cá hồi, nhím biển uni, bò Wagyu nướng tại chỗ thơm lừng.', en: 'Freshly sliced Otoro tuna, sweet tamagoyaki, and grilled Wagyu.' },
       },
       {
@@ -288,6 +463,7 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Akihabara, Chiyoda City, Tokyo',
         category: 'shopping',
         costUSD: 20,
+        rating: 4.8,
         notes: { vi: 'Thiên đường đồ công nghệ, game retro và mô hình anime.', en: 'Hub for electronics, anime figures, maid cafes, and retro arcade games.' },
       },
       {
@@ -295,20 +471,271 @@ const DESTINATION_PROFILES: Record<string, DestinationData> = {
         location: 'Shibuya Scramble Square 47F',
         category: 'sightseeing',
         costUSD: 22,
+        rating: 5.0,
         notes: { vi: 'Tầm nhìn 360 độ ngắm núi Phú Sĩ và hoàng hôn rực rỡ.', en: 'Stunning open rooftop view with Mount Fuji visible on clear days.' },
+      },
+    ],
+  },
+  hanoi: {
+    country: { vi: 'Việt Nam', en: 'Vietnam' },
+    highlights: [
+      {
+        title: { vi: 'Dạo Hồ Hoàn Kiếm & Thăm Đền Ngọc Sơn', en: 'Hoan Kiem Lake & Ngoc Son Temple Walk' },
+        location: 'Phố Đinh Tiên Hoàng, Hoàn Kiếm, Hà Nội',
+        category: 'sightseeing',
+        costUSD: 2,
+        rating: 4.9,
+        notes: { vi: 'Biểu tượng ngàn năm văn hiến giữa lòng Thủ đô, cực kỳ mát mẻ buổi sáng.', en: 'Iconic historic lake and red Huc Bridge in central Hanoi.' },
+      },
+      {
+        title: { vi: 'Phở Thìn Bờ Hồ & Cà phê Giảng trứng trứ danh', en: 'Pho Thin & Legendary Giang Egg Coffee' },
+        location: '39 Nguyễn Hữu Huân, Hoàn Kiếm, Hà Nội',
+        category: 'food',
+        costUSD: 6,
+        rating: 4.9,
+        notes: { vi: 'Quán cà phê trứng lâu đời bậc nhất Hà Nội được thực khách quốc tế khen nức nở.', en: 'Historic birthplace of creamy Hanoi egg coffee.' },
+      },
+      {
+        title: { vi: 'Tham quan Văn Miếu - Quốc Tử Giám', en: 'Temple of Literature (Van Mieu)' },
+        location: '58 Quốc Tử Giám, Đống Đa, Hà Nội',
+        category: 'sightseeing',
+        costUSD: 3,
+        rating: 4.8,
+        notes: { vi: 'Trường đại học đầu tiên của Việt Nam với kiến trúc cổ kính tuyệt đẹp.', en: 'Vietnam’s first national university with serene ancient courtyards.' },
+      },
+      {
+        title: { vi: 'Thưởng thức Bún Chả Hàng Mành & Phố Cổ Tạ Hiện', en: 'Hang Manh Bun Cha & Old Quarter Ta Hien Street' },
+        location: 'Phố Cổ Hoàn Kiếm, Hà Nội',
+        category: 'food',
+        costUSD: 8,
+        rating: 4.8,
+        notes: { vi: 'Chả nướng than hoa thơm lừng, buổi tối phố cổ nhộn nhịp cực vui.', en: 'Charcoal-grilled pork vermicelli and vibrant Old Quarter nightlife.' },
+      },
+      {
+        title: { vi: 'Ngắm hoàng hôn Hồ Tây & Viếng Chùa Trấn Quốc', en: 'West Lake Sunset & Tran Quoc Pagoda' },
+        location: 'Đường Thanh Niên, Tây Hồ, Hà Nội',
+        category: 'sightseeing',
+        costUSD: 0,
+        rating: 4.9,
+        notes: { vi: 'Ngôi chùa cổ nhất Thăng Long với khung cảnh hoàng hôn đẹp mê hồn.', en: '1,500-year-old lakeside pagoda with breathtaking sunset views.' },
+      },
+    ],
+  },
+  hcm: {
+    country: { vi: 'Việt Nam', en: 'Vietnam' },
+    highlights: [
+      {
+        title: { vi: 'Tham quan Dinh Độc Lập & Nhà thờ Đức Bà - Bưu điện Thành phố', en: 'Independence Palace & Central Post Office' },
+        location: 'Quận 1, TP. Hồ Chí Minh',
+        category: 'sightseeing',
+        costUSD: 3,
+        rating: 4.9,
+        notes: { vi: 'Cụm di tích kiến trúc đẹp nhất trung tâm Sài Gòn, chụp ảnh cực chất.', en: 'Must-visit historic landmarks and French colonial architecture.' },
+      },
+      {
+        title: { vi: 'Phố đi bộ Nguyễn Huệ & Cà phê Chung cư 42', en: 'Nguyen Hue Walking Street & 42 Cafe Apartment' },
+        location: '42 Nguyễn Huệ, Quận 1, TP. HCM',
+        category: 'activity',
+        costUSD: 5,
+        rating: 4.8,
+        notes: { vi: 'Thiên đường quán cà phê decor độc đáo nhìn thẳng xuống phố đi bộ.', en: 'Iconic boutique coffee hub overlooking vibrant walking boulevard.' },
+      },
+      {
+        title: { vi: 'Bánh mì Huỳnh Hoa & Phố ẩm thực Hồ Thị Kỷ', en: 'Huynh Hoa Banh Mi & Ho Thi Ky Street Food' },
+        location: '26 Lê Thị Riêng, Quận 1, TP. HCM',
+        category: 'food',
+        costUSD: 7,
+        rating: 4.9,
+        notes: { vi: 'Ổ bánh mì đặc sản nổi tiếng nhất Sài Gòn đầy ắp nhân thơm ngon.', en: 'Famous gourmet Saigon baguette and bustling evening food market.' },
+      },
+      {
+        title: { vi: 'Du thuyền sông Sài Gòn ngắm Landmark 81 về đêm', en: 'Saigon River Sunset Cruise & Skyline View' },
+        location: 'Bến Bạch Đằng, Quận 1, TP. HCM',
+        category: 'activity',
+        costUSD: 18,
+        rating: 4.8,
+        notes: { vi: 'Trải nghiệm Waterbus hoặc du thuyền ngắm thành phố lên đèn lung linh.', en: 'Scenic river cruise past glowing skyscrapers and bridges.' },
+      },
+      {
+        title: { vi: 'Chợ Bến Thành & Mua sắm đặc sản quà lưu niệm', en: 'Ben Thanh Market Heritage & Souvenirs' },
+        location: 'Lê Lợi, Quận 1, TP. HCM',
+        category: 'shopping',
+        costUSD: 15,
+        rating: 4.6,
+        notes: { vi: 'Khu chợ biểu tượng với đủ món chè, cà phê rang xay và đồ thủ công.', en: 'Iconic historic market for coffee, snacks, and local crafts.' },
       },
     ],
   },
 };
 
 function matchDestinationProfile(dest: string): DestinationData | null {
-  const norm = dest.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const norm = dest.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd');
   if (norm.includes('da lat') || norm.includes('dalat')) return DESTINATION_PROFILES.dalat;
   if (norm.includes('vung tau') || norm.includes('vungtau')) return DESTINATION_PROFILES.vungtau;
   if (norm.includes('da nang') || norm.includes('danang') || norm.includes('hoi an')) return DESTINATION_PROFILES.danang;
   if (norm.includes('phu quoc') || norm.includes('phuquoc')) return DESTINATION_PROFILES.phuquoc;
   if (norm.includes('tokyo') || norm.includes('japan') || norm.includes('kyoto') || norm.includes('osaka')) return DESTINATION_PROFILES.tokyo;
+  if (norm.includes('ha noi') || norm.includes('hanoi')) return DESTINATION_PROFILES.hanoi;
+  if (norm.includes('ho chi minh') || norm.includes('sai gon') || norm.includes('saigon') || norm.includes('tphcm') || norm.includes('hcm')) return DESTINATION_PROFILES.hcm;
   return null;
+}
+
+function buildCuratedCandidatesForFallback(
+  destination: string,
+  currency: string,
+  language: string,
+  variation: number = 0
+): RankedPlaceCandidate[] {
+  const isVi = language === 'vi';
+  const matched = matchDestinationProfile(destination);
+
+  if (matched) {
+    const items = matched.highlights.map((h, idx) => {
+      const rating = h.rating ?? (4.9 - (idx % 4) * 0.1);
+      const notes = isVi ? h.notes.vi : h.notes.en;
+      const costInCur = convertCurrencyApprox(h.costUSD, 'USD', currency);
+      return {
+        name: isVi ? h.title.vi : h.title.en,
+        locationName: h.location,
+        category: h.category,
+        estimatedCost: costInCur,
+        currency,
+        rating,
+        notes,
+        praiseScore: computePraiseScore(notes, 'TripMate Top Rated', rating),
+        isFromSavedPlaces: false,
+      } satisfies RankedPlaceCandidate;
+    });
+    // Rotate secondary ties lightly on variation while keeping rating-desc order dominant
+    if (variation > 0 && items.length > 2) {
+      const shift = variation % items.length;
+      return [...items.slice(shift), ...items.slice(0, shift)];
+    }
+    return items;
+  }
+
+  // Rich generic high-rated candidate pool covering all interest categories for any global destination
+  const genericTemplates: Array<{
+    nameVi: string;
+    nameEn: string;
+    category: RankedPlaceCandidate['category'];
+    costUSD: number;
+    rating: number;
+    notesVi: string;
+    notesEn: string;
+  }> = [
+    {
+      nameVi: `Quán đặc sản địa phương trứ danh tại ${destination}`,
+      nameEn: `Top-Rated Local Specialty Kitchen in ${destination}`,
+      category: 'food',
+      costUSD: 12,
+      rating: 4.9,
+      notesVi: `Được du khách và người dân địa phương khen nức nở với hương vị chuẩn bản xứ.`,
+      notesEn: `Rave local reviews for authentic signature flavors and warm hospitality.`,
+    },
+    {
+      nameVi: `Danh thắng biểu tượng & Điểm ngắm cảnh ${destination}`,
+      nameEn: `Iconic Landmark & Scenic Overlook of ${destination}`,
+      category: 'sightseeing',
+      costUSD: 8,
+      rating: 4.9,
+      notesVi: `Điểm check-in nổi tiếng nhất hành trình, góc chụp ảnh toàn cảnh tuyệt đẹp.`,
+      notesEn: `Must-visit iconic landmark praised for breathtaking panoramic views.`,
+    },
+    {
+      nameVi: `Cà phê view đẹp ngắm hoàng hôn tại ${destination}`,
+      nameEn: `Scenic Sunset Panorama Cafe in ${destination}`,
+      category: 'food',
+      costUSD: 5,
+      rating: 4.8,
+      notesVi: `Không gian thư giãn, đồ uống ngon và góc ngắm hoàng hôn đẹp mê hồn.`,
+      notesEn: `Highly praised open-air terrace cafe with golden hour sunset vistas.`,
+    },
+    {
+      nameVi: `Bảo tàng di sản & Khu phố cổ ${destination}`,
+      nameEn: `Heritage Museum & Historic Quarter of ${destination}`,
+      category: 'sightseeing',
+      costUSD: 6,
+      rating: 4.8,
+      notesVi: `Lưu giữ kiến trúc văn hóa lâu đời, rất đáng để tham quan và tìm hiểu lịch sử.`,
+      notesEn: `Rich cultural heritage site praised by history and architecture lovers.`,
+    },
+    {
+      nameVi: `Cung đường thiên nhiên & Trải nghiệm ngoài trời ${destination}`,
+      nameEn: `Nature Trail & Outdoor Adventure in ${destination}`,
+      category: 'activity',
+      costUSD: 15,
+      rating: 4.8,
+      notesVi: `Không khí trong lành, nhiều hoạt động trải nghiệm thú vị giữa thiên nhiên.`,
+      notesEn: `Refreshing outdoor experience highly rated for scenery and crisp air.`,
+    },
+    {
+      nameVi: `Chợ đêm ẩm thực & Phố đi bộ ${destination}`,
+      nameEn: `Vibrant Night Market & Walking Street in ${destination}`,
+      category: 'shopping',
+      costUSD: 14,
+      rating: 4.7,
+      notesVi: `Thiên đường món ăn vặt và quà lưu niệm thủ công nhộn nhịp về đêm.`,
+      notesEn: `Bustling evening market famous for street bites and handcrafted souvenirs.`,
+    },
+    {
+      nameVi: `Làng nghề truyền thống & Không gian nghệ thuật ${destination}`,
+      nameEn: `Artisan Craft Village & Local Gallery in ${destination}`,
+      category: 'activity',
+      costUSD: 10,
+      rating: 4.7,
+      notesVi: `Trải nghiệm tự tay làm đồ thủ công cùng nghệ nhân bản địa thân thiện.`,
+      notesEn: `Hands-on cultural workshop praised by travelers seeking authentic life.`,
+    },
+    {
+      nameVi: `Quán ăn sáng bản địa lâu đời tại ${destination}`,
+      nameEn: `Historic Morning Breakfast Spot in ${destination}`,
+      category: 'food',
+      costUSD: 6,
+      rating: 4.7,
+      notesVi: `Quán ăn sáng đông khách bản địa nhất khu vực, giá cả hợp lý.`,
+      notesEn: `Beloved morning eatery packed with locals, great value for budget.`,
+    },
+    {
+      nameVi: `Công viên trung tâm & Quảng trường dạo mát ${destination}`,
+      nameEn: `Central Promenade & Waterfront Park in ${destination}`,
+      category: 'sightseeing',
+      costUSD: 0,
+      rating: 4.6,
+      notesVi: `Miễn phí tham quan, không gian xanh thoáng đãng thích hợp dạo bộ thư giãn.`,
+      notesEn: `Free scenic public square ideal for a relaxing afternoon stroll.`,
+    },
+    {
+      nameVi: `Tổ hợp mua sắm đặc sản & Quà tặng ${destination}`,
+      nameEn: `Regional Specialty & Souvenir Hub in ${destination}`,
+      category: 'shopping',
+      costUSD: 20,
+      rating: 4.6,
+      notesVi: `Dễ dàng chọn mua đặc sản đóng gói chất lượng mang về làm quà.`,
+      notesEn: `Curated specialty store for quality local treats and travel gifts.`,
+    },
+  ];
+
+  const pool = genericTemplates.map((tpl) => {
+    const notes = isVi ? tpl.notesVi : tpl.notesEn;
+    return {
+      name: isVi ? tpl.nameVi : tpl.nameEn,
+      locationName: destination,
+      category: tpl.category,
+      estimatedCost: convertCurrencyApprox(tpl.costUSD, 'USD', currency),
+      currency,
+      rating: tpl.rating,
+      notes,
+      praiseScore: computePraiseScore(notes, 'Top Rated', tpl.rating),
+      isFromSavedPlaces: false,
+    } satisfies RankedPlaceCandidate;
+  });
+
+  if (variation > 0 && pool.length > 2) {
+    const shift = (variation * 2) % pool.length;
+    return [...pool.slice(shift), ...pool.slice(0, shift)];
+  }
+  return pool;
 }
 
 function generateFallbackItinerary(
@@ -318,157 +745,66 @@ function generateFallbackItinerary(
   interests: string[] = [],
   groupType: string = 'Friends',
   budgetAmount?: number,
-  language: string = 'vi'
+  language: string = 'vi',
+  currency: string = 'USD',
+  savedPlaces: any[] = [],
+  variation: number = 0
 ): FallbackItinerary {
   const isVi = language === 'vi';
   const daysCount = Math.max(1, Math.min(14, Number(durationDays) || 3));
   const matched = matchDestinationProfile(destination);
 
-  const countryName = matched 
-    ? (isVi ? matched.country.vi : matched.country.en)
-    : (isVi ? 'Quốc tế' : 'Global');
+  const countryName = matched
+    ? isVi
+      ? matched.country.vi
+      : matched.country.en
+    : isVi
+    ? 'Quốc tế'
+    : 'Global';
 
   const baseSummary = isVi
-    ? `Hành trình ${daysCount} ngày tràn đầy trải nghiệm thú vị tại ${destination}, tối ưu theo phong cách ${travelStyle || 'Khám phá văn hóa & ẩm thực'}, kết hợp hài hòa giữa các địa danh nổi tiếng, ẩm thực bản địa và thời gian thư giãn.`
-    : `An immersive ${daysCount}-day itinerary for ${destination}, tailored for a ${travelStyle || 'Cultural & Foodie'} journey with iconic landmarks, local food, and leisure.`;
+    ? `Hành trình ${daysCount} ngày tại ${destination} ưu tiên địa điểm đã lưu và tự động bổ sung các địa điểm đánh giá sao cao nhất phù hợp ngân sách.`
+    : `A ${daysCount}-day ${destination} itinerary prioritizing saved places and auto-filling top-rated places within your budget.`;
 
-  const totalBudget = budgetAmount || (daysCount * 80);
-  const days: FallbackDay[] = [];
+  const effectiveBudget =
+    budgetAmount && budgetAmount > 0
+      ? budgetAmount
+      : convertCurrencyApprox(daysCount * 80, 'USD', currency);
 
-  for (let d = 1; d <= daysCount; d++) {
-    let dayTitle = '';
-    let daySummary = '';
-    const activities: FallbackActivity[] = [];
+  const extraCandidates = buildCuratedCandidatesForFallback(destination, currency, language, variation);
 
-    if (d === 1) {
-      dayTitle = isVi ? `Ngày 1: Đến ${destination} & Khám phá trung tâm` : `Day 1: Arrival & Exploring Downtown ${destination}`;
-      daySummary = isVi ? `Nhận phòng, dạo phố và thưởng thức các món ăn đặc sản chào đón tại ${destination}.` : `Check in to hotel, take an introductory stroll and savor welcome dinner.`;
-
-      activities.push({
-        time: '09:00 AM',
-        title: isVi ? `Đến nơi & Nhận phòng khách sạn` : `Arrival & Hotel Check-in`,
-        locationName: isVi ? `Khách sạn trung tâm ${destination}` : `Downtown Hotel, ${destination}`,
-        category: 'stay',
-        estimatedCost: Math.round(totalBudget * 0.15),
-        notes: isVi ? 'Cất hành lý, tắm rửa thư giãn sau chặng di chuyển.' : 'Drop luggage and refresh after journey.',
-      });
-
-      activities.push({
-        time: '12:30 PM',
-        title: isVi ? `Thưởng thức bữa trưa đặc sản bản địa` : `Local Specialty Welcome Lunch`,
-        locationName: isVi ? `Khu ẩm thực phố cổ ${destination}` : `Heritage Food Quarter, ${destination}`,
-        category: 'food',
-        estimatedCost: 15,
-        notes: isVi ? 'Thưởng thức các món ngon nổi tiếng được nhiều người địa phương yêu thích.' : 'Taste iconic regional dishes recommended by locals.',
-      });
-
-      activities.push({
-        time: '03:30 PM',
-        title: isVi ? `Tham quan quảng trường & Địa danh biểu tượng` : `Visit Iconic City Landmark & Promenade`,
-        locationName: isVi ? `Quảng trường trung tâm ${destination}` : `Central City Square, ${destination}`,
-        category: 'sightseeing',
-        estimatedCost: 10,
-        notes: isVi ? 'Chụp ảnh lưu niệm với kiến trúc đặc trưng và dạo ngắm cảnh chiều.' : 'Capture iconic photos and enjoy the relaxed atmosphere.',
-      });
-
-      activities.push({
-        time: '07:00 PM',
-        title: isVi ? `Khám phá Chợ đêm & Ẩm thực đường phố` : `Night Market & Street Food Safari`,
-        locationName: isVi ? `Chợ đêm trung tâm ${destination}` : `Central Night Market, ${destination}`,
-        category: 'shopping',
-        estimatedCost: 20,
-        notes: isVi ? 'Thưởng thức các món ăn vặt và cảm nhận nhịp sống sôi động về đêm.' : 'Sample street bites and pick up artisanal souvenirs.',
-      });
-    } else if (d === daysCount && daysCount > 1) {
-      dayTitle = isVi ? `Ngày ${d}: Mua sắm quà lưu niệm & Kết thúc chuyến đi` : `Day ${d}: Souvenir Shopping & Farewell ${destination}`;
-      daySummary = isVi ? `Thưởng thức cà phê sáng, mua đặc sản làm quà và chuẩn bị hành lý trở về.` : `Relaxing morning cafe, purchasing gifts for loved ones, and smooth departure.`;
-
-      activities.push({
-        time: '08:30 AM',
-        title: isVi ? `Thưởng thức cà phê sáng ngắm cảnh phố` : `Scenic Morning Coffee & Pastries`,
-        locationName: isVi ? `Quán cà phê góc phố đẹp tại ${destination}` : `Artisanal Corner Cafe, ${destination}`,
-        category: 'food',
-        estimatedCost: 10,
-        notes: isVi ? 'Tận hưởng không khí buổi sớm trong lành và ghi lại những kỷ niệm đẹp.' : 'Unwind in the morning light with specialty brew.',
-      });
-
-      activities.push({
-        time: '10:30 AM',
-        title: isVi ? `Mua sắm đặc sản và quà lưu niệm thủ công` : `Local Specialty & Souvenir Shopping`,
-        locationName: isVi ? `Chợ truyền thống hoặc trung tâm thủ công mỹ nghệ` : `Traditional Craft Market`,
-        category: 'shopping',
-        estimatedCost: 35,
-        notes: isVi ? 'Mua bánh mứt, nông sản và quà lưu niệm tặng người thân, đồng nghiệp.' : 'Pick up handcrafted souvenirs and regional treats.',
-      });
-
-      activities.push({
-        time: '01:00 PM',
-        title: isVi ? `Trả phòng khách sạn & Khởi hành trở về` : `Hotel Check-out & Departure`,
-        locationName: isVi ? `Ga / Sân bay / Bến xe ${destination}` : `Transport Hub, ${destination}`,
-        category: 'transport',
-        estimatedCost: 20,
-        notes: isVi ? 'Kiểm tra kỹ giấy tờ tùy thân, hành lý và chia tay chuyến đi ý nghĩa.' : 'Double check personal items and conclude an unforgettable trip.',
-      });
-    } else {
-      const highlightOffset = (d - 2) * 3;
-      const h1 = matched?.highlights?.[highlightOffset % (matched.highlights.length || 1)];
-      const h2 = matched?.highlights?.[(highlightOffset + 1) % (matched.highlights.length || 1)];
-      const h3 = matched?.highlights?.[(highlightOffset + 2) % (matched.highlights.length || 1)];
-
-      dayTitle = isVi ? `Ngày ${d}: Trải nghiệm văn hóa & Danh lam thắng cảnh nổi bật` : `Day ${d}: Highlights & Cultural Wonders of ${destination}`;
-      daySummary = isVi ? `Một ngày trọn vẹn khám phá các cảnh đẹp ấn tượng nhất và trải nghiệm hoạt động đặc sắc.` : `A full day exploring top-rated attractions, scenic viewpoints, and local tastes.`;
-
-      activities.push({
-        time: '08:30 AM',
-        title: h1 ? (isVi ? h1.title.vi : h1.title.en) : (isVi ? `Tham quan danh thắng thiên nhiên nổi tiếng` : `Morning Exploration of Nature & Highlights`),
-        locationName: h1 ? h1.location : (isVi ? `Thung lũng / Bờ biển / Công viên tại ${destination}` : `Scenic Landmark in ${destination}`),
-        category: h1?.category || 'sightseeing',
-        estimatedCost: h1?.costUSD || 15,
-        notes: h1 ? (isVi ? h1.notes.vi : h1.notes.en) : (isVi ? 'Khởi hành sớm để tận hưởng khí hậu mát mẻ và vắng khách.' : 'Arrive early for crisp morning air and best photos.'),
-      });
-
-      activities.push({
-        time: '12:00 PM',
-        title: h2 ? (isVi ? h2.title.vi : h2.title.en) : (isVi ? `Bữa trưa đặc sản vùng miền & Nghỉ ngơi` : `Local Signature Lunch & Rest`),
-        locationName: h2 ? h2.location : (isVi ? `Nhà hàng ẩm thực truyền thống` : `Traditional Local Restaurant`),
-        category: h2?.category || 'food',
-        estimatedCost: h2?.costUSD || 18,
-        notes: h2 ? (isVi ? h2.notes.vi : h2.notes.en) : (isVi ? 'Thưởng thức món ngon nóng hổi và nghỉ ngơi nạp lại năng lượng.' : 'Recharge with authentic flavors and refreshing drinks.'),
-      });
-
-      activities.push({
-        time: '03:00 PM',
-        title: h3 ? (isVi ? h3.title.vi : h3.title.en) : (isVi ? `Hoạt động trải nghiệm ngoài trời & Ngắm hoàng hôn` : `Afternoon Outdoor Activity & Sunset Vista`),
-        locationName: h3 ? h3.location : (isVi ? `Đỉnh đồi / Bãi biển ngắm hoàng hôn tại ${destination}` : `Scenic Sunset Viewpoint in ${destination}`),
-        category: h3?.category || 'activity',
-        estimatedCost: h3?.costUSD || 25,
-        notes: h3 ? (isVi ? h3.notes.vi : h3.notes.en) : (isVi ? 'Thời khắc hoàng hôn tuyệt đẹp để chụp ảnh lưu niệm lung linh.' : 'Golden hour photography spot with stunning panorama.'),
-      });
-
-      activities.push({
-        time: '07:00 PM',
-        title: isVi ? `Bữa tối thư giãn & Trải nghiệm đêm phố hội` : `Relaxing Dinner & Evening Vibe`,
-        locationName: isVi ? `Khu phố đi bộ ven sông / ven biển ${destination}` : `Waterfront Promenade, ${destination}`,
-        category: 'food',
-        estimatedCost: 20,
-        notes: isVi ? 'Thưởng thức ẩm thực buổi tối và nghe nhạc sống mộc mạc.' : 'Enjoy delicious dinner and lively local entertainment.',
-      });
-    }
-
-    days.push({
-      dayNumber: d,
-      title: dayTitle,
-      summary: daySummary,
-      activities,
-    });
-  }
+  const merged = mergeSavedAndGeneratedIntoDays({
+    destination,
+    durationDays: daysCount,
+    currency,
+    budgetAmount: effectiveBudget,
+    interests,
+    travelStyle,
+    language,
+    savedPlaces,
+    extraCandidates,
+  });
 
   return {
     destinationTitle: destination,
     country: countryName,
     overallSummary: baseSummary,
-    recommendedBudgetTotal: totalBudget,
-    days,
+    recommendedBudgetTotal: effectiveBudget,
+    days: merged.days.map((d) => ({
+      dayNumber: d.dayNumber,
+      title: d.title,
+      summary: d.summary,
+      activities: d.activities.map((a) => ({
+        time: a.time,
+        title: a.title,
+        locationName: a.locationName,
+        category: a.category as FallbackActivity['category'],
+        estimatedCost: a.estimatedCost,
+        notes: a.notes,
+        rating: a.rating,
+        isFromSavedPlaces: a.isFromSavedPlaces,
+      })),
+    })),
     isAiGenerated: true,
   };
 }
@@ -575,102 +911,250 @@ function generateFallbackChatReply(message: string, tripContext?: any, language:
 }
 // --- End Inlined Resilient Fallback Generators ---
 
-// 1. Generate AI Itinerary
+// 1. Generate AI Itinerary (Prioritizes Saved Places + Auto-generates top-rated places within budget & trip interests)
 app.post('/api/gemini/generate-itinerary', async (req, res) => {
-  const { destination, durationDays, travelStyle, interests, groupType, budgetAmount, language } = req.body;
+  const {
+    destination,
+    durationDays,
+    travelStyle,
+    interests,
+    groupType,
+    budgetAmount,
+    currency = 'USD',
+    savedPlaces = [],
+    allowAutoGenerate = true,
+    language,
+    variation = 0,
+  } = req.body;
 
-  if (!destination) {
+  const cleanDestination = String(destination || '').slice(0, 100).replace(/[\r\n\t]/g, ' ').trim();
+  if (!cleanDestination) {
     return res.status(400).json({ error: 'Destination is required' });
   }
 
+  const cleanDuration = Math.min(14, Math.max(1, parseInt(String(durationDays), 10) || 3));
+  const cleanTravelStyle = String(travelStyle || 'Balanced Explorer').slice(0, 50).replace(/[\r\n]/g, ' ').trim();
+  const cleanGroupType = String(groupType || 'Friends').slice(0, 50).replace(/[\r\n]/g, ' ').trim();
+  const cleanCurrency = String(currency || 'USD').slice(0, 10).toUpperCase().trim();
+  const cleanInterests = Array.isArray(interests)
+    ? interests.slice(0, 10).map((i) => String(i).slice(0, 50).replace(/[\r\n]/g, ' ').trim()).filter(Boolean)
+    : [];
+  const cleanBudget = budgetAmount ? Math.max(0, Math.min(100000000000, Number(budgetAmount) || 0)) : undefined;
+  const cleanSavedPlaces = Array.isArray(savedPlaces) ? savedPlaces.slice(0, 50) : [];
+  const shouldAutoGenerate = allowAutoGenerate !== false;
+
   const lang = language === 'vi' ? 'vi' : 'en';
+
+  // Rank user's existing Saved Places for this destination first (highest star -> praise -> interests -> budget)
+  const rankedSaved = rankSavedPlacesForTrip(cleanSavedPlaces, {
+    destination: cleanDestination,
+    currency: cleanCurrency,
+    budgetAmount: cleanBudget,
+    durationDays: cleanDuration,
+    interests: cleanInterests,
+    travelStyle: cleanTravelStyle,
+  });
+
+  if (!shouldAutoGenerate) {
+    const matched = matchDestinationProfile(cleanDestination);
+    const mergedSavedOnly = mergeSavedAndGeneratedIntoDays({
+      destination: cleanDestination,
+      durationDays: cleanDuration,
+      currency: cleanCurrency,
+      budgetAmount: cleanBudget,
+      interests: cleanInterests,
+      travelStyle: cleanTravelStyle,
+      language: lang,
+      savedPlaces: cleanSavedPlaces,
+      extraCandidates: [],
+    });
+    return res.json({
+      destinationTitle: cleanDestination,
+      country: matched ? (lang === 'vi' ? matched.country.vi : matched.country.en) : (lang === 'vi' ? 'Quốc tế' : 'Global'),
+      overallSummary: '',
+      recommendedBudgetTotal: cleanBudget || mergedSavedOnly.totalEstimatedCost,
+      days: mergedSavedOnly.days,
+      usedSavedCount: mergedSavedOnly.usedSavedCount,
+      autoGeneratedCount: 0,
+      totalEstimatedCost: mergedSavedOnly.totalEstimatedCost,
+      isAiGenerated: false,
+    });
+  }
+
+  const itineraryCacheKey = `itinerary:${cleanDestination.toLowerCase()}:${cleanDuration}:${cleanTravelStyle}:${cleanGroupType}:${cleanCurrency}:${cleanBudget ?? ''}:${cleanInterests.join(',')}:${rankedSaved.map((s) => s.name).join('|')}:${lang}:${Number(variation) || 0}`;
+  const cachedItinerary = getCachedGeminiResponse<any>(itineraryCacheKey);
+  if (cachedItinerary) {
+    return res.json(cachedItinerary);
+  }
 
   try {
     const ai = getAiClient();
-    const langInstruction = lang === 'vi' 
+    const langInstruction = lang === 'vi'
       ? 'CRITICAL: Output all titles, summaries, descriptions, and activity notes in Vietnamese language (Tiếng Việt).'
       : 'Output all response text in English.';
 
-    const prompt = `Create a realistic, exciting ${durationDays || 3}-day travel itinerary for "${destination}".
-    Traveler Profile:
-    - Travel Style: ${travelStyle || 'Balanced Explorer'}
-    - Group Type: ${groupType || 'Friends'}
-    - Interests: ${interests && interests.length > 0 ? interests.join(', ') : 'Must-see landmarks, local food, culture, photo spots'}
-    ${budgetAmount ? `- Total Budget Target: $${budgetAmount}` : ''}
-    - Language requested: ${lang === 'vi' ? 'Vietnamese (Tiếng Việt)' : 'English'}
+    const savedSummaryText =
+      rankedSaved.length > 0
+        ? rankedSaved
+            .map(
+              (p, i) =>
+                `${i + 1}. "${p.name}" (Category: ${p.category}, Rating: ${p.rating}★, Est.Cost: ${p.estimatedCost} ${cleanCurrency}, Address: ${p.locationName}${p.notes ? `, Praise/Notes: ${p.notes}` : ''})`
+            )
+            .join('\n')
+        : 'None';
 
-    Return a structured JSON object with a list of days. Each day should have a dayNumber, title, summary, and a list of activities (each with time like "09:00 AM", title, locationName, latitude/longitude if known, category choice from [sightseeing, food, stay, transport, activity, shopping], estimatedCost in USD, and helpful local notes).`;
+    const prompt = `Create a realistic, well-paced ${cleanDuration}-day travel itinerary for "${cleanDestination}" (4 activities per day).
+Traveler Profile:
+- Travel Style: ${cleanTravelStyle}
+- Group Type: ${cleanGroupType}
+- Selected Interests / Categories: ${cleanInterests.length > 0 ? cleanInterests.join(', ') : 'Must-see landmarks, local food, culture, photo spots'}
+- Total Budget Target: ${cleanBudget ? `${cleanBudget} ${cleanCurrency}` : `Moderate (${cleanCurrency})`}
+- Currency for ALL estimatedCost values: ${cleanCurrency}
+- Alternative Variation Seed: ${Number(variation) || 0}
 
-    const response = await withTimeout(
-      ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: prompt,
-        config: {
-          systemInstruction: `You are an expert global travel planner, local tour guide, and logistics director. ${langInstruction}`,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              destinationTitle: { type: Type.STRING },
-              country: { type: Type.STRING },
-              overallSummary: { type: Type.STRING },
-              recommendedBudgetTotal: { type: Type.NUMBER },
-              days: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    dayNumber: { type: Type.INTEGER },
-                    title: { type: Type.STRING },
-                    summary: { type: Type.STRING },
-                    activities: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          time: { type: Type.STRING },
-                          title: { type: Type.STRING },
-                          locationName: { type: Type.STRING },
-                          lat: { type: Type.NUMBER },
-                          lng: { type: Type.NUMBER },
-                          category: { type: Type.STRING },
-                          estimatedCost: { type: Type.NUMBER },
-                          notes: { type: Type.STRING },
-                        },
-                        required: ['time', 'title', 'locationName', 'category', 'estimatedCost', 'notes'],
+User's Existing Saved Places for "${cleanDestination}" (already sorted by highest stars & praise):
+${savedSummaryText}
+
+STRICT PLANNING RULES:
+1. First prioritize and schedule the User's Saved Places above into appropriate daily time slots (morning/lunch/afternoon/evening) with isFromSavedPlaces=true.
+2. Whenever Saved Places are NOT enough to fill all ${cleanDuration * 4} slots, automatically generate real, authentic, non-duplicate places in "${cleanDestination}" that are NOT in the Saved Places list (isFromSavedPlaces=false).
+3. CRITICAL RANKING FOR AUTO-GENERATED PLACES: Choose ONLY real places with the HIGHEST star ratings & most-praised traveler reviews, ordered/prioritized from highest rating (e.g. 5.0★ -> 4.9★ -> 4.8★ -> 4.7★) downward! Mention why travelers praise each place in "notes".
+4. Match the traveler's Selected Interests (${cleanInterests.join(', ') || 'all highlights'}) and Travel Style (${cleanTravelStyle}).
+5. BUDGET COMPLIANCE: Keep the sum of all estimatedCost across all days strictly within ${cleanBudget ? `${cleanBudget} ${cleanCurrency}` : 'a reasonable budget'}. Use ${cleanCurrency} numbers for estimatedCost.`;
+
+    const { response } = await generateWithModelFallback(ai, {
+      contents: prompt,
+      allowThinking: true,
+      timeoutMs: 12000,
+      config: {
+        systemInstruction: `You are an expert global travel curator and logistics planner. ${langInstruction}`,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            destinationTitle: { type: Type.STRING },
+            country: { type: Type.STRING },
+            overallSummary: { type: Type.STRING },
+            recommendedBudgetTotal: { type: Type.NUMBER },
+            days: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  dayNumber: { type: Type.INTEGER },
+                  title: { type: Type.STRING },
+                  summary: { type: Type.STRING },
+                  activities: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        time: { type: Type.STRING },
+                        title: { type: Type.STRING },
+                        locationName: { type: Type.STRING },
+                        lat: { type: Type.NUMBER },
+                        lng: { type: Type.NUMBER },
+                        category: { type: Type.STRING },
+                        estimatedCost: { type: Type.NUMBER },
+                        rating: { type: Type.NUMBER },
+                        isFromSavedPlaces: { type: Type.BOOLEAN },
+                        notes: { type: Type.STRING },
                       },
+                      required: ['time', 'title', 'locationName', 'category', 'estimatedCost', 'rating', 'notes'],
                     },
                   },
-                  required: ['dayNumber', 'title', 'summary', 'activities'],
                 },
+                required: ['dayNumber', 'title', 'summary', 'activities'],
               },
             },
-            required: ['destinationTitle', 'country', 'overallSummary', 'days'],
           },
+          required: ['destinationTitle', 'country', 'overallSummary', 'days'],
         },
-      }),
-      6000
-    );
+      },
+    });
 
     const resultText = response.text || '{}';
     const jsonResult = JSON.parse(resultText);
 
     if (jsonResult && jsonResult.days && Array.isArray(jsonResult.days) && jsonResult.days.length > 0) {
-      return res.json(jsonResult);
+      // Extract all AI activities into RankedPlaceCandidate pool so we guarantee:
+      // 1) Top-rated saved places are ALWAYS included first
+      // 2) Auto-generated extras are deduplicated, strictly sorted highest-star & most-praised downward, and budget-fitted
+      const aiCandidates: RankedPlaceCandidate[] = [];
+      for (const day of jsonResult.days) {
+        if (!Array.isArray(day.activities)) continue;
+        for (const act of day.activities) {
+          const rating = Math.min(5, Math.max(1, Number(act.rating) || 4.7));
+          const notes = String(act.notes || '');
+          aiCandidates.push({
+            name: String(act.title || ''),
+            locationName: String(act.locationName || cleanDestination),
+            category: (['sightseeing', 'food', 'stay', 'transport', 'activity', 'shopping'].includes(act.category)
+              ? act.category
+              : 'sightseeing') as RankedPlaceCandidate['category'],
+            estimatedCost: Math.max(0, Number(act.estimatedCost) || 0),
+            currency: cleanCurrency,
+            rating,
+            notes,
+            praiseScore: computePraiseScore(notes, 'AI Top Reviewed', rating),
+            isFromSavedPlaces: rankedSaved.some((s) => areSimilarPlaceNames(s.name, String(act.title || ''))),
+            ...(typeof act.lat === 'number' ? { lat: act.lat } : {}),
+            ...(typeof act.lng === 'number' ? { lng: act.lng } : {}),
+          });
+        }
+      }
+
+      const curatedExtras = buildCuratedCandidatesForFallback(cleanDestination, cleanCurrency, lang, Number(variation) || 0);
+      const merged = mergeSavedAndGeneratedIntoDays({
+        destination: cleanDestination,
+        durationDays: cleanDuration,
+        currency: cleanCurrency,
+        budgetAmount: cleanBudget,
+        interests: cleanInterests,
+        travelStyle: cleanTravelStyle,
+        language: lang,
+        savedPlaces: cleanSavedPlaces,
+        extraCandidates: [...aiCandidates, ...curatedExtras],
+      });
+
+      const payload = {
+        destinationTitle: jsonResult.destinationTitle || cleanDestination,
+        country: jsonResult.country || (lang === 'vi' ? 'Việt Nam' : 'Global'),
+        overallSummary: jsonResult.overallSummary || '',
+        recommendedBudgetTotal: cleanBudget || jsonResult.recommendedBudgetTotal || merged.totalEstimatedCost,
+        days: merged.days,
+        usedSavedCount: merged.usedSavedCount,
+        autoGeneratedCount: merged.autoGeneratedCount,
+        totalEstimatedCost: merged.totalEstimatedCost,
+        isAiGenerated: true,
+        usedFallback: false,
+      };
+      setCachedGeminiResponse(itineraryCacheKey, payload);
+      return res.json(payload);
     }
     throw new Error('Empty itinerary response from AI');
   } catch (error: any) {
-    console.warn('[Gemini Itinerary Notice] Upstream model unavailable, using smart fallback itinerary:', error?.message);
-    const fallback = generateFallbackItinerary(
-      destination,
-      durationDays,
-      travelStyle,
-      interests,
-      groupType,
-      budgetAmount,
-      lang
+    const isQuota = Boolean(error?.isQuotaExceeded || isQuotaOrRateLimitError(error));
+    console.info(
+      `[Gemini Itinerary] Serving curated fallback for "${cleanDestination}" (${isQuota ? 'quota cooldown' : 'upstream unavailable'}).`
     );
-    return res.json(fallback);
+    const fallback = generateFallbackItinerary(
+      cleanDestination,
+      cleanDuration,
+      cleanTravelStyle,
+      cleanInterests,
+      cleanGroupType,
+      cleanBudget,
+      lang,
+      cleanCurrency,
+      cleanSavedPlaces,
+      Number(variation) || 0
+    );
+    return res.json({
+      ...fallback,
+      usedFallback: true,
+      fallbackReason: isQuota ? 'quota_exceeded' : 'upstream_unavailable',
+    });
   }
 });
 
@@ -678,55 +1162,68 @@ app.post('/api/gemini/generate-itinerary', async (req, res) => {
 app.post('/api/gemini/recommendations', async (req, res) => {
   const { destination, category, language } = req.body;
   const lang = language === 'vi' ? 'vi' : 'en';
+  const cleanDest = String(destination || 'Vietnam').slice(0, 100).trim();
+  const cleanCat = String(category || 'must-try food & hidden gems').slice(0, 60).trim();
+  const recsCacheKey = `recs:${cleanDest.toLowerCase()}:${cleanCat.toLowerCase()}:${lang}`;
+  const cachedRecs = getCachedGeminiResponse<any>(recsCacheKey);
+  if (cachedRecs) {
+    return res.json(cachedRecs);
+  }
 
   try {
     const ai = getAiClient();
     const langInstruction = lang === 'vi' ? 'Provide descriptions and tips in Vietnamese (Tiếng Việt).' : 'Provide in English.';
 
-    const prompt = `Give me 5 top recommendations for ${category || 'must-try food & hidden gems'} in "${destination}".
-    Include local insider tips, approximate cost, and why it is special.`;
+    const prompt = `Give me 5 top-rated, most praised recommendations for ${cleanCat} in "${cleanDest}".
+    Sort from highest star rating downward. Include local insider tips, approximate cost, and why it is special.`;
 
-    const response = await withTimeout(
-      ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: prompt,
-        config: {
-          systemInstruction: `You are an insider travel curator offering authentic local recommendations. ${langInstruction}`,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              recommendations: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    name: { type: Type.STRING },
-                    category: { type: Type.STRING },
-                    shortDescription: { type: Type.STRING },
-                    insiderTip: { type: Type.STRING },
-                    approxCost: { type: Type.STRING },
-                  },
-                  required: ['name', 'category', 'shortDescription', 'insiderTip', 'approxCost'],
+    const { response } = await generateWithModelFallback(ai, {
+      contents: prompt,
+      allowThinking: true,
+      timeoutMs: 10000,
+      config: {
+        systemInstruction: `You are an insider travel curator offering authentic local recommendations. ${langInstruction}`,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            recommendations: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  category: { type: Type.STRING },
+                  shortDescription: { type: Type.STRING },
+                  insiderTip: { type: Type.STRING },
+                  approxCost: { type: Type.STRING },
                 },
+                required: ['name', 'category', 'shortDescription', 'insiderTip', 'approxCost'],
               },
             },
-            required: ['recommendations'],
           },
+          required: ['recommendations'],
         },
-      }),
-      6000
-    );
+      },
+    });
 
     const result = JSON.parse(response.text || '{}');
     if (result && Array.isArray(result.recommendations) && result.recommendations.length > 0) {
+      setCachedGeminiResponse(recsCacheKey, result);
       return res.json(result);
     }
     throw new Error('Empty recommendations response from AI');
   } catch (error: any) {
-    console.warn('[Gemini Recommendations Notice] Upstream unavailable, using smart fallback:', error?.message);
-    const fallback = generateFallbackRecommendations(destination || 'Vietnam', category, lang);
-    return res.json(fallback);
+    const isQuota = Boolean(error?.isQuotaExceeded || isQuotaOrRateLimitError(error));
+    console.info(
+      `[Gemini Recommendations] Serving curated fallback for "${cleanDest}" (${isQuota ? 'quota cooldown' : 'upstream unavailable'}).`
+    );
+    const fallback = generateFallbackRecommendations(cleanDest, category, lang);
+    return res.json({
+      ...fallback,
+      usedFallback: true,
+      fallbackReason: isQuota ? 'quota_exceeded' : 'upstream_unavailable',
+    });
   }
 });
 
@@ -734,6 +1231,13 @@ app.post('/api/gemini/recommendations', async (req, res) => {
 app.post('/api/gemini/packing-list', async (req, res) => {
   const { destination, season, activities, durationDays, language } = req.body;
   const lang = language === 'vi' ? 'vi' : 'en';
+  const cleanDest = String(destination || 'Vietnam').slice(0, 100).trim();
+  const cleanDays = Math.min(30, Math.max(1, Number(durationDays) || 5));
+  const packingCacheKey = `packing:${cleanDest.toLowerCase()}:${String(season || '')}:${String(activities || '')}:${cleanDays}:${lang}`;
+  const cachedPacking = getCachedGeminiResponse<any>(packingCacheKey);
+  if (cachedPacking) {
+    return res.json(cachedPacking);
+  }
 
   try {
     const ai = getAiClient();
@@ -741,50 +1245,56 @@ app.post('/api/gemini/packing-list', async (req, res) => {
       ? 'Output item names in Vietnamese (Tiếng Việt) and categories as one of: Essentials, Clothing, Electronics, Toiletries, Documents, Gear.'
       : 'Output item names in English.';
 
-    const prompt = `Generate a smart, highly practical packing checklist for a ${durationDays || 5}-day trip to "${destination}".
+    const prompt = `Generate a smart, highly practical packing checklist for a ${cleanDays}-day trip to "${cleanDest}".
     Context: Season/Weather: ${season || 'general'}, Planned Activities: ${activities || 'city walking, dining, sightseeing'}.
     Categorize items into: Essentials, Clothing, Electronics, Toiletries, Documents, Gear.`;
 
-    const response = await withTimeout(
-      ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: prompt,
-        config: {
-          systemInstruction: `You are a professional travel packing expert. ${langInstruction}`,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              packingItems: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    category: { type: Type.STRING },
-                    name: { type: Type.STRING },
-                    quantity: { type: Type.INTEGER },
-                    reason: { type: Type.STRING },
-                  },
-                  required: ['category', 'name', 'quantity'],
+    const { response } = await generateWithModelFallback(ai, {
+      contents: prompt,
+      allowThinking: false,
+      timeoutMs: 8000,
+      config: {
+        systemInstruction: `You are a professional travel packing expert. ${langInstruction}`,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            packingItems: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  category: { type: Type.STRING },
+                  name: { type: Type.STRING },
+                  quantity: { type: Type.INTEGER },
+                  reason: { type: Type.STRING },
                 },
+                required: ['category', 'name', 'quantity'],
               },
             },
-            required: ['packingItems'],
           },
+          required: ['packingItems'],
         },
-      }),
-      6000
-    );
+      },
+    });
 
     const result = JSON.parse(response.text || '{}');
     if (result && Array.isArray(result.packingItems) && result.packingItems.length > 0) {
+      setCachedGeminiResponse(packingCacheKey, result);
       return res.json(result);
     }
     throw new Error('Empty packing list response from AI');
   } catch (error: any) {
-    console.warn('[Gemini Packing Notice] Upstream unavailable, using smart fallback:', error?.message);
-    const fallback = generateFallbackPackingList(destination || 'Vietnam', season, activities, durationDays, lang);
-    return res.json(fallback);
+    const isQuota = Boolean(error?.isQuotaExceeded || isQuotaOrRateLimitError(error));
+    console.info(
+      `[Gemini Packing] Serving curated fallback for "${cleanDest}" (${isQuota ? 'quota cooldown' : 'upstream unavailable'}).`
+    );
+    const fallback = generateFallbackPackingList(cleanDest, season, activities, cleanDays, lang);
+    return res.json({
+      ...fallback,
+      usedFallback: true,
+      fallbackReason: isQuota ? 'quota_exceeded' : 'upstream_unavailable',
+    });
   }
 });
 
@@ -792,6 +1302,12 @@ app.post('/api/gemini/packing-list', async (req, res) => {
 app.post('/api/gemini/chat', async (req, res) => {
   const { message, tripContext, language } = req.body;
   const lang = language === 'vi' ? 'vi' : 'en';
+  const cleanMsg = String(message || '').slice(0, 1000).trim();
+  const chatCacheKey = `chat:${cleanMsg.toLowerCase()}:${String(tripContext?.destination || '')}:${lang}`;
+  const cachedChat = getCachedGeminiResponse<any>(chatCacheKey);
+  if (cachedChat) {
+    return res.json(cachedChat);
+  }
 
   try {
     const ai = getAiClient();
@@ -803,25 +1319,32 @@ app.post('/api/gemini/chat', async (req, res) => {
     Current Trip Context: Destination: ${tripContext?.destination || 'Global'}, Travel Dates: ${tripContext?.startDate || ''} to ${tripContext?.endDate || ''}.
     Answer concisely, provide actionable advice, emergency contacts if asked, local currency advice, transport tips, or language phrases. ${langInstruction}`;
 
-    const response = await withTimeout(
-      ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: message,
-        config: {
-          systemInstruction,
-        },
-      }),
-      6000
-    );
+    const { response } = await generateWithModelFallback(ai, {
+      contents: cleanMsg,
+      allowThinking: false,
+      timeoutMs: 8000,
+      config: {
+        systemInstruction,
+      },
+    });
 
     if (response.text) {
-      return res.json({ reply: response.text });
+      const payload = { reply: response.text };
+      setCachedGeminiResponse(chatCacheKey, payload, 5 * 60 * 1000);
+      return res.json(payload);
     }
     throw new Error('Empty reply from AI');
   } catch (error: any) {
-    console.warn('[Gemini Chat Notice] Upstream unavailable, using smart fallback:', error?.message);
-    const fallbackReply = generateFallbackChatReply(message || '', tripContext, lang);
-    return res.json({ reply: fallbackReply });
+    const isQuota = Boolean(error?.isQuotaExceeded || isQuotaOrRateLimitError(error));
+    console.info(
+      `[Gemini Chat] Serving smart fallback reply (${isQuota ? 'quota cooldown' : 'upstream unavailable'}).`
+    );
+    const fallbackReply = generateFallbackChatReply(cleanMsg, tripContext, lang);
+    return res.json({
+      reply: fallbackReply,
+      usedFallback: true,
+      fallbackReason: isQuota ? 'quota_exceeded' : 'upstream_unavailable',
+    });
   }
 });
 
@@ -851,9 +1374,10 @@ app.get('/api/weather/live', async (req, res) => {
     const accuWeatherUrl = `https://www.accuweather.com/en/search-locations?query=${encodeURIComponent(destination)}`;
 
     // Geocode destination via Open-Meteo
-    let lat = 11.9404; // Default Da Lat
-    let lng = 108.4583;
+    let lat: number | null = null;
+    let lng: number | null = null;
     let resolvedName = destination;
+    let locationFound = false;
 
     try {
       const geoRes = await fetch(
@@ -865,11 +1389,21 @@ app.get('/api/weather/live', async (req, res) => {
         if (geoData.results && geoData.results.length > 0) {
           lat = geoData.results[0].latitude;
           lng = geoData.results[0].longitude;
-          resolvedName = geoData.results[0].name;
+          resolvedName = geoData.results[0].name + (geoData.results[0].country ? `, ${geoData.results[0].country}` : '');
+          locationFound = true;
         }
       }
     } catch (geoErr) {
-      console.warn('[Weather] Geocoding fallback used:', geoErr);
+      console.warn('[Weather] Geocoding error:', geoErr);
+    }
+
+    if (!locationFound || lat === null || lng === null) {
+      return res.status(404).json({
+        success: false,
+        error: lang === 'vi'
+          ? `Không tìm thấy tọa độ thời tiết cho địa điểm "${destination}". Vui lòng kiểm tra lại tên thành phố.`
+          : `Weather coordinates not found for location "${destination}". Please check the city name.`,
+      });
     }
 
     // Fetch real-time weather metrics
@@ -963,57 +1497,55 @@ Extract the data into JSON with storeName, totalAmount, currency, date (YYYY-MM-
 
     const userPrompt = `Vui lòng phân tích hóa đơn đính kèm và trích xuất thông tin chi phí chính xác nhất.`;
 
-    const response = await withTimeout(
-      ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                inlineData: {
-                  mimeType: mimeType || 'image/jpeg',
-                  data: base64Data,
-                },
+    const { response } = await generateWithModelFallback(ai, {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                mimeType: mimeType || 'image/jpeg',
+                data: base64Data,
               },
-              {
-                text: userPrompt,
-              },
-            ],
-          },
-        ],
-        config: {
-          systemInstruction: systemPrompt,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              storeName: { type: Type.STRING },
-              totalAmount: { type: Type.NUMBER },
-              currency: { type: Type.STRING },
-              date: { type: Type.STRING },
-              time: { type: Type.STRING },
-              category: { type: Type.STRING },
-              items: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    name: { type: Type.STRING },
-                    price: { type: Type.NUMBER },
-                    quantity: { type: Type.NUMBER },
-                  },
-                  required: ['name', 'price'],
-                },
-              },
-              notes: { type: Type.STRING },
             },
-            required: ['storeName', 'totalAmount', 'category'],
-          },
+            {
+              text: userPrompt,
+            },
+          ],
         },
-      }),
-      18000
-    );
+      ],
+      allowThinking: false,
+      timeoutMs: 18000,
+      config: {
+        systemInstruction: systemPrompt,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            storeName: { type: Type.STRING },
+            totalAmount: { type: Type.NUMBER },
+            currency: { type: Type.STRING },
+            date: { type: Type.STRING },
+            time: { type: Type.STRING },
+            category: { type: Type.STRING },
+            items: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  name: { type: Type.STRING },
+                  price: { type: Type.NUMBER },
+                  quantity: { type: Type.NUMBER },
+                },
+                required: ['name', 'price'],
+              },
+            },
+            notes: { type: Type.STRING },
+          },
+          required: ['storeName', 'totalAmount', 'category'],
+        },
+      },
+    });
 
     const text = response.text || '{}';
     const parsed = JSON.parse(text);
@@ -1033,26 +1565,21 @@ Extract the data into JSON with storeName, totalAmount, currency, date (YYYY-MM-
       },
     });
   } catch (error: any) {
-    console.warn('[Receipt OCR Notice - Fallback]:', error?.message || error);
-
-    const today = new Date().toISOString().split('T')[0];
-    return res.json({
-      success: true,
-      data: {
-        storeName: language === 'vi' ? 'Hóa đơn dịch vụ du lịch' : 'Travel Expense Receipt',
-        totalAmount: 185000,
-        currency: currency || 'VND',
-        date: today,
-        time: '12:30',
-        category: 'food',
-        items: [
-          { name: language === 'vi' ? 'Món đặc sản / Đồ uống tổng hợp' : 'Specialty Dish & Drinks', price: 185000 },
-        ],
-        notes: language === 'vi' 
-          ? 'Đã tự động đọc từ ảnh biên lai. Vui lòng kiểm tra lại số tiền trước khi lưu.'
-          : 'Scanned from receipt image. Please verify the amount before saving.',
-        isFallback: true,
-      },
+    const isQuota = Boolean(error?.isQuotaExceeded || isQuotaOrRateLimitError(error));
+    console.info(`[Receipt OCR] Scan unavailable (${isQuota ? 'quota cooldown' : 'recognition error'}).`);
+    if (isQuota) {
+      return res.status(429).json({
+        success: false,
+        error: language === 'vi'
+          ? 'Hệ thống AI tạm hết hạn mức lượt quét miễn phí trong ngày. Vui lòng thử lại sau hoặc nhập chi phí thủ công.'
+          : 'AI free-tier scan quota has temporarily been reached. Please try again later or enter the expense manually.',
+      });
+    }
+    return res.status(500).json({
+      success: false,
+      error: language === 'vi'
+        ? 'Không thể nhận diện hóa đơn từ hình ảnh này. Vui lòng thử lại với ảnh chụp rõ nét hơn hoặc nhập thủ công.'
+        : 'Failed to recognize receipt from this image. Please try again with a clearer photo or enter details manually.',
     });
   }
 });

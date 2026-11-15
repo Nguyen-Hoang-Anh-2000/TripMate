@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { SAMPLE_TRIPS } from './data/sampleTrips';
 import { Trip, ActivityItem, Expense, PackingItem, TravelDocument, SavedPlace, TripMember } from './types';
 import { INITIAL_SAVED_PLACES } from './data/savedPlacesData';
@@ -21,11 +22,17 @@ import { AuthModal } from './components/AuthModal';
 import { NotificationsModal } from './components/NotificationsModal';
 import { AuthScreen } from './components/AuthScreen';
 import { formatMoney } from './utils/formatCurrency';
+import { getLocalDateString } from './utils/dateUtils';
+import { collection, doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+import { db, stripUndefinedDeep, handleFirestoreError, OperationType } from './firebase';
+import { computeTripDeletionSummary, buildTripDeletionNotifications } from './utils/tripSettlementUtils';
+import { buildDefaultAvatar, syncUserAvatarIntoTrips } from './utils/avatarSyncUtils';
+import { filterTripsForUser, getUserTripsCacheKey } from './utils/tripAccessUtils';
 
 import { 
   Calendar, MapPin, DollarSign, CloudSun, Users, Compass, 
   Map as MapIcon, BookmarkCheck, CreditCard, CheckSquare, ShieldCheck, Sparkles, Plus, Share2,
-  Edit3, Trash2, Camera, Printer, Wifi, WifiOff
+  Edit3, Trash2, Camera, Printer, Wifi, WifiOff, MoreHorizontal, MoreVertical, ChevronRight, X
 } from 'lucide-react';
 
 type TabType = 'itinerary' | 'expenses' | 'map' | 'places' | 'vault' | 'packing';
@@ -33,6 +40,7 @@ type TabType = 'itinerary' | 'expenses' | 'map' | 'places' | 'vault' | 'packing'
 function AppContent() {
   const { lang, t, isVi } = useLanguage();
   const { 
+    currentUser,
     userProfile, 
     isLoading,
     isAuthModalOpen, 
@@ -41,8 +49,54 @@ function AppContent() {
     setIsNotificationsModalOpen 
   } = useAuth();
 
-  const [trips, setTrips] = useState<Trip[]>(SAMPLE_TRIPS);
-  const [activeTripId, setActiveTripId] = useState<string>(SAMPLE_TRIPS[0].id);
+  const getDeletedTripIdsSet = (): Set<string> => {
+    try {
+      const raw = localStorage.getItem('tripmate_deleted_trip_ids');
+      const arr = raw ? JSON.parse(raw) : [];
+      return new Set(Array.isArray(arr) ? arr.filter((x) => typeof x === 'string') : []);
+    } catch {
+      return new Set<string>();
+    }
+  };
+
+  const deletedTripIdsRef = React.useRef<Set<string>>(getDeletedTripIdsSet());
+
+  const loadCachedTripsForUser = (
+    targetUser: typeof userProfile,
+    deletedIds: Set<string> = deletedTripIdsRef.current
+  ): Trip[] => {
+    const cacheKey = getUserTripsCacheKey(targetUser?.id);
+    if (!targetUser || !cacheKey) return [];
+    try {
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed)) {
+          const notDeleted = parsed.filter((t: Trip) => t && t.id && !deletedIds.has(t.id));
+          return filterTripsForUser(notDeleted, targetUser);
+        }
+      }
+    } catch (e) {
+      console.warn('Failed parsing cached user trips:', e);
+    }
+    return [];
+  };
+
+  const saveCachedTripsForUser = (userId: string | undefined | null, nextTrips: Trip[]) => {
+    const cacheKey = getUserTripsCacheKey(userId);
+    if (!cacheKey) return;
+    try {
+      localStorage.setItem(cacheKey, JSON.stringify(nextTrips));
+    } catch (e) {
+      console.warn('Error saving trips to localStorage:', e);
+    }
+  };
+
+  const [trips, setTrips] = useState<Trip[]>(() => loadCachedTripsForUser(userProfile));
+  const [activeTripId, setActiveTripId] = useState<string>(() => {
+    const initial = loadCachedTripsForUser(userProfile);
+    return initial[0]?.id || '';
+  });
   const [activeTab, setActiveTab] = useState<TabType>('itinerary');
   const [savedPlaces, setSavedPlaces] = useState<SavedPlace[]>(INITIAL_SAVED_PLACES);
 
@@ -54,64 +108,188 @@ function AppContent() {
   const [isAiChatOpen, setIsAiChatOpen] = useState(false);
   const [isAiPackingLoading, setIsAiPackingLoading] = useState(false);
   const [isHandbookModalOpen, setIsHandbookModalOpen] = useState(false);
+  const [isTripActionMenuOpen, setIsTripActionMenuOpen] = useState(false);
+  const [isDeleteTripConfirmOpen, setIsDeleteTripConfirmOpen] = useState(false);
+  const [tripPendingDelete, setTripPendingDelete] = useState<Trip | null>(null);
+  const [isDeletingTrip, setIsDeletingTrip] = useState(false);
+  const [confirmExpenseSettlementAck, setConfirmExpenseSettlementAck] = useState(false);
+  const [appNotice, setAppNotice] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
   const [showOnlineToast, setShowOnlineToast] = useState<boolean>(false);
   const [invitationToast, setInvitationToast] = useState<string | null>(null);
 
+  const showAppNotice = (msg: string) => {
+    setAppNotice(msg);
+    setTimeout(() => setAppNotice(null), 4000);
+  };
+
+  // Clear & re-hydrate per-user trips immediately when authenticated user switches accounts
+  useEffect(() => {
+    try {
+      localStorage.removeItem('tripmate_trips');
+    } catch {}
+    if (!userProfile?.id) {
+      setTrips([]);
+      setActiveTripId('');
+      return;
+    }
+    const cachedForUser = loadCachedTripsForUser(userProfile, deletedTripIdsRef.current);
+    setTrips(cachedForUser);
+    setActiveTripId((prev) =>
+      cachedForUser.some((t) => t.id === prev) ? prev : (cachedForUser[0]?.id || '')
+    );
+  }, [userProfile?.id]);
+
+  // 1. Real-time synchronization of trips with Firestore (strictly filtered to current user's accessible trips)
+  useEffect(() => {
+    if (!userProfile) return;
+    let isCancelled = false;
+    try {
+      const tripsCol = collection(db, 'trips');
+      const unsub = onSnapshot(
+        tripsCol,
+        async (snapshot) => {
+          if (isCancelled) return;
+          if (snapshot.empty) {
+            const alreadySeeded = localStorage.getItem('tripmate_firestore_seeded') === '1';
+            if (!alreadySeeded && deletedTripIdsRef.current.size === 0) {
+              localStorage.setItem('tripmate_firestore_seeded', '1');
+              // Seed initial sample trips into Firestore once so they are shared and persistent
+              for (const st of SAMPLE_TRIPS) {
+                try {
+                  const seedTrip = stripUndefinedDeep({ ...st, creatorId: st.creatorId || 'm1' });
+                  await setDoc(doc(db, 'trips', st.id), seedTrip, { merge: true });
+                } catch (seedErr) {
+                  handleFirestoreError(seedErr, OperationType.WRITE, `trips/${st.id}`);
+                }
+              }
+            }
+            setTrips([]);
+            saveCachedTripsForUser(userProfile.id, []);
+          } else {
+            try {
+              localStorage.setItem('tripmate_firestore_seeded', '1');
+            } catch {}
+
+            const seenIds = new Set<string>();
+            const remoteTrips: Trip[] = [];
+            snapshot.forEach((d) => {
+              // Never resurrect trips deleted by the user in this session / cached tombstones
+              if (!deletedTripIdsRef.current.has(d.id) && !seenIds.has(d.id)) {
+                seenIds.add(d.id);
+                remoteTrips.push({ id: d.id, ...(d.data() as Omit<Trip, 'id'>) });
+              }
+            });
+
+            const accessibleRemoteTrips = filterTripsForUser(remoteTrips, userProfile);
+
+            setTrips((prevTrips) => {
+              // Keep any brand-new local trips owned/joined by current user that haven't synced to snapshot yet
+              const remoteIds = new Set(remoteTrips.map((r) => r.id));
+              const pendingLocalTrips = filterTripsForUser(
+                prevTrips.filter(
+                  (lt) =>
+                    !remoteIds.has(lt.id) &&
+                    !deletedTripIdsRef.current.has(lt.id) &&
+                    lt.id.startsWith('trip-') &&
+                    !SAMPLE_TRIPS.some((s) => s.id === lt.id)
+                ),
+                userProfile
+              );
+              const mergedRaw = [...pendingLocalTrips, ...accessibleRemoteTrips];
+              const mergedTrips = userProfile.avatar
+                ? syncUserAvatarIntoTrips(mergedRaw, userProfile).nextTrips
+                : mergedRaw;
+              saveCachedTripsForUser(userProfile.id, mergedTrips);
+              return mergedTrips;
+            });
+          }
+        },
+        (err) => {
+          handleFirestoreError(err, OperationType.GET, 'trips');
+        }
+      );
+      return () => {
+        isCancelled = true;
+        unsub();
+      };
+    } catch (err) {
+      console.warn('Trips collection listener setup error:', err);
+    }
+  }, [userProfile?.id, userProfile?.email, userProfile?.phone, currentUser?.uid]);
+
   // Listen to in-app invitation acceptance
-  React.useEffect(() => {
+  useEffect(() => {
     const handleInvitationResponded = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (!detail) return;
-      const { tripId, accept, userProfile: responderProfile, invitationId } = detail;
+      const { tripId, accept, userProfile: responderProfile, invitationId, updatedTrip: remoteAcceptedTrip } = detail;
 
       if (accept && responderProfile) {
         setTrips((prevTrips) => {
-          return prevTrips.map((t) => {
-            if (t.id === tripId) {
-              const existingIdx = t.members.findIndex(
-                (m) =>
-                  (invitationId && m.invitationId === invitationId) ||
-                  (m.uid && m.uid === responderProfile.id) ||
-                  (m.email && m.email.toLowerCase() === responderProfile.email.toLowerCase()) ||
-                  (responderProfile.phone && m.phone === responderProfile.phone)
-              );
+          const existsInPrev = prevTrips.some((t) => t.id === tripId);
+          let nextTrips: Trip[];
+          if (existsInPrev) {
+            nextTrips = prevTrips.map((t) => {
+              if (t.id === tripId) {
+                const existingIdx = t.members.findIndex(
+                  (m) =>
+                    (invitationId && m.invitationId === invitationId) ||
+                    (m.uid && m.uid === responderProfile.id) ||
+                    (m.email && m.email.toLowerCase() === responderProfile.email.toLowerCase()) ||
+                    (responderProfile.phone && m.phone === responderProfile.phone)
+                );
 
-              let updatedMembers = [...t.members];
-              if (existingIdx >= 0) {
-                updatedMembers[existingIdx] = {
-                  ...updatedMembers[existingIdx],
-                  uid: responderProfile.id,
-                  name: responderProfile.displayName,
-                  avatar: responderProfile.avatar || updatedMembers[existingIdx].avatar,
-                  email: responderProfile.email,
-                  phone: responderProfile.phone,
-                  isRegistered: true,
-                  invitationStatus: 'accepted',
+                let updatedMembers = [...t.members];
+                if (existingIdx >= 0) {
+                  updatedMembers[existingIdx] = {
+                    ...updatedMembers[existingIdx],
+                    uid: responderProfile.id,
+                    name: responderProfile.displayName,
+                    avatar: responderProfile.avatar || updatedMembers[existingIdx].avatar,
+                    email: responderProfile.email,
+                    phone: responderProfile.phone,
+                    isRegistered: true,
+                    invitationStatus: 'accepted',
+                  };
+                } else {
+                  updatedMembers.push({
+                    id: `m-${responderProfile.id}`,
+                    name: responderProfile.displayName,
+                    avatar: responderProfile.avatar,
+                    email: responderProfile.email,
+                    phone: responderProfile.phone,
+                    uid: responderProfile.id,
+                    isRegistered: true,
+                    invitationStatus: 'accepted',
+                    contributedAmount: 0,
+                  });
+                }
+
+                const memberUids = Array.from(new Set([...(t.memberUids || []), responderProfile.id]));
+                const updatedTrip = {
+                  ...t,
+                  members: updatedMembers,
+                  memberUids,
                 };
-              } else {
-                updatedMembers.push({
-                  id: `m-${responderProfile.id}`,
-                  name: responderProfile.displayName,
-                  avatar: responderProfile.avatar,
-                  email: responderProfile.email,
-                  phone: responderProfile.phone,
-                  uid: responderProfile.id,
-                  isRegistered: true,
-                  invitationStatus: 'accepted',
-                  contributedAmount: 0,
-                });
-              }
 
-              const memberUids = Array.from(new Set([...(t.memberUids || []), responderProfile.id]));
-              return {
-                ...t,
-                members: updatedMembers,
-                memberUids,
-              };
-            }
-            return t;
-          });
+                // Persist to Firestore
+                setDoc(doc(db, 'trips', updatedTrip.id), stripUndefinedDeep(updatedTrip), { merge: true }).catch((err) =>
+                  handleFirestoreError(err, OperationType.WRITE, `trips/${updatedTrip.id}`)
+                );
+
+                return updatedTrip;
+              }
+              return t;
+            });
+          } else if (remoteAcceptedTrip && remoteAcceptedTrip.id === tripId) {
+            nextTrips = [remoteAcceptedTrip as Trip, ...prevTrips];
+          } else {
+            nextTrips = prevTrips;
+          }
+
+          saveCachedTripsForUser(responderProfile.id, nextTrips);
+          return nextTrips;
         });
 
         // Switch to the accepted trip so the user can immediately explore all information
@@ -131,7 +309,43 @@ function AppContent() {
     };
   }, [isVi]);
 
-  React.useEffect(() => {
+  // Synchronize current user's avatar across matching trip members & persist to Firestore
+  useEffect(() => {
+    const syncTripsWithUser = (profileSnapshot?: typeof userProfile) => {
+      const targetUser = profileSnapshot || userProfile;
+      if (!targetUser || !targetUser.avatar) return;
+      setTrips((prevTrips) => {
+        const { nextTrips, changedTripIds } = syncUserAvatarIntoTrips(prevTrips, targetUser);
+        if (changedTripIds.length === 0) return prevTrips;
+        saveCachedTripsForUser(targetUser.id, nextTrips);
+        changedTripIds.forEach((cid) => {
+          const updatedTrip = nextTrips.find((t) => t.id === cid);
+          if (updatedTrip) {
+            persistTripToFirestore(updatedTrip);
+          }
+        });
+        return nextTrips;
+      });
+    };
+
+    syncTripsWithUser(userProfile);
+
+    const handleAvatarUpdated = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.userProfile) {
+        syncTripsWithUser(detail.userProfile);
+      } else if (userProfile && detail?.avatar) {
+        syncTripsWithUser({ ...userProfile, avatar: detail.avatar });
+      }
+    };
+
+    window.addEventListener('tripmate_user_avatar_updated', handleAvatarUpdated);
+    return () => {
+      window.removeEventListener('tripmate_user_avatar_updated', handleAvatarUpdated);
+    };
+  }, [userProfile?.id, userProfile?.avatar]);
+
+  useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
       setShowOnlineToast(true);
@@ -150,14 +364,58 @@ function AppContent() {
     };
   }, []);
 
-  // Active Trip reference
-  const activeTrip = trips.find((t) => t.id === activeTripId) || trips[0];
+  // Keep activeTripId valid whenever trips list updates (e.g., after delete or remote sync)
+  useEffect(() => {
+    if (trips.length === 0) {
+      if (activeTripId !== '') {
+        setActiveTripId('');
+      }
+      return;
+    }
+    if (!trips.some((t) => t.id === activeTripId)) {
+      setActiveTripId(trips[0].id);
+    }
+  }, [trips, activeTripId]);
 
-  // Helper to update active trip
+  // Active Trip reference
+  const activeTrip: Trip | undefined = trips.find((t) => t.id === activeTripId) || trips[0];
+
+  // Safe Firestore trip persistence helper (never resurrect deleted trips)
+  const persistTripToFirestore = (tripData: Trip) => {
+    if (!tripData?.id || deletedTripIdsRef.current.has(tripData.id)) {
+      return;
+    }
+    try {
+      const normalizedTrip = {
+        ...tripData,
+        creatorId: tripData.creatorId || userProfile?.id || 'm1',
+      };
+      const sanitized = stripUndefinedDeep(normalizedTrip);
+      setDoc(doc(db, 'trips', sanitized.id), sanitized, { merge: true }).catch((err) => {
+        handleFirestoreError(err, OperationType.WRITE, `trips/${sanitized.id}`);
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `trips/${tripData.id}`);
+    }
+  };
+
+  // Helper to update active trip & persist to Firestore
   const updateActiveTrip = (updater: (prevTrip: Trip) => Trip) => {
-    setTrips((prevTrips) =>
-      prevTrips.map((t) => (t.id === activeTrip.id ? updater(t) : t))
-    );
+    if (!activeTrip) return;
+    const targetTripId = activeTrip.id;
+    setTrips((prevTrips) => {
+      const nextTrips = prevTrips.map((t) => {
+        if (t.id === targetTripId) {
+          const updated = updater(t);
+          // Persist to Firestore asynchronously (stripped of undefined)
+          persistTripToFirestore(updated);
+          return updated;
+        }
+        return t;
+      });
+      saveCachedTripsForUser(userProfile?.id, nextTrips);
+      return nextTrips;
+    });
   };
 
   // 1. Itinerary Handlers
@@ -386,7 +644,7 @@ function AppContent() {
           paidBy: data.paidBy,
           splitWith: data.splitWith.length > 0 ? data.splitWith : trip.members.map((m) => m.id),
           memberSplits: data.memberSplits,
-          date: new Date().toISOString().split('T')[0],
+          date: getLocalDateString(),
           receiptNote: `${lang === 'vi' ? 'Chi tiêu tự động từ hoạt động:' : 'Auto-recorded from activity:'} ${targetActivity.title} (${lang === 'vi' ? `Ngày ${targetDayNum}` : `Day ${targetDayNum}`})`,
           receiptImageUrl: 'receiptImageUrl' in data ? data.receiptImageUrl : targetActivity.receiptImageUrl,
         };
@@ -528,7 +786,7 @@ function AppContent() {
         paidBy: item.paidBy,
         splitWith: item.splitWith && item.splitWith.length > 0 ? item.splitWith : trip.members.map((m) => m.id),
         memberSplits: item.memberSplits,
-        date: item.date || new Date().toISOString().split('T')[0],
+        date: item.date || getLocalDateString(),
         receiptNote: item.note,
         receiptImageUrl: item.receiptImageUrl,
       };
@@ -554,16 +812,24 @@ function AppContent() {
   const handleAddMember = (newMember: Omit<TripMember, 'id'>) => {
     updateActiveTrip((trip) => {
       const memberId = `m-${Date.now()}`;
-      const defaultAvatar = `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(newMember.name || memberId)}`;
+      const defaultAvatar = buildDefaultAvatar(newMember.name || memberId);
       const member: TripMember = {
         ...newMember,
         id: memberId,
         avatar: newMember.avatar || defaultAvatar,
         contributedAmount: Number(newMember.contributedAmount) || 0,
       };
+      const shouldAddUid =
+        Boolean(newMember.uid) &&
+        newMember.invitationStatus !== 'pending' &&
+        newMember.invitationStatus !== 'declined';
+      const nextMemberUids = shouldAddUid && newMember.uid
+        ? Array.from(new Set([...(trip.memberUids || []), newMember.uid]))
+        : trip.memberUids;
       return {
         ...trip,
         members: [...trip.members, member],
+        ...(nextMemberUids ? { memberUids: nextMemberUids } : {}),
         fundHolderId: trip.fundHolderId || memberId,
       };
     });
@@ -590,13 +856,27 @@ function AppContent() {
   const handleDeleteMember = (memberId: string) => {
     updateActiveTrip((trip) => {
       if (trip.members.length <= 1) return trip;
+      const deletedMember = trip.members.find((m) => m.id === memberId);
       const updatedMembers = trip.members.filter((m) => m.id !== memberId);
       const fallbackMemberId = updatedMembers[0].id;
+      const nextMemberUids = Array.isArray(trip.memberUids)
+        ? trip.memberUids.filter((uid) => !deletedMember?.uid || uid !== deletedMember.uid)
+        : trip.memberUids;
       const updatedExpenses = trip.expenses.map((exp) => {
         const nextPaidBy = exp.paidBy === memberId ? fallbackMemberId : exp.paidBy;
         let nextSplitWith = exp.splitWith.filter((id) => id !== memberId);
         if (nextSplitWith.length === 0) nextSplitWith = [fallbackMemberId];
-        const nextMemberSplits = exp.memberSplits?.filter((ms) => ms.memberId !== memberId);
+
+        // Recalculate member splits evenly across the remaining split participants to preserve total
+        let nextMemberSplits = exp.memberSplits;
+        if (exp.memberSplits && exp.memberSplits.length > 0) {
+          const equalAmount = Math.round((exp.amount / nextSplitWith.length) * 100) / 100;
+          nextMemberSplits = nextSplitWith.map((id) => ({
+            memberId: id,
+            amount: equalAmount,
+          }));
+        }
+
         return {
           ...exp,
           paidBy: nextPaidBy,
@@ -607,6 +887,7 @@ function AppContent() {
       return {
         ...trip,
         members: updatedMembers,
+        ...(nextMemberUids ? { memberUids: nextMemberUids } : {}),
         expenses: updatedExpenses,
         fundHolderId: trip.fundHolderId === memberId ? fallbackMemberId : trip.fundHolderId,
       };
@@ -657,6 +938,7 @@ function AppContent() {
   };
 
   const handleGenerateAiPackingList = async () => {
+    if (!activeTrip) return;
     setIsAiPackingLoading(true);
     try {
       const res = await fetch('/api/gemini/packing-list', {
@@ -734,7 +1016,7 @@ function AppContent() {
             newDoc.splitWith && newDoc.splitWith.length > 0
               ? newDoc.splitWith
               : trip.members.map((m) => m.id),
-          date: newDoc.date || new Date().toISOString().split('T')[0],
+          date: newDoc.date || getLocalDateString(),
           receiptNote: `${newDoc.docType} (${newDoc.codeOrNumber || ''})`.trim(),
         };
 
@@ -784,7 +1066,7 @@ function AppContent() {
             mergedDoc.splitWith && mergedDoc.splitWith.length > 0
               ? mergedDoc.splitWith
               : trip.members.map((m) => m.id),
-          date: mergedDoc.date || new Date().toISOString().split('T')[0],
+          date: mergedDoc.date || getLocalDateString(),
           receiptNote: `${mergedDoc.docType} (${mergedDoc.codeOrNumber || ''})`.trim(),
         };
 
@@ -824,11 +1106,12 @@ function AppContent() {
   const handleApplyGeneratedItinerary = (generatedData: any) => {
     if (!generatedData) return;
 
-    const targetId = generatedData.targetTripId || activeTrip.id;
+    const targetId = generatedData.targetTripId || activeTrip?.id;
+    if (!targetId) return;
     const selectedTabs: string[] = generatedData.selectedTabs || ['itinerary'];
 
-    setTrips((prevTrips) =>
-      prevTrips.map((trip) => {
+    setTrips((prevTrips) => {
+      const nextTrips = prevTrips.map((trip) => {
         if (trip.id !== targetId) return trip;
 
         let updatedTrip = { ...trip };
@@ -864,8 +1147,13 @@ function AppContent() {
                 locationName: a.locationName || trip.destination,
                 category: (a.category as any) || 'sightseeing',
                 estimatedCost: a.estimatedCost || 0,
+                currency: a.currency || trip.currency,
                 notes: a.notes || '',
                 isCompleted: false,
+                ...(typeof a.rating === 'number' ? { rating: a.rating } : {}),
+                ...(typeof a.isFromSavedPlaces === 'boolean' ? { isFromSavedPlaces: a.isFromSavedPlaces } : {}),
+                ...(typeof a.lat === 'number' ? { lat: a.lat } : {}),
+                ...(typeof a.lng === 'number' ? { lng: a.lng } : {}),
               })),
             };
           });
@@ -894,8 +1182,12 @@ function AppContent() {
             members = [
               {
                 id: 'm1',
-                name: isVi ? 'Bạn (Trưởng nhóm)' : 'Alex Rivera (You)',
-                avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80',
+                ...(userProfile?.id ? { uid: userProfile.id } : {}),
+                name: userProfile?.displayName || (isVi ? 'Bạn (Trưởng nhóm)' : 'Alex Rivera (You)'),
+                ...(userProfile?.email ? { email: userProfile.email } : {}),
+                ...(userProfile?.phone ? { phone: userProfile.phone } : {}),
+                avatar: userProfile?.avatar || buildDefaultAvatar(userProfile?.displayName || 'TripMate'),
+                ...(userProfile?.id ? { isRegistered: true } : {}),
               },
             ];
             updatedTrip.members = members;
@@ -913,7 +1205,7 @@ function AppContent() {
             category: exp.category || 'other',
             paidBy: exp.paidBy || defaultPayer,
             splitWith: exp.splitWith && exp.splitWith.length > 0 ? exp.splitWith : allMemberIds,
-            date: exp.date || updatedTrip.startDate || new Date().toISOString().split('T')[0],
+            date: exp.date || updatedTrip.startDate || getLocalDateString(),
             receiptNote: exp.receiptNote || (isVi ? 'Dự toán chi tiêu gợi ý từ AI' : 'Suggested expense estimate from AI'),
           }));
 
@@ -940,31 +1232,36 @@ function AppContent() {
           updatedTrip.title = generatedData.destinationTitle;
         }
 
-        return updatedTrip;
-      })
-    );
+        const sanitizedUpdated = stripUndefinedDeep(updatedTrip);
+        persistTripToFirestore(sanitizedUpdated);
+        return sanitizedUpdated;
+      });
+      saveCachedTripsForUser(userProfile?.id, nextTrips);
+      return nextTrips;
+    });
 
-    // 5. Apply Saved Places (Global state)
+    // 5. Apply Saved Places (Global state, sorted highest rating first)
     if (selectedTabs.includes('places') && generatedData.savedPlaces && Array.isArray(generatedData.savedPlaces)) {
       setSavedPlaces((prevPlaces) => {
-        const existingKeys = new Set(prevPlaces.map((p) => `${p.name.toLowerCase()}_${p.cityName.toLowerCase()}`));
+        const existingKeys = new Set(prevPlaces.map((p) => `${p.name.toLowerCase().trim()}_${p.cityName.toLowerCase().trim()}`));
         const newPlaces: SavedPlace[] = generatedData.savedPlaces
-          .filter((p: any) => !existingKeys.has(`${p.name.toLowerCase()}_${(p.cityName || '').toLowerCase()}`))
+          .filter((p: any) => !existingKeys.has(`${(p.name || '').toLowerCase().trim()}_${(p.cityName || activeTrip?.destination || '').toLowerCase().trim()}`))
           .map((p: any, idx: number) => ({
             id: `place-gen-${Date.now()}-${idx}`,
-            cityName: p.cityName || activeTrip.destination,
+            cityName: p.cityName || activeTrip?.destination || '',
             name: p.name,
             category: p.category || 'sightseeing',
             address: p.address || '',
             estimatedCost: p.estimatedCost,
-            currency: p.currency || activeTrip.currency || 'USD',
+            currency: p.currency || activeTrip?.currency || 'USD',
             rating: p.rating || 4.8,
             notes: p.notes || '',
-            source: isVi ? 'AI gợi ý' : 'AI Recommendation',
+            source: p.source || (isVi ? 'AI gợi ý sao cao' : 'AI Top Rated'),
             openTime: p.openTime,
             closeTime: p.closeTime,
             createdAt: new Date().toISOString(),
-          }));
+          }))
+          .sort((a: SavedPlace, b: SavedPlace) => (b.rating || 0) - (a.rating || 0));
         return [...newPlaces, ...prevPlaces];
       });
     }
@@ -972,24 +1269,42 @@ function AppContent() {
 
   // 6. Create New Trip
   const handleCreateTrip = (newTrip: Trip, openAiArchitect: boolean = false) => {
-    setTrips((prev) => [newTrip, ...prev]);
-    setActiveTripId(newTrip.id);
+    const tripToSave: Trip = stripUndefinedDeep({
+      ...newTrip,
+      creatorId: userProfile?.id || newTrip.creatorId || 'guest',
+      ...(userProfile?.displayName || newTrip.creatorName
+        ? { creatorName: userProfile?.displayName || newTrip.creatorName }
+        : {}),
+      memberUids: Array.from(new Set([...(newTrip.memberUids || []), ...(userProfile?.id ? [userProfile.id] : [])])),
+    });
+
+    setTrips((prev) => {
+      const next = [tripToSave, ...prev];
+      saveCachedTripsForUser(userProfile?.id, next);
+      return next;
+    });
+
+    // Save to Firestore safely (stripped of undefined)
+    persistTripToFirestore(tripToSave);
+
+    setActiveTripId(tripToSave.id);
     setActiveTab('itinerary');
     if (openAiArchitect) {
-      setAiTargetTrip(newTrip);
+      setAiTargetTrip(tripToSave);
       setIsAIModalOpen(true);
     }
   };
 
   // 6b. Check if active trip has any completed activities
   const hasCompletedActivities = React.useMemo(() => {
+    if (!activeTrip) return false;
     return activeTrip.days.some((d) => d.activities.some((a) => a.isCompleted));
   }, [activeTrip]);
 
   // 6c. Update Trip Details (Title, dates, destination, budget, cover...)
   const handleUpdateTrip = (tripId: string, updatedFields: Partial<Trip> & { rearrangeAllDays?: boolean }) => {
-    setTrips((prevTrips) =>
-      prevTrips.map((t) => {
+    setTrips((prevTrips) => {
+      const nextTrips = prevTrips.map((t) => {
         if (t.id !== tripId) return t;
 
         const start = updatedFields.startDate || t.startDate;
@@ -1013,7 +1328,7 @@ function AppContent() {
                 const dayNum = idx + 1;
                 const dateObj = new Date(s);
                 dateObj.setDate(s.getDate() + idx);
-                const dateStr = dateObj.toISOString().split('T')[0];
+                const dateStr = getLocalDateString(dateObj);
 
                 const dayActs = actsPerDay > 0
                   ? allActivities.slice(idx * actsPerDay, (idx + 1) * actsPerDay)
@@ -1033,7 +1348,7 @@ function AppContent() {
                 const dayNum = oldDaysCount + idx + 1;
                 const dateObj = new Date(s);
                 dateObj.setDate(s.getDate() + oldDaysCount + idx);
-                const dateStr = dateObj.toISOString().split('T')[0];
+                const dateStr = getLocalDateString(dateObj);
 
                 return {
                   dayNumber: dayNum,
@@ -1045,23 +1360,56 @@ function AppContent() {
               });
               newDays = [...t.days, ...addedDays];
             }
+          } else if (newDaysCount < oldDaysCount) {
+            // Shortening trip: keep days 1 to newDaysCount, and merge any activities from days > newDaysCount
+            // into the last day (newDaysCount) so NO activities or linked expenses are silently lost!
+            const truncatedDays = t.days.slice(newDaysCount);
+            const extraActivities = truncatedDays.flatMap((d) => d.activities);
+
+            newDays = t.days.slice(0, newDaysCount).map((day, idx) => {
+              const dayNum = idx + 1;
+              const dateObj = new Date(s);
+              dateObj.setDate(s.getDate() + idx);
+              const dateStr = getLocalDateString(dateObj);
+
+              if (dayNum === newDaysCount && extraActivities.length > 0) {
+                return {
+                  ...day,
+                  date: dateStr,
+                  activities: [...day.activities, ...extraActivities],
+                };
+              }
+              return {
+                ...day,
+                date: dateStr,
+              };
+            });
           }
         }
 
         const { rearrangeAllDays, ...fieldsToUpdate } = updatedFields;
-        return {
+        const updatedTrip: Trip = {
           ...t,
           ...fieldsToUpdate,
           days: newDays,
         };
-      })
-    );
-  };
 
-  // 6d. Delete Active Trip (Only allowed if no activities are completed, with confirm)
+        // Persist to Firestore safely
+        persistTripToFirestore(updatedTrip);
+
+        return updatedTrip;
+      });
+
+        saveCachedTripsForUser(userProfile?.id, nextTrips);
+        return nextTrips;
+      });
+    };
+
+  // 6d. Delete Active Trip (Only allowed if no activities are completed, with in-app confirm modal)
   const handleDeleteTrip = () => {
+    if (!activeTrip) return;
     if (hasCompletedActivities) {
-      alert(
+      showAppNotice(
         isVi
           ? 'Không thể xóa chuyến đi vì đã có hoạt động được đánh dấu hoàn thành!'
           : 'Cannot delete trip because it has completed activities!'
@@ -1069,25 +1417,110 @@ function AppContent() {
       return;
     }
 
-    if (trips.length <= 1) {
-      alert(
-        isVi
-          ? 'Không thể xóa chuyến đi duy nhất.'
-          : 'Cannot delete the only remaining trip.'
-      );
+    setTripPendingDelete(activeTrip);
+    setConfirmExpenseSettlementAck(false);
+    setIsDeleteTripConfirmOpen(true);
+  };
+
+  const deleteTripSummary = React.useMemo(() => {
+    const target = tripPendingDelete || activeTrip;
+    if (!target) return null;
+    return computeTripDeletionSummary(target, userProfile);
+  }, [tripPendingDelete, activeTrip, userProfile]);
+
+  const confirmDeleteActiveTrip = async () => {
+    const targetTrip = tripPendingDelete || activeTrip;
+    if (!targetTrip || isDeletingTrip) return;
+
+    const summary = computeTripDeletionSummary(targetTrip, userProfile);
+    if (summary.hasRecordedExpenses && !confirmExpenseSettlementAck) {
       return;
     }
 
-    const confirmed = window.confirm(
-      isVi
-        ? `Bạn có chắc chắn muốn xóa chuyến đi "${activeTrip.title}" không? Hành động này không thể hoàn tác.`
-        : `Are you sure you want to delete trip "${activeTrip.title}"? This action cannot be undone.`
-    );
+    const targetId = targetTrip.id;
+    setIsDeletingTrip(true);
 
-    if (confirmed) {
-      const remaining = trips.filter((t) => t.id !== activeTrip.id);
-      setTrips(remaining);
-      setActiveTripId(remaining[0].id);
+    // Mark tombstone immediately so concurrent onSnapshot / persistTripToFirestore never resurrects it
+    deletedTripIdsRef.current.add(targetId);
+    try {
+      localStorage.setItem(
+        'tripmate_deleted_trip_ids',
+        JSON.stringify(Array.from(deletedTripIdsRef.current))
+      );
+    } catch (e) {
+      console.warn('Error saving deleted trip tombstone:', e);
+    }
+
+    try {
+      // 1. Persist cross-user notifications to participating members & both sides of every debt pair BEFORE removing trip
+      const notificationsToSend = buildTripDeletionNotifications({
+        trip: targetTrip,
+        actor: userProfile,
+        summary,
+        language: isVi ? 'vi' : 'en',
+      });
+
+      if (notificationsToSend.length > 0) {
+        await Promise.all(
+          notificationsToSend.map((n) =>
+            setDoc(doc(db, 'user_notifications', n.id), stripUndefinedDeep(n))
+          )
+        );
+      }
+
+      // 2. Wait for Firestore deletion confirmation BEFORE reporting success
+      await deleteDoc(doc(db, 'trips', targetId));
+
+      const remainingSync = trips.filter((t) => t.id !== targetId);
+      const fallbackActiveId = remainingSync[0]?.id || '';
+
+      setTrips((prevTrips) => {
+        const remaining = prevTrips.filter((t) => t.id !== targetId);
+        saveCachedTripsForUser(userProfile?.id, remaining);
+        return remaining;
+      });
+
+      setActiveTripId((prevActive) => (prevActive === targetId ? fallbackActiveId : prevActive));
+
+      setIsDeleteTripConfirmOpen(false);
+      setTripPendingDelete(null);
+      setConfirmExpenseSettlementAck(false);
+
+      const notifySummaryText =
+        notificationsToSend.length > 0
+          ? isVi
+            ? summary.settlements.length > 0
+              ? ` Đã gửi thông báo xóa chuyến đi & giải quyết ${summary.settlements.length} khoản tiền tới các thành viên.`
+              : ` Đã gửi thông báo hủy chuyến đi tới ${summary.otherMembers.length} thành viên tham gia.`
+            : summary.settlements.length > 0
+            ? ` Sent deletion & ${summary.settlements.length} debt settlement notification(s) to members.`
+            : ` Notified ${summary.otherMembers.length} participating member(s).`
+          : '';
+
+      showAppNotice(
+        (isVi
+          ? `Đã xóa chuyến đi "${targetTrip.title}".`
+          : `Deleted trip "${targetTrip.title}".`) + notifySummaryText
+      );
+    } catch (err) {
+      // Roll back tombstone so UI stays consistent with server state if delete was rejected
+      deletedTripIdsRef.current.delete(targetId);
+      try {
+        localStorage.setItem(
+          'tripmate_deleted_trip_ids',
+          JSON.stringify(Array.from(deletedTripIdsRef.current))
+        );
+      } catch {}
+      handleFirestoreError(err, OperationType.DELETE, `trips/${targetId}`);
+      setIsDeleteTripConfirmOpen(false);
+      setTripPendingDelete(null);
+      showAppNotice(
+        isVi
+          ? `Không thể xóa chuyến đi "${targetTrip.title}" trên máy chủ. Vui lòng kiểm tra kết nối hoặc quyền truy cập và thử lại.`
+          : `Failed to delete trip "${targetTrip.title}" from server. Please check connection or permissions and try again.`
+      );
+    } finally {
+      setIsDeletingTrip(false);
     }
   };
 
@@ -1117,8 +1550,8 @@ function AppContent() {
     place: SavedPlace,
     time: string
   ) => {
-    setTrips((prevTrips) =>
-      prevTrips.map((t) => {
+    setTrips((prevTrips) => {
+      const nextTrips = prevTrips.map((t) => {
         if (t.id === tripId) {
           const newActivity: ActivityItem = {
             id: `act-${Date.now()}`,
@@ -1138,11 +1571,15 @@ function AppContent() {
             return d;
           });
 
-          return { ...t, days: updatedDays };
+          const updatedTrip = { ...t, days: updatedDays };
+          persistTripToFirestore(updatedTrip);
+          return updatedTrip;
         }
         return t;
-      })
-    );
+      });
+      saveCachedTripsForUser(userProfile?.id, nextTrips);
+      return nextTrips;
+    });
 
     setActiveTripId(tripId);
     setActiveTab('itinerary');
@@ -1213,9 +1650,43 @@ function AppContent() {
 
       {/* Main Container - Mobile Optimized */}
       <main className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 pt-3 sm:pt-6 space-y-4 sm:space-y-5">
-        
-        {/* Trip Header Banner with Cover Image as Background */}
-        <div className="relative w-full rounded-2xl sm:rounded-3xl overflow-hidden border border-slate-200/80 shadow-sm group min-h-[160px] sm:min-h-[190px] flex flex-col justify-between p-3.5 sm:p-6 bg-slate-900">
+        {!activeTrip ? (
+          <div className="bg-white rounded-3xl border border-slate-200/80 shadow-xs p-8 sm:p-12 text-center max-w-xl mx-auto my-8 space-y-4">
+            <div className="w-16 h-16 rounded-2xl bg-teal-50 text-teal-600 border border-teal-100 flex items-center justify-center mx-auto shadow-2xs">
+              <Compass className="w-8 h-8" />
+            </div>
+            <div className="space-y-1.5">
+              <h2 className="font-display font-extrabold text-lg sm:text-xl text-slate-900">
+                {isVi ? 'Chưa có chuyến đi nào' : 'No trips yet'}
+              </h2>
+              <p className="text-xs sm:text-sm text-slate-500 leading-relaxed">
+                {isVi
+                  ? 'Bạn chỉ xem được các chuyến đi do chính mình tạo hoặc đã đồng ý tham gia. Hãy tạo chuyến đi mới hoặc kiểm tra thông báo để nhận lời mời.'
+                  : 'You can only view trips you created or joined. Create a new trip or check notifications for pending invitations.'}
+              </p>
+            </div>
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsNewTripModalOpen(true)}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold shadow-xs transition-colors cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>{isVi ? 'Tạo chuyến đi mới' : 'Create New Trip'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsNotificationsModalOpen(true)}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-colors cursor-pointer"
+              >
+                <span>{isVi ? 'Kiểm tra lời mời / Thông báo' : 'Check Invitations & Notices'}</span>
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+        {/* Trip Header Banner with Compact Luxe Style */}
+        <div className="relative w-full rounded-2xl sm:rounded-3xl overflow-hidden border border-slate-200/80 shadow-sm group min-h-[105px] sm:min-h-[145px] flex flex-col justify-between p-3 sm:p-5 bg-slate-900 transition-all">
           {/* Background Image */}
           {activeTrip.coverImage ? (
             <img
@@ -1228,13 +1699,13 @@ function AppContent() {
           )}
 
           {/* High-legibility scrim gradient overlay */}
-          <div className="absolute inset-0 bg-gradient-to-t from-slate-950/95 via-slate-950/65 to-slate-950/40" />
+          <div className="absolute inset-0 bg-gradient-to-t from-slate-950/95 via-slate-950/60 to-slate-950/30" />
 
-          {/* Top Bar inside Banner: Badges on left, Action buttons on right - Clean non-overlapping flex layout */}
-          <div className="relative z-10 flex items-center justify-between gap-2 mb-2 sm:mb-3">
+          {/* Top Bar inside Banner: Badges on left, Action buttons on right */}
+          <div className="relative z-10 flex items-center justify-between gap-2 mb-1.5 sm:mb-2">
             {/* Country & Date Badge */}
             <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-              <span className="px-2 py-0.5 rounded-md text-[11px] font-bold uppercase tracking-wider bg-teal-500/90 text-white border border-teal-400/40 shrink-0 backdrop-blur-xs">
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-teal-500/80 text-white border border-white/20 shrink-0 backdrop-blur-md">
                 {activeTrip.country}
               </span>
               <span className="text-[11px] sm:text-xs text-slate-200 font-medium shrink-0 drop-shadow-xs">
@@ -1242,32 +1713,48 @@ function AppContent() {
               </span>
             </div>
 
-            {/* Quick Action Buttons */}
-            <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+            {/* Mobile Only: Single Frosted Glass Vertical 3-Dots Button (⋮) */}
+            <div className="sm:hidden shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsTripActionMenuOpen(true)}
+                aria-label={isVi ? 'Tùy chọn chuyến đi' : 'Trip options'}
+                className="w-9 h-9 rounded-xl bg-white/20 hover:bg-white/30 active:scale-95 text-white backdrop-blur-md border border-white/25 transition-all flex items-center justify-center cursor-pointer shadow-xs"
+                title={isVi ? 'Tùy chọn chuyến đi' : 'Trip options'}
+              >
+                <MoreVertical className="w-4 h-4 text-white" />
+              </button>
+            </div>
+
+            {/* Desktop Only: Full 4 Action Buttons */}
+            <div className="hidden sm:flex items-center gap-1.5 shrink-0">
               {/* Export Travel Handbook / Print PDF */}
               <button
+                type="button"
                 onClick={() => setIsHandbookModalOpen(true)}
-                className="p-1.5 sm:px-2.5 sm:py-1.5 bg-white/20 hover:bg-white/30 text-white rounded-lg sm:rounded-xl text-xs font-semibold backdrop-blur-md border border-white/20 flex items-center gap-1 transition-all cursor-pointer shadow-sm"
+                className="px-2.5 py-1.5 bg-white/20 hover:bg-white/30 text-white rounded-xl text-xs font-semibold backdrop-blur-md border border-white/20 flex items-center gap-1 transition-all cursor-pointer shadow-sm"
                 title={isVi ? 'Xuất cẩm nang / In PDF' : 'Travel Handbook / Print PDF'}
               >
                 <Printer className="w-3.5 h-3.5 text-white" />
-                <span className="hidden md:inline">{isVi ? 'Cẩm nang' : 'Handbook'}</span>
+                <span>{isVi ? 'Cẩm nang' : 'Handbook'}</span>
               </button>
 
               {/* Edit Trip Button */}
               <button
+                type="button"
                 onClick={() => setIsEditTripModalOpen(true)}
-                className="p-1.5 sm:px-2.5 sm:py-1.5 bg-white/20 hover:bg-white/30 text-white rounded-lg sm:rounded-xl text-xs font-semibold backdrop-blur-md border border-white/20 flex items-center gap-1 transition-all cursor-pointer shadow-sm"
+                className="px-2.5 py-1.5 bg-white/20 hover:bg-white/30 text-white rounded-xl text-xs font-semibold backdrop-blur-md border border-white/20 flex items-center gap-1 transition-all cursor-pointer shadow-sm"
                 title={isVi ? 'Sửa chuyến đi' : 'Edit Trip'}
               >
                 <Edit3 className="w-3.5 h-3.5 text-white" />
-                <span className="hidden md:inline">{isVi ? 'Sửa' : 'Edit'}</span>
+                <span>{isVi ? 'Sửa' : 'Edit'}</span>
               </button>
 
               {/* Delete Trip Button */}
               <button
+                type="button"
                 onClick={handleDeleteTrip}
-                className={`p-1.5 sm:px-2.5 sm:py-1.5 rounded-lg sm:rounded-xl transition-all flex items-center gap-1 text-xs font-semibold backdrop-blur-md cursor-pointer shadow-sm ${
+                className={`px-2.5 py-1.5 rounded-xl transition-all flex items-center gap-1 text-xs font-semibold backdrop-blur-md cursor-pointer shadow-sm ${
                   hasCompletedActivities
                     ? 'bg-black/30 text-white/40 border border-white/10 cursor-not-allowed opacity-60'
                     : 'bg-rose-500/80 hover:bg-rose-600 text-white border border-rose-400/30'
@@ -1279,20 +1766,21 @@ function AppContent() {
                 }
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span className="hidden md:inline">{isVi ? 'Xóa' : 'Delete'}</span>
+                <span>{isVi ? 'Xóa' : 'Delete'}</span>
               </button>
 
-              {/* AI Itinerary Architect Button - Đồng bộ tên gọi với lúc tạo mới */}
+              {/* AI Itinerary Architect Button */}
               <button
+                type="button"
                 onClick={() => {
                   setAiTargetTrip(activeTrip);
                   setIsAIModalOpen(true);
                 }}
-                className="p-1.5 sm:px-2.5 sm:py-1.5 bg-teal-500 hover:bg-teal-600 text-white border border-teal-400/40 rounded-lg sm:rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-sm group/ai"
-                title={isVi ? 'Kiến trúc sư Lịch trình AI' : 'AI Itinerary Architect'}
+                className="px-2.5 py-1.5 bg-teal-500 hover:bg-teal-600 text-white border border-teal-400/40 rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-sm group/ai"
+                title={isVi ? 'Lịch trình AI' : 'AI Itinerary'}
               >
                 <Sparkles className="w-3.5 h-3.5 text-white group-hover/ai:rotate-12 transition-transform" />
-                <span className="text-[11px] font-bold tracking-wide text-white hidden xs:inline">{isVi ? 'Kiến trúc sư AI' : 'AI Architect'}</span>
+                <span className="text-[11px] font-bold tracking-wide text-white">{isVi ? 'Lịch trình AI' : 'AI Itinerary'}</span>
               </button>
             </div>
           </div>
@@ -1354,6 +1842,7 @@ function AppContent() {
               }}
               onAddExpense={handleAddExpense}
               onSaveActivityExpense={handleSaveActivityExpense}
+              onDeleteExpense={handleDeleteExpense}
               onNavigateToExpenses={() => setActiveTab('expenses')}
             />
           )}
@@ -1405,33 +1894,40 @@ function AppContent() {
               onAddDocument={handleAddDocument}
               onEditDocument={handleEditDocument}
               onDeleteDocument={handleDeleteDocument}
+              onUpdateTrip={handleUpdateTrip}
             />
           )}
         </div>
-
+          </>
+        )}
       </main>
 
       {/* AI Itinerary Generator Modal */}
-      <AIItineraryModal
-        key={aiTargetTrip?.id || activeTrip?.id}
-        isOpen={isAIModalOpen}
-        onClose={() => {
-          setIsAIModalOpen(false);
-          setAiTargetTrip(null);
-        }}
-        onApplyGeneratedItinerary={handleApplyGeneratedItinerary}
-        targetTrip={aiTargetTrip || activeTrip}
-        initialDestination={aiTargetTrip ? aiTargetTrip.destination : activeTrip?.destination}
-        initialDurationDays={aiTargetTrip ? aiTargetTrip.days.length : (activeTrip?.days?.length || 3)}
-        initialBudget={aiTargetTrip ? aiTargetTrip.budgetTotal : activeTrip?.budgetTotal}
-      />
+      {activeTrip && (
+        <AIItineraryModal
+          key={aiTargetTrip?.id || activeTrip.id}
+          isOpen={isAIModalOpen}
+          onClose={() => {
+            setIsAIModalOpen(false);
+            setAiTargetTrip(null);
+          }}
+          onApplyGeneratedItinerary={handleApplyGeneratedItinerary}
+          targetTrip={aiTargetTrip || activeTrip}
+          savedPlaces={savedPlaces}
+          initialDestination={aiTargetTrip ? aiTargetTrip.destination : activeTrip.destination}
+          initialDurationDays={aiTargetTrip ? aiTargetTrip.days.length : (activeTrip.days?.length || 3)}
+          initialBudget={aiTargetTrip ? aiTargetTrip.budgetTotal : activeTrip.budgetTotal}
+        />
+      )}
 
       {/* Floating AI Assistant Chat */}
-      <AIAssistantChat
-        isOpen={isAiChatOpen}
-        onClose={() => setIsAiChatOpen(false)}
-        trip={activeTrip}
-      />
+      {activeTrip && (
+        <AIAssistantChat
+          isOpen={isAiChatOpen}
+          onClose={() => setIsAiChatOpen(false)}
+          trip={activeTrip}
+        />
+      )}
 
       {/* New Trip Modal */}
       <NewTripModal
@@ -1441,7 +1937,7 @@ function AppContent() {
       />
 
       {/* Edit Trip Modal */}
-      {isEditTripModalOpen && (
+      {isEditTripModalOpen && activeTrip && (
         <EditTripModal
           key={activeTrip.id}
           isOpen={isEditTripModalOpen}
@@ -1452,7 +1948,7 @@ function AppContent() {
       )}
 
       {/* Travel Handbook / Print PDF Modal */}
-      {isHandbookModalOpen && (
+      {isHandbookModalOpen && activeTrip && (
         <TravelHandbookModal
           trip={activeTrip}
           isOpen={isHandbookModalOpen}
@@ -1470,11 +1966,331 @@ function AppContent() {
       <NotificationsModal
         isOpen={isNotificationsModalOpen}
         onClose={() => setIsNotificationsModalOpen(false)}
+        activeTrip={activeTrip}
+        trips={trips}
+        onUpdateTrip={handleUpdateTrip}
         onSelectTrip={(tripId) => {
           setActiveTripId(tripId);
           setActiveTab('expenses');
         }}
       />
+
+      {/* Mobile Trip Action Bottom Sheet (Option A - Spacious & Luxe) */}
+      {isTripActionMenuOpen && activeTrip && typeof document !== 'undefined' && createPortal(
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex flex-col justify-end sm:hidden animate-in fade-in duration-150"
+          onClick={() => setIsTripActionMenuOpen(false)}
+        >
+          <div
+            className="bg-white rounded-t-3xl border-t border-slate-200/90 shadow-2xl p-5 space-y-4 max-h-[85vh] overflow-y-auto animate-in slide-in-from-bottom-8 duration-200 pb-8"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Grab handle bar */}
+            <div className="w-12 h-1.5 rounded-full bg-slate-300 mx-auto -mt-1" />
+
+            {/* Trip summary header */}
+            <div className="flex items-start justify-between border-b border-slate-100 pb-3 pt-1">
+              <div className="min-w-0 pr-2">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-teal-600 bg-teal-50 px-2 py-0.5 rounded-full">
+                  {activeTrip.country}
+                </span>
+                <h4 className="font-display font-extrabold text-base text-slate-900 truncate mt-1">
+                  {activeTrip.title}
+                </h4>
+                <p className="text-xs text-slate-500 flex items-center gap-1 mt-0.5">
+                  <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  <span>{activeTrip.destination}</span>
+                  <span>•</span>
+                  <span>{activeTrip.startDate} — {activeTrip.endDate}</span>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsTripActionMenuOpen(false)}
+                className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer shrink-0"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Actions list - minimum 48px touch targets */}
+            <div className="space-y-2">
+              {/* AI Itinerary Architect */}
+              <button
+                type="button"
+                onClick={() => {
+                  setAiTargetTrip(activeTrip);
+                  setIsAIModalOpen(true);
+                  setIsTripActionMenuOpen(false);
+                }}
+                className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-gradient-to-r from-teal-500/10 via-emerald-500/10 to-teal-500/5 hover:bg-teal-500/20 active:scale-[0.99] border border-teal-500/20 transition-all text-left cursor-pointer group"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-teal-500 text-white flex items-center justify-center shadow-xs shrink-0 group-hover:scale-105 transition-transform">
+                    <Sparkles className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                      <span>{isVi ? 'Lịch trình AI' : 'AI Itinerary'}</span>
+                      <span className="text-[10px] font-extrabold uppercase px-1.5 py-0.2 rounded bg-teal-500 text-white">Gemini</span>
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      {isVi ? 'Tự động lập lịch trình, gợi ý điểm đến & dự toán' : 'Auto-generate schedule, spots & budget'}
+                    </div>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-slate-400 shrink-0" />
+              </button>
+
+              {/* Export Travel Handbook PDF */}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsHandbookModalOpen(true);
+                  setIsTripActionMenuOpen(false);
+                }}
+                className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-slate-50 hover:bg-slate-100 active:scale-[0.99] border border-slate-200/80 transition-all text-left cursor-pointer"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                    <Printer className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-bold text-slate-800">
+                      {isVi ? 'Xuất cẩm nang du lịch (PDF)' : 'Travel Handbook / Print PDF'}
+                    </div>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-slate-400 shrink-0" />
+              </button>
+
+              {/* Edit Trip */}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsEditTripModalOpen(true);
+                  setIsTripActionMenuOpen(false);
+                }}
+                className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-slate-50 hover:bg-slate-100 active:scale-[0.99] border border-slate-200/80 transition-all text-left cursor-pointer"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
+                    <Edit3 className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-bold text-slate-800">
+                      {isVi ? 'Chỉnh sửa chuyến đi' : 'Edit Trip Details'}
+                    </div>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-slate-400 shrink-0" />
+              </button>
+
+              {/* Delete Trip */}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsTripActionMenuOpen(false);
+                  handleDeleteTrip();
+                }}
+                className={`w-full flex items-center justify-between p-3.5 rounded-2xl border transition-all text-left ${
+                  hasCompletedActivities
+                    ? 'bg-slate-50/60 border-slate-200 text-slate-400 cursor-not-allowed opacity-60'
+                    : 'bg-rose-50/60 hover:bg-rose-100/70 border-rose-200 text-rose-700 active:scale-[0.99] cursor-pointer'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                    hasCompletedActivities ? 'bg-slate-200 text-slate-400' : 'bg-rose-100 text-rose-600'
+                  }`}>
+                    <Trash2 className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-bold">
+                      {isVi ? 'Xóa chuyến đi' : 'Delete Trip'}
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      {hasCompletedActivities
+                        ? (isVi ? 'Không thể xóa khi đã có hoạt động hoàn thành' : 'Cannot delete: contains completed items')
+                        : (isVi ? 'Xóa chuyến đi vĩnh viễn khỏi danh sách' : 'Permanently remove this trip')}
+                    </div>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-slate-400 shrink-0" />
+              </button>
+            </div>
+
+            {/* Close Button */}
+            <button
+              type="button"
+              onClick={() => setIsTripActionMenuOpen(false)}
+              className="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-colors cursor-pointer"
+            >
+              {isVi ? 'Đóng' : 'Close'}
+            </button>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* In-app Delete Trip Confirmation Modal */}
+      {isDeleteTripConfirmOpen && (tripPendingDelete || activeTrip) && typeof document !== 'undefined' && createPortal(
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"
+          onClick={() => {
+            if (isDeletingTrip) return;
+            setIsDeleteTripConfirmOpen(false);
+            setTripPendingDelete(null);
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white w-full max-w-md rounded-2xl border border-slate-200 shadow-2xl p-5 space-y-4 animate-in zoom-in-95 duration-150 max-h-[90vh] overflow-y-auto"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="font-display font-bold text-slate-900 text-sm sm:text-base">
+                  {isVi ? 'Xóa chuyến đi?' : 'Delete Trip?'}
+                </h3>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                  {isVi
+                    ? `Bạn có chắc chắn muốn xóa chuyến đi "${(tripPendingDelete || activeTrip)!.title}" không? Hành động này không thể hoàn tác.`
+                    : `Are you sure you want to delete "${(tripPendingDelete || activeTrip)!.title}"? This action cannot be undone.`}
+                </p>
+              </div>
+            </div>
+
+            {deleteTripSummary && deleteTripSummary.hasOtherMembers && (
+              <div className="p-3 rounded-xl bg-teal-50/80 border border-teal-200 text-xs text-teal-900 space-y-1">
+                <div className="font-bold flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-teal-700 shrink-0" />
+                  <span>
+                    {isVi
+                      ? `Chuyến đi có ${deleteTripSummary.otherMembers.length} thành viên khác tham gia`
+                      : `${deleteTripSummary.otherMembers.length} other participating member(s)`}
+                  </span>
+                </div>
+                <p className="text-[11px] text-teal-800 leading-relaxed">
+                  {isVi
+                    ? `Sau khi xóa, hệ thống sẽ tự động gửi thông báo tới: ${deleteTripSummary.otherMembers.map((m) => m.name).join(', ')}.`
+                    : `Upon deletion, notifications will be sent to: ${deleteTripSummary.otherMembers.map((m) => m.name).join(', ')}.`}
+                </p>
+              </div>
+            )}
+
+            {deleteTripSummary && deleteTripSummary.hasRecordedExpenses && (
+              <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 space-y-2.5 text-xs">
+                <div className="font-bold text-amber-900 flex items-center gap-1.5">
+                  <DollarSign className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>
+                    {isVi
+                      ? `Chuyến đi đã ghi nhận ${deleteTripSummary.recordedExpensesCount} khoản chi tiêu (${formatMoney(deleteTripSummary.totalSpent, deleteTripSummary.currency, lang)})`
+                      : `${deleteTripSummary.recordedExpensesCount} recorded expense(s) (${formatMoney(deleteTripSummary.totalSpent, deleteTripSummary.currency, lang)})`}
+                  </span>
+                </div>
+
+                {deleteTripSummary.settlements.length > 0 ? (
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] font-semibold text-amber-900">
+                      {isVi
+                        ? 'Công nợ cần gửi thông báo giải quyết cho cả 2 bên:'
+                        : 'Unsettled balances (notifications sent to both sides):'}
+                    </div>
+                    <div className="space-y-1 max-h-36 overflow-y-auto">
+                      {deleteTripSummary.settlements.map((s, idx) => (
+                        <div
+                          key={`${s.fromId}-${s.toId}-${idx}`}
+                          className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-amber-200 text-[11px]"
+                        >
+                          <span className="font-semibold text-slate-800">
+                            {s.fromName} {isVi ? 'thiếu' : 'owes'} {s.toName}
+                          </span>
+                          <span className="font-extrabold text-rose-600">
+                            {formatMoney(s.amount, s.currency, lang)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-amber-800">
+                    {isVi
+                      ? 'Các khoản chi tiêu đã cân bằng công nợ; hệ thống vẫn sẽ thông báo cho thành viên biết chuyến đi đã bị xóa.'
+                      : 'Expenses are currently balanced; members will still be notified that the trip was deleted.'}
+                  </p>
+                )}
+
+                <label className="flex items-start gap-2 pt-1.5 border-t border-amber-200/80 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={confirmExpenseSettlementAck}
+                    onChange={(e) => setConfirmExpenseSettlementAck(e.target.checked)}
+                    className="mt-0.5 rounded border-amber-400 text-rose-600 focus:ring-rose-500 cursor-pointer"
+                  />
+                  <span className="text-[11px] font-semibold text-slate-800 leading-snug">
+                    {isVi
+                      ? 'Tôi xác nhận xóa chuyến đi có chi tiêu ghi nhận và gửi thông báo giải quyết tiền tới các thành viên.'
+                      : 'I confirm deleting this trip with recorded expenses and notifying members to settle balances.'}
+                  </span>
+                </label>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                disabled={isDeletingTrip}
+                onClick={() => {
+                  setIsDeleteTripConfirmOpen(false);
+                  setTripPendingDelete(null);
+                  setConfirmExpenseSettlementAck(false);
+                }}
+                className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50 rounded-xl cursor-pointer transition-colors"
+              >
+                {isVi ? 'Hủy' : 'Cancel'}
+              </button>
+              <button
+                type="button"
+                disabled={
+                  isDeletingTrip ||
+                  Boolean(deleteTripSummary?.hasRecordedExpenses && !confirmExpenseSettlementAck)
+                }
+                onClick={confirmDeleteActiveTrip}
+                className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl shadow-xs cursor-pointer transition-colors"
+              >
+                {isDeletingTrip
+                  ? (isVi ? 'Đang xóa & gửi thông báo...' : 'Deleting & notifying...')
+                  : deleteTripSummary && (deleteTripSummary.hasOtherMembers || deleteTripSummary.hasRecordedExpenses)
+                  ? (isVi ? 'Xác nhận xóa & gửi thông báo' : 'Confirm Delete & Notify')
+                  : (isVi ? 'Xác nhận xóa' : 'Confirm Delete')}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* In-app Warning / Notice Toast */}
+      {appNotice && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 sm:left-auto sm:translate-x-0 sm:right-6 z-50 max-w-md w-[calc(100%-2rem)] sm:w-auto bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-2xl border border-amber-500/40 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-3 duration-200">
+          <div className="w-8 h-8 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
+            <Trash2 className="w-4 h-4" />
+          </div>
+          <p className="text-xs font-semibold leading-relaxed flex-1">
+            {appNotice}
+          </p>
+          <button
+            type="button"
+            onClick={() => setAppNotice(null)}
+            className="text-slate-400 hover:text-white p-1 rounded-lg cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Floating Invitation Acceptance Toast */}
       {invitationToast && (

@@ -43,13 +43,14 @@ export const TravelHandbookModal: React.FC<TravelHandbookModalProps> = ({
   const generatePrintableHtml = () => {
     const printableElement = document.querySelector('.travel-handbook-printable');
     const content = printableElement ? printableElement.innerHTML : '';
+    const safeTripTitle = String(trip.title || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
     return `<!DOCTYPE html>
 <html lang="${isVi ? 'vi' : 'en'}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${trip.title} - ${isVi ? 'Cẩm nang du lịch' : 'Travel Handbook'}</title>
+  <title>${safeTripTitle} - ${isVi ? 'Cẩm nang du lịch' : 'Travel Handbook'}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">

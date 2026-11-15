@@ -42,7 +42,21 @@ export const AIAssistantChat: React.FC<AIAssistantChatProps> = ({
 
   const [inputMsg, setInputMsg] = useState('');
   const [loading, setLoading] = useState(false);
+  const [isOnline, setIsOnline] = useState<boolean>(
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -123,7 +137,7 @@ export const AIAssistantChat: React.FC<AIAssistantChatProps> = ({
   };
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 w-full sm:w-96 h-[540px] bg-white rounded-3xl border border-slate-200 shadow-2xl flex flex-col overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-200">
+    <div className="fixed bottom-3 left-3 right-3 sm:left-auto sm:bottom-4 sm:right-4 z-50 sm:w-96 h-[min(540px,80dvh)] bg-white rounded-3xl border border-slate-200 shadow-2xl flex flex-col overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-200">
       
       {/* Header */}
       <div className="px-4 py-3 bg-gradient-to-r from-slate-900 to-slate-800 text-white flex items-center justify-between border-b border-slate-700">
@@ -133,14 +147,23 @@ export const AIAssistantChat: React.FC<AIAssistantChatProps> = ({
           </div>
           <div>
             <h4 className="font-display font-bold text-xs text-white">{t('aiChat.title')}</h4>
-            <span className="text-[10px] text-teal-300">{t('aiChat.context', { dest: trip.destination })}</span>
           </div>
         </div>
 
-        <button onClick={onClose} className="p-1 rounded-lg hover:bg-white/10 text-slate-300 transition-colors">
+        <button onClick={onClose} className="p-1 rounded-lg hover:bg-white/10 text-slate-300 transition-colors cursor-pointer">
           <X className="w-4 h-4" />
         </button>
       </div>
+
+      {!isOnline && (
+        <div className="px-3.5 py-2 bg-amber-50 border-b border-amber-200 text-amber-800 text-[11px] font-medium flex items-center justify-between">
+          <span>
+            {lang === 'vi'
+              ? 'Bạn đang ngoại tuyến — tin nhắn sẽ phản hồi khi có mạng.'
+              : 'You are offline — AI replies require an internet connection.'}
+          </span>
+        </div>
+      )}
 
       {/* Messages Stream */}
       <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-slate-50/50">
@@ -195,10 +218,10 @@ export const AIAssistantChat: React.FC<AIAssistantChatProps> = ({
       >
         <input
           type="text"
-          placeholder={t('aiChat.inputPlaceholder', { dest: trip.destination })}
+          placeholder={t('aiChat.inputPlaceholder')}
           value={inputMsg}
           onChange={(e) => setInputMsg(e.target.value)}
-          className="flex-1 text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+          className="flex-1 text-sm sm:text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
         />
         <button
           type="submit"

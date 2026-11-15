@@ -109,27 +109,39 @@ export const CategorySettingsModal: React.FC<CategorySettingsModalProps> = ({
     setEditingId(null);
   };
 
+  const [modalWarning, setModalWarning] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
+
   const handleDelete = (catId: string) => {
+    setModalWarning(null);
     if (categories.length <= 1) {
-      alert(isVi ? 'Phải giữ lại ít nhất một thể loại!' : 'You must keep at least one category!');
+      setModalWarning(isVi ? 'Phải giữ lại ít nhất một thể loại!' : 'You must keep at least one category!');
       return;
     }
-    const cat = categories.find((c) => c.id === catId);
-    const catName = cat ? (isVi ? cat.nameVi : cat.nameEn) : catId;
-    if (window.confirm(isVi ? `Bạn có chắc muốn xóa thể loại "${catName}"?` : `Are you sure you want to delete category "${catName}"?`)) {
-      const updated = categories.filter((c) => c.id !== catId);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-      onUpdateCategories(updated);
+    if (confirmDeleteId !== catId) {
+      setConfirmDeleteId(catId);
+      setConfirmReset(false);
+      return;
     }
+    const updated = categories.filter((c) => c.id !== catId);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    onUpdateCategories(updated);
+    setConfirmDeleteId(null);
   };
 
   const handleResetDefaults = () => {
-    if (window.confirm(isVi ? 'Khôi phục danh sách thể loại mặc định?' : 'Reset to default categories?')) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(DEFAULT_CATEGORIES));
-      onUpdateCategories(DEFAULT_CATEGORIES);
-      setEditingId(null);
-      setIsAdding(false);
+    setModalWarning(null);
+    if (!confirmReset) {
+      setConfirmReset(true);
+      setConfirmDeleteId(null);
+      return;
     }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(DEFAULT_CATEGORIES));
+    onUpdateCategories(DEFAULT_CATEGORIES);
+    setEditingId(null);
+    setIsAdding(false);
+    setConfirmReset(false);
   };
 
   const QUICK_ICONS = ['🏖️', '📸', '☕', '🍜', '🏨', '🚗', '🛍️', '🎟️', '🏕️', '🛵', '✈️', '⛵', '🎨', '💆'];
@@ -156,17 +168,44 @@ export const CategorySettingsModal: React.FC<CategorySettingsModalProps> = ({
 
         {/* Content Body */}
         <div className="overflow-y-auto flex-1 p-4 sm:p-5 space-y-4">
-          
-          <div className="flex items-center justify-end">
-            <button
-              type="button"
-              onClick={handleResetDefaults}
-              className="text-[11px] font-semibold text-slate-500 hover:text-slate-800 flex items-center gap-1 cursor-pointer bg-slate-100 px-2 py-1 rounded-lg"
-              title={isVi ? 'Khôi phục mặc định' : 'Reset to default'}
-            >
-              <RotateCcw className="w-3 h-3" />
-              <span>{isVi ? 'Khôi phục mặc định' : 'Reset'}</span>
-            </button>
+          {modalWarning && (
+            <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
+              {modalWarning}
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-2">
+            {confirmReset ? (
+              <div className="flex items-center gap-1.5 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
+                <span className="text-[11px] font-semibold text-amber-900">
+                  {isVi ? 'Khôi phục mặc định?' : 'Reset defaults?'}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleResetDefaults}
+                  className="text-[11px] font-bold text-white bg-amber-600 hover:bg-amber-700 px-2 py-0.5 rounded-md cursor-pointer"
+                >
+                  {isVi ? 'Đồng ý' : 'Confirm'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmReset(false)}
+                  className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 px-1.5 py-0.5 cursor-pointer"
+                >
+                  {isVi ? 'Hủy' : 'Cancel'}
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={handleResetDefaults}
+                className="text-[11px] font-semibold text-slate-500 hover:text-slate-800 flex items-center gap-1 cursor-pointer bg-slate-100 px-2 py-1 rounded-lg"
+                title={isVi ? 'Khôi phục mặc định' : 'Reset to default'}
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>{isVi ? 'Khôi phục mặc định' : 'Reset'}</span>
+              </button>
+            )}
           </div>
 
           {/* Add New Category Card */}
@@ -354,14 +393,33 @@ export const CategorySettingsModal: React.FC<CategorySettingsModalProps> = ({
                     >
                       <Edit2 className="w-3.5 h-3.5" />
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDelete(cat.id)}
-                      className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                      title={isVi ? 'Xóa' : 'Delete'}
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    {confirmDeleteId === cat.id ? (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => handleDelete(cat.id)}
+                          className="px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold rounded-lg cursor-pointer"
+                        >
+                          {isVi ? 'Xóa' : 'Confirm'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteId(null)}
+                          className="px-1.5 py-1 text-slate-500 hover:text-slate-800 text-[10px] font-semibold cursor-pointer"
+                        >
+                          {isVi ? 'Hủy' : 'Cancel'}
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(cat.id)}
+                        className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                        title={isVi ? 'Xóa' : 'Delete'}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
               );

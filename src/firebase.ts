@@ -54,3 +54,6 @@ export async function testFirebaseConnection() {
     }
   }
 }
+
+export { stripUndefinedDeep } from './utils/firestoreSanitizer';
+

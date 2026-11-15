@@ -4,7 +4,7 @@ import {
   Receipt, ArrowUpRight, ShieldCheck, Wallet, PiggyBank, Edit2, Edit3, Check, X, 
   AlertCircle, UserPlus, Eye, RefreshCw, Calendar, Tag, FileText, ChevronRight, ChevronDown, ChevronUp,
   Search, RotateCcw, Download, Sparkles, Copy, SlidersHorizontal, Image, Camera, FileSpreadsheet, Printer,
-  Mail, Phone, UserCheck, Clock, Send
+  Mail, Phone, UserCheck, Clock, Send, Loader2
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { collection, doc, setDoc } from 'firebase/firestore';
@@ -13,6 +13,9 @@ import { Trip, Expense, CategoryType, TripMember, UserProfile } from '../types';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { formatMoney } from '../utils/formatCurrency';
+import { getLocalDateString } from '../utils/dateUtils';
+import { compressAvatarImage } from '../utils/imageUtils';
+import { buildDefaultAvatar, isMemberMatchingUser, resolveMemberAvatar } from '../utils/avatarSyncUtils';
 import { calculateEvenSplits } from './ItineraryView';
 import { ReceiptScannerModal, ScannedReceiptData } from './ReceiptScannerModal';
 
@@ -122,11 +125,14 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   const [editingContribValue, setEditingContribValue] = useState<string>('');
 
   // Auth & Add Member form state with registered user lookup
-  const { userProfile, searchRegisteredUser } = useAuth();
+  const { userProfile, searchRegisteredUser, updateUserAvatar } = useAuth();
   const [newMemberContact, setNewMemberContact] = useState('');
   const [matchedUser, setMatchedUser] = useState<UserProfile | null>(null);
   const [isSearchingUser, setIsSearchingUser] = useState(false);
   const [newMemberName, setNewMemberName] = useState('');
+  const [newMemberAvatar, setNewMemberAvatar] = useState('');
+  const [isCompressingNewMemberAvatar, setIsCompressingNewMemberAvatar] = useState(false);
+  const [uploadingMemberId, setUploadingMemberId] = useState<string | null>(null);
   const [newMemberContributed, setNewMemberContributed] = useState('0');
   const [memberActionToast, setMemberActionToast] = useState<string | null>(null);
 
@@ -180,6 +186,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
 
   // Validation & Error states
   const [addFormError, setAddFormError] = useState<string | null>(null);
+  const [editFormError, setEditFormError] = useState<string | null>(null);
 
   // Receipt image preview modal
   const [viewingReceiptImage, setViewingReceiptImage] = useState<string | null>(null);
@@ -226,6 +233,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
 
     setEditDate(item.date || '');
     setEditNote(item.note || '');
+    setEditFormError(null);
     setIsEditPaidByDropdownOpen(false);
     setEditPaidBySearch('');
     setEditSplitWithSearch('');
@@ -256,14 +264,32 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   const handleSaveExpenseDetails = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedExpense) return;
+    setEditFormError(null);
     const parsedAmount = parseFloat(editAmount);
-    if (isNaN(parsedAmount) || parsedAmount <= 0) return;
-    if (!editTitle.trim()) return;
+    if (isNaN(parsedAmount) || parsedAmount <= 0) {
+      setEditFormError(isVi ? 'Số tiền không hợp lệ. Vui lòng nhập số lớn hơn 0.' : 'Invalid amount. Must be greater than 0.');
+      return;
+    }
+    if (!editTitle.trim()) {
+      setEditFormError(isVi ? 'Vui lòng nhập tên khoản chi.' : 'Please enter title.');
+      return;
+    }
 
     const formattedMemberSplits: { memberId: string; amount: number }[] = editSplitWith.map((mId) => ({
       memberId: mId,
       amount: parseFloat(editMemberSplits[mId] || '0') || 0,
     }));
+
+    const totalEditSplitsSum = formattedMemberSplits.reduce((sum, s) => sum + s.amount, 0);
+    const diff = Math.abs(totalEditSplitsSum - parsedAmount);
+    if (diff > 0.05) {
+      setEditFormError(
+        isVi
+          ? `Tổng tiền các phần chia (${formatMoney(totalEditSplitsSum, trip.currency)}) không khớp với tổng chi phí (${formatMoney(parsedAmount, trip.currency)}). Chênh lệch: ${formatMoney(diff, trip.currency)}. Vui lòng kiểm tra lại.`
+          : `Sum of member splits (${formatMoney(totalEditSplitsSum, trip.currency)}) does not match total amount (${formatMoney(parsedAmount, trip.currency)}). Difference: ${formatMoney(diff, trip.currency)}.`
+      );
+      return;
+    }
 
     if (onUpdateExpense) {
       onUpdateExpense({
@@ -620,12 +646,23 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   // Normalized title for file exports
   const safeTitle = trip.title.replace(/[^a-zA-Z0-9\u00C0-\u024F\u1EA0-\u1EF9]/g, '_').trim() || 'ChuyenDi';
 
+  // Helper to prevent Excel & CSV formula injection (cells starting with =, +, -, @)
+  const sanitizeCellFormula = (val: any): any => {
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      if (/^[=+\-@\t\r]/.test(trimmed)) {
+        return `'` + val;
+      }
+    }
+    return val;
+  };
+
   // Export genuine Excel (.xlsx) workbook
   const handleExportExcel = () => {
     const wb = XLSX.utils.book_new();
 
     // 1. Sheet 1: Tổng quan & Quyết toán công nợ
-    const overviewData: (string | number)[][] = [
+    const rawOverviewData: (string | number)[][] = [
       ['BÁO CÁO QUẢN LÝ TÀI CHÍNH & HÓA ĐƠN CHI TIÊU DU LỊCH'],
       ['Tên chuyến đi:', trip.title],
       ['Điểm đến:', `${trip.destination}, ${trip.country}`],
@@ -642,12 +679,12 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     ];
 
     if (activeSettlements.length === 0) {
-      overviewData.push([1, 'Tất cả thành viên', 'Không ai nợ ai', 0, 'Đã cân bằng toàn bộ tài chính']);
+      rawOverviewData.push([1, 'Tất cả thành viên', 'Không ai nợ ai', 0, 'Đã cân bằng toàn bộ tài chính']);
     } else {
       activeSettlements.forEach((s, idx) => {
         const fromName = getMemberName(s.from);
         const toName = getMemberName(s.to);
-        overviewData.push([
+        rawOverviewData.push([
           idx + 1,
           fromName,
           toName,
@@ -657,12 +694,12 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
       });
     }
 
-    overviewData.push([]);
-    overviewData.push(['BẢNG TỔNG KẾT TÀI CHÍNH TỪNG THÀNH VIÊN']);
-    overviewData.push(['STT', 'Tên thành viên', 'Tiền đã đóng quỹ', 'Tiền tự chi riêng', 'Tổng tiền đã bỏ ra', 'Phần chi phí phải chịu', 'Số dư ròng (Chênh lệch)']);
+    rawOverviewData.push([]);
+    rawOverviewData.push(['BẢNG TỔNG KẾT TÀI CHÍNH TỪNG THÀNH VIÊN']);
+    rawOverviewData.push(['STT', 'Tên thành viên', 'Tiền đã đóng quỹ', 'Tiền tự chi riêng', 'Tổng tiền đã bỏ ra', 'Phần chi phí phải chịu', 'Số dư ròng (Chênh lệch)']);
     memberStats.forEach((s, idx) => {
       const totalOut = s.contributed + s.paidDirectly;
-      overviewData.push([
+      rawOverviewData.push([
         idx + 1,
         s.member.name,
         s.contributed,
@@ -673,6 +710,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
       ]);
     });
 
+    const overviewData = rawOverviewData.map((row) => row.map(sanitizeCellFormula));
     const wsOverview = XLSX.utils.aoa_to_sheet(overviewData);
     wsOverview['!cols'] = [
       { wch: 6 },
@@ -686,7 +724,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     XLSX.utils.book_append_sheet(wb, wsOverview, 'Tong_Quan_Quyet_Toan');
 
     // 2. Sheet 2: Chi tiết hóa đơn và từng khoản chi
-    const expenseData: (string | number)[][] = [
+    const rawExpenseData: (string | number)[][] = [
       ['STT', 'Ngày', 'Danh mục', 'Tên khoản chi / Hoạt động', `Số tiền (${trip.currency || 'VND'})`, 'Người thanh toán', 'Thành viên cùng chia', 'Nguồn phát sinh', 'Ghi chú / Món ăn'],
     ];
 
@@ -696,7 +734,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
         : (trip.members.find((m) => m.id === exp.paidBy)?.name || exp.paidBy);
       const splitNames = exp.splitWith.map((id) => trip.members.find((m) => m.id === id)?.name || id).join(', ');
       const source = exp.sourceType === 'completed_activity' ? 'Hoạt động lịch trình' : 'Chi tiêu thủ công/Hóa đơn';
-      expenseData.push([
+      rawExpenseData.push([
         idx + 1,
         exp.date || '',
         exp.category,
@@ -709,6 +747,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
       ]);
     });
 
+    const expenseData = rawExpenseData.map((row) => row.map(sanitizeCellFormula));
     const wsExpenses = XLSX.utils.aoa_to_sheet(expenseData);
     wsExpenses['!cols'] = [
       { wch: 6 },
@@ -732,7 +771,11 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     const lines: string[] = [];
     const escapeCsv = (val: any) => {
       if (val === undefined || val === null) return '""';
-      const str = String(val).replace(/"/g, '""');
+      let str = String(val);
+      if (/^[=+\-@\t\r]/.test(str.trim())) {
+        str = `'` + str;
+      }
+      str = str.replace(/"/g, '""');
       return `"${str}"`;
     };
 
@@ -847,13 +890,14 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   const generatePrintableInvoiceHtml = () => {
     const printableElement = document.querySelector('.expense-invoice-printable');
     const content = printableElement ? printableElement.innerHTML : '';
+    const safeTripTitle = String(trip.title || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
     return `<!DOCTYPE html>
 <html lang="${isVi ? 'vi' : 'en'}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${trip.title} - ${isVi ? 'Hóa đơn & Quyết toán chi tiêu' : 'Expense & Settlement Report'}</title>
+  <title>${safeTripTitle} - ${isVi ? 'Hóa đơn & Quyết toán chi tiêu' : 'Expense & Settlement Report'}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
@@ -980,6 +1024,10 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
       setAddFormError(isVi ? 'Vui lòng nhập số tiền hợp lệ lớn hơn 0.' : 'Please enter a valid amount greater than 0.');
       return;
     }
+    if (parsedAmount > 1000000000000) {
+      setAddFormError(isVi ? 'Số tiền vượt quá giới hạn tối đa (1.000 tỷ).' : 'Amount exceeds maximum limit.');
+      return;
+    }
 
     const finalSplitWith = splitWith.length > 0 ? splitWith : trip.members.map((m) => m.id);
     if (finalSplitWith.length === 0) {
@@ -992,6 +1040,17 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
       amount: parseFloat(addMemberSplits[mId] || '0') || 0,
     }));
 
+    const totalMemberSplitSum = formattedMemberSplits.reduce((sum, s) => sum + s.amount, 0);
+    const splitDiff = Math.abs(totalMemberSplitSum - parsedAmount);
+    if (splitDiff > 0.05) {
+      setAddFormError(
+        isVi
+          ? `Tổng tiền các phần chia (${formatMoney(totalMemberSplitSum, trip.currency)}) không khớp với tổng chi phí (${formatMoney(parsedAmount, trip.currency)}). Chênh lệch: ${formatMoney(splitDiff, trip.currency)}.`
+          : `Sum of member splits (${formatMoney(totalMemberSplitSum, trip.currency)}) does not match total amount (${formatMoney(parsedAmount, trip.currency)}). Difference: ${formatMoney(splitDiff, trip.currency)}.`
+      );
+      return;
+    }
+
     onAddExpense({
       title: cleanTitle,
       amount: parsedAmount,
@@ -1000,7 +1059,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
       paidBy,
       splitWith: finalSplitWith,
       memberSplits: formattedMemberSplits,
-      date: new Date().toISOString().split('T')[0],
+      date: getLocalDateString(),
       receiptImageUrl: attachedReceiptUrl || undefined,
     });
 
@@ -1023,7 +1082,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     if (!finalName) return;
 
     const contributed = parseFloat(newMemberContributed) || 0;
-    const defaultAvatar = matchedUser?.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(finalName)}`;
+    const defaultAvatar = newMemberAvatar || matchedUser?.avatar || buildDefaultAvatar(finalName);
     const contactVal = newMemberContact.trim();
     const isEmail = contactVal.includes('@');
 
@@ -1111,8 +1170,32 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     setNewMemberName('');
     setNewMemberContact('');
     setMatchedUser(null);
+    setNewMemberAvatar('');
     setNewMemberContributed('0');
     setShowAddMemberModal(false);
+  };
+
+  const handleMemberAvatarUpload = async (member: TripMember, file: File) => {
+    setUploadingMemberId(member.id);
+    try {
+      const compressed = await compressAvatarImage(file);
+      if (onUpdateMember) {
+        onUpdateMember(member.id, { avatar: compressed });
+      }
+      if (isMemberMatchingUser(member, userProfile, trip.creatorId)) {
+        await updateUserAvatar(compressed);
+      }
+      setMemberActionToast(
+        isVi
+          ? `✓ Đã cập nhật ảnh đại diện của "${member.name}" và đồng bộ với Banner.`
+          : `✓ Updated avatar for "${member.name}" and synced with Banner.`
+      );
+      setTimeout(() => setMemberActionToast(null), 4000);
+    } catch (err) {
+      console.warn('Error updating member avatar:', err);
+    } finally {
+      setUploadingMemberId(null);
+    }
   };
 
   const handleSaveInlineContribution = (memberId: string) => {
@@ -1133,6 +1216,12 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   const getMemberName = (id: string) => {
     if (id === 'fund') return isVi ? 'Quỹ' : 'Group Fund';
     return trip.members.find((m) => m.id === id)?.name || (isVi ? 'Thành viên' : 'Member');
+  };
+
+  const getMemberAvatar = (id: string) => {
+    const member = trip.members.find((m) => m.id === id);
+    if (!member) return buildDefaultAvatar(id);
+    return resolveMemberAvatar(member, userProfile, trip.creatorId);
   };
 
   const formatDisplayDate = (dStr?: string) => {
@@ -1378,7 +1467,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
               {fundHolder ? (
                 <>
                   <img
-                    src={fundHolder.avatar}
+                    src={resolveMemberAvatar(fundHolder, userProfile, trip.creatorId)}
                     alt={fundHolder.name}
                     className="w-7 h-7 sm:w-8 sm:h-8 rounded-full object-cover border border-blue-200 shrink-0 shadow-2xs"
                   />
@@ -1487,11 +1576,43 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                 {/* Member Header */}
                 <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-200/60">
                   <div className="flex items-center gap-2.5 min-w-0">
-                    <img 
-                      src={member.avatar} 
-                      alt={member.name} 
-                      className="w-9 h-9 rounded-full object-cover border-2 border-white shadow-2xs shrink-0" 
-                    />
+                    {onUpdateMember ? (
+                      <label
+                        className="relative group/avatar cursor-pointer shrink-0"
+                        title={isVi ? 'Đổi ảnh đại diện thành viên' : 'Change member avatar'}
+                      >
+                        <img
+                          src={resolveMemberAvatar(member, userProfile, trip.creatorId)}
+                          alt={member.name}
+                          className="w-9 h-9 rounded-full object-cover border-2 border-white shadow-2xs shrink-0 group-hover/avatar:opacity-80 transition-opacity"
+                        />
+                        <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-teal-600 text-white border border-white flex items-center justify-center shadow-2xs">
+                          {uploadingMemberId === member.id ? (
+                            <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                          ) : (
+                            <Camera className="w-2.5 h-2.5" />
+                          )}
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = '';
+                            if (file) {
+                              handleMemberAvatarUpload(member, file);
+                            }
+                          }}
+                        />
+                      </label>
+                    ) : (
+                      <img
+                        src={resolveMemberAvatar(member, userProfile, trip.creatorId)}
+                        alt={member.name}
+                        className="w-9 h-9 rounded-full object-cover border-2 border-white shadow-2xs shrink-0"
+                      />
+                    )}
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="font-bold text-xs sm:text-sm text-slate-900 truncate">{member.name}</span>
@@ -1775,13 +1896,23 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
               </div>
             ) : (
               activeSettlements.map((s, idx) => (
-                <div key={idx} className="p-3 bg-slate-50/80 hover:bg-slate-50 rounded-xl border border-slate-200/70 flex items-center justify-between transition-colors">
-                  <div className="min-w-0 pr-2">
+                <div key={idx} className="p-3 bg-slate-50/80 hover:bg-slate-50 rounded-xl border border-slate-200/70 flex items-center justify-between gap-2 transition-colors">
+                  <div className="flex items-center gap-1.5 min-w-0 pr-2">
+                    <img
+                      src={getMemberAvatar(s.from)}
+                      alt={getMemberName(s.from)}
+                      className="w-5 h-5 rounded-full object-cover border border-white shadow-2xs shrink-0"
+                    />
                     <p className="text-xs font-medium text-slate-800 truncate">
                       <span className="text-slate-900 font-semibold">{getMemberName(s.from)}</span>{' '}
                       <span className="text-rose-600 text-[11px] font-normal">{t('expenses.owes')}</span>{' '}
                       <span className="text-teal-700 font-semibold">{getMemberName(s.to)}</span>
                     </p>
+                    <img
+                      src={getMemberAvatar(s.to)}
+                      alt={getMemberName(s.to)}
+                      className="w-5 h-5 rounded-full object-cover border border-white shadow-2xs shrink-0"
+                    />
                   </div>
                   <span className="text-xs font-semibold text-rose-700 bg-rose-50 px-2.5 py-1 rounded-lg border border-rose-100 shrink-0">
                     {formatMoney(s.amount, trip.currency, lang)}
@@ -1869,7 +2000,14 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                                 <span>{isVi ? 'Quỹ' : 'Group Fund'}</span>
                               </span>
                             ) : (
-                              <span className="font-semibold text-slate-700 truncate">{getMemberName(item.paidBy)}</span>
+                              <span className="inline-flex items-center gap-1 font-semibold text-slate-700 truncate">
+                                <img
+                                  src={getMemberAvatar(item.paidBy)}
+                                  alt={getMemberName(item.paidBy)}
+                                  className="w-4 h-4 rounded-full object-cover border border-slate-200 shrink-0"
+                                />
+                                <span className="truncate">{getMemberName(item.paidBy)}</span>
+                              </span>
                             )}
                             <span className="shrink-0 text-slate-500">
                               ({item.splitWith.length} {isVi ? 'người tham gia' : 'participants'})
@@ -2146,7 +2284,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                             return (
                               <img
                                 key={id}
-                                src={m.avatar}
+                                src={resolveMemberAvatar(m, userProfile, trip.creatorId)}
                                 alt={m.name}
                                 title={m.name}
                                 className="w-5 h-5 rounded-full object-cover border-2 border-white ring-1 ring-teal-300"
@@ -2239,7 +2377,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                                     {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
                                   </div>
                                   <img
-                                    src={member.avatar}
+                                    src={resolveMemberAvatar(member, userProfile, trip.creatorId)}
                                     alt={member.name}
                                     className="w-5 h-5 rounded-full object-cover border border-slate-200"
                                   />
@@ -2388,6 +2526,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                   setNewMemberContact('');
                   setMatchedUser(null);
                   setNewMemberName('');
+                  setNewMemberAvatar('');
                 }}
                 className="text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
               >
@@ -2469,6 +2608,67 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                 )}
               </div>
 
+              {/* Avatar thành viên (tùy chọn) */}
+              <div className="flex items-center gap-3 p-2.5 bg-slate-50 rounded-xl border border-slate-200/80">
+                <label className="relative cursor-pointer group shrink-0" title={isVi ? 'Chọn ảnh đại diện thành viên' : 'Choose member avatar'}>
+                  <img
+                    src={
+                      newMemberAvatar ||
+                      matchedUser?.avatar ||
+                      buildDefaultAvatar(newMemberName.trim() || matchedUser?.displayName || 'TripMate')
+                    }
+                    alt={newMemberName || 'Member avatar'}
+                    className="w-11 h-11 rounded-full object-cover border-2 border-white shadow-xs bg-white group-hover:opacity-80 transition-opacity"
+                  />
+                  <span className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full bg-teal-600 text-white border border-white flex items-center justify-center shadow-xs">
+                    {isCompressingNewMemberAvatar ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <Camera className="w-3 h-3" />
+                    )}
+                  </span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (!file) return;
+                      setIsCompressingNewMemberAvatar(true);
+                      try {
+                        const compressed = await compressAvatarImage(file);
+                        setNewMemberAvatar(compressed);
+                      } catch (err) {
+                        console.warn('Error compressing member avatar:', err);
+                      } finally {
+                        setIsCompressingNewMemberAvatar(false);
+                      }
+                    }}
+                  />
+                </label>
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-semibold text-slate-800">
+                    {isVi ? 'Ảnh đại diện' : 'Member Avatar'}{' '}
+                    <span className="text-[10px] font-normal text-slate-400">({isVi ? 'Tùy chọn' : 'Optional'})</span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
+                    {isVi
+                      ? 'Nhấn vào ảnh để tải lên hoặc giữ ảnh đồng bộ từ tài khoản.'
+                      : 'Click the photo to upload or keep synced account avatar.'}
+                  </p>
+                  {newMemberAvatar && (
+                    <button
+                      type="button"
+                      onClick={() => setNewMemberAvatar('')}
+                      className="mt-1 text-[10px] font-semibold text-rose-600 hover:underline cursor-pointer"
+                    >
+                      {isVi ? 'Gỡ ảnh tùy chọn' : 'Reset photo'}
+                    </button>
+                  )}
+                </div>
+              </div>
+
               {/* Input: Tên thành viên */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
@@ -2512,6 +2712,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                     setNewMemberContact('');
                     setMatchedUser(null);
                     setNewMemberName('');
+                    setNewMemberAvatar('');
                   }}
                   className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer transition-colors"
                 >
@@ -2563,11 +2764,35 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
               </div>
             </div>
 
-            <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-800">
-              {isVi 
-                ? 'Các khoản chi tiêu liên quan sẽ được tự động cập nhật lại cho các thành viên còn lại.' 
-                : 'Related expenses will be automatically redistributed among remaining members.'}
-            </div>
+            {(() => {
+              const paidCount = trip.expenses.filter((e) => e.paidBy === memberToDelete.id).length;
+              const hasContrib = (memberToDelete.contributedAmount || 0) > 0;
+              const isSplitting = trip.expenses.filter((e) => e.splitWith.includes(memberToDelete.id)).length;
+
+              if (paidCount > 0 || hasContrib) {
+                return (
+                  <div className="p-3 bg-rose-50 rounded-xl border border-rose-200 text-xs text-rose-800 space-y-1.5">
+                    <div className="font-bold flex items-center gap-1.5 text-rose-700">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <span>{isVi ? 'Cảnh báo tài chính quan trọng:' : 'Important Financial Warning:'}</span>
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-rose-700">
+                      {isVi
+                        ? `Thành viên này đã trực tiếp thanh toán ${paidCount} khoản chi ${hasContrib ? `và đã đóng góp quỹ ${formatMoney(memberToDelete.contributedAmount || 0, trip.currency)}` : ''}. Nếu xóa, các khoản chi sẽ tự động chuyển người trả sang thành viên khác. Bạn có chắc chắn muốn xóa không?`
+                        : `This member has paid for ${paidCount} expenses ${hasContrib ? `and contributed ${formatMoney(memberToDelete.contributedAmount || 0, trip.currency)} to the group fund` : ''}. Deleting them will automatically reassign payer to another member. Confirm removal?`}
+                    </p>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-800">
+                  {isVi 
+                    ? `Thành viên này đang tham gia vào ${isSplitting} khoản chia chi phí. Khi xóa, các phần chia sẽ được tự động phân bổ lại cho các thành viên còn lại.` 
+                    : `This member is part of ${isSplitting} expense splits. Deleting them will redistribute the shares evenly among remaining members.`}
+                </div>
+              );
+            })()}
 
             <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
               <button
@@ -2738,7 +2963,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                       return (
                         <>
                           <img
-                            src={selectedMember.avatar}
+                            src={resolveMemberAvatar(selectedMember, userProfile, trip.creatorId)}
                             alt={selectedMember.name}
                             className="w-6 h-6 rounded-full object-cover border border-slate-200 shrink-0"
                           />
@@ -2806,7 +3031,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                           >
                             <div className="flex items-center gap-2 min-w-0">
                               <img
-                                src={member.avatar}
+                                src={resolveMemberAvatar(member, userProfile, trip.creatorId)}
                                 alt={member.name}
                                 className="w-6 h-6 rounded-full object-cover border border-slate-200 shrink-0"
                               />
@@ -2879,7 +3104,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                           return (
                             <img
                               key={id}
-                              src={m.avatar}
+                              src={resolveMemberAvatar(m, userProfile, trip.creatorId)}
                               alt={m.name}
                               title={m.name}
                               className="w-5 h-5 rounded-full object-cover border-2 border-white ring-1 ring-teal-300"
@@ -2975,7 +3200,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                                   )}
                                 </div>
                                 <img
-                                  src={member.avatar}
+                                  src={resolveMemberAvatar(member, userProfile, trip.creatorId)}
                                   alt={member.name}
                                   className="w-6 h-6 rounded-full object-cover border border-slate-200 shrink-0"
                                 />
@@ -3097,6 +3322,13 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                   className="w-full text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 bg-white focus:outline-hidden resize-none"
                 />
               </div>
+
+              {editFormError && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                  <span>{editFormError}</span>
+                </div>
+              )}
 
               {/* Modal Footer */}
               <div className="flex items-center justify-between pt-3 border-t border-slate-200">

@@ -9,6 +9,7 @@ import {
 import { Trip, ActivityItem, CategoryType, SavedPlace, Expense } from '../types';
 import { useLanguage } from '../context/LanguageContext';
 import { formatMoney } from '../utils/formatCurrency';
+import { getLocalDateString } from '../utils/dateUtils';
 import { CategoryConfig, getSavedCategories, CategorySettingsModal } from './CategorySettingsModal';
 
 interface ItineraryViewProps {
@@ -34,6 +35,7 @@ interface ItineraryViewProps {
       receiptImageUrl?: string;
     }
   ) => void;
+  onDeleteExpense?: (expenseId: string, activityId?: string) => void;
   onNavigateToExpenses?: () => void;
 }
 
@@ -141,6 +143,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   onOpenAIModal,
   onAddExpense,
   onSaveActivityExpense,
+  onDeleteExpense,
   onNavigateToExpenses,
 }) => {
   const { lang, t } = useLanguage();
@@ -149,6 +152,16 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [expandedDays, setExpandedDays] = useState<Record<number, boolean>>({});
+
+  // Confirmation modal state for uncompleting an activity with a linked expense
+  const [uncompleteTarget, setUncompleteTarget] = useState<{
+    dayNumber: number;
+    activity: ActivityItem;
+    expense?: Expense;
+  } | null>(null);
+
+  // Error message for add activity form
+  const [activityFormError, setActivityFormError] = useState<string | null>(null);
   
   // Category dropdown state
   const [isFilterDropdownOpen, setIsFilterDropdownOpen] = useState(false);
@@ -450,7 +463,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
           paidBy: finalPayer,
           splitWith: finalSplitWith,
           memberSplits: memberSplitsArray,
-          date: new Date().toISOString().split('T')[0],
+          date: getLocalDateString(),
           activityId: completedActivityPrompt.activity.id,
           receiptImageUrl: completedActivityPrompt.receiptImageUrl,
           receiptNote: `${isVi ? 'Chi tiêu tự động từ hoạt động:' : 'Auto-recorded from activity:'} ${completedActivityPrompt.activity.title} (${isVi ? `Ngày ${completedActivityPrompt.dayNumber}` : `Day ${completedActivityPrompt.dayNumber}`})`,
@@ -876,16 +889,30 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    setActivityFormError(null);
     const finalLocation = locationName.trim();
     const finalTitle = title.trim() || finalLocation;
-    if (!finalTitle) return;
+    if (!finalTitle) {
+      setActivityFormError(isVi ? 'Vui lòng nhập tên hoạt động hoặc địa điểm.' : 'Please enter an activity title or location.');
+      return;
+    }
+    if (!time || !time.trim()) {
+      setActivityFormError(isVi ? 'Vui lòng nhập thời gian cho hoạt động.' : 'Please enter activity time.');
+      return;
+    }
+
+    const parsedCost = estimatedCost ? parseFloat(estimatedCost) : 0;
+    if (isNaN(parsedCost) || parsedCost < 0) {
+      setActivityFormError(isVi ? 'Chi phí dự kiến không được âm.' : 'Estimated cost cannot be negative.');
+      return;
+    }
 
     onAddActivity(targetDayNumber, {
-      time: time || '10:00 AM',
+      time: time.trim(),
       title: finalTitle,
       locationName: finalLocation || finalTitle,
       category,
-      estimatedCost: estimatedCost ? parseFloat(estimatedCost) : 0,
+      estimatedCost: parsedCost,
       currency: trip.currency || 'VND',
       notes: notes.trim(),
       isCompleted: false,
@@ -900,6 +927,21 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   const filteredDays = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     
+    // Helper function to convert time string (e.g., "08:30", "9:00 AM", "2:15 PM") to minutes for chronological sorting
+    const parseTimeToMinutes = (timeStr?: string): number => {
+      if (!timeStr) return 9999;
+      const clean = timeStr.trim().toLowerCase();
+      const isPM = clean.includes('pm') || clean.includes('chiều') || clean.includes('tối');
+      const isAM = clean.includes('am') || clean.includes('sáng');
+      const match = clean.match(/(\d{1,2})[:h](\d{2})?/);
+      if (!match) return 9999;
+      let hours = parseInt(match[1], 10);
+      const minutes = match[2] ? parseInt(match[2], 10) : 0;
+      if (isPM && hours < 12) hours += 12;
+      if (isAM && hours === 12) hours = 0;
+      return hours * 60 + minutes;
+    };
+
     // First, filter by day selection if not 'all'
     const baseDays = activeDayTab === 'all'
       ? trip.days
@@ -921,9 +963,13 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
         return titleMatch || locMatch || catMatch;
       });
 
+      const sortedActivities = [...filteredActivities].sort(
+        (a, b) => parseTimeToMinutes(a.time) - parseTimeToMinutes(b.time)
+      );
+
       return {
         ...day,
-        activities: filteredActivities,
+        activities: sortedActivities,
       };
     });
   }, [trip.days, activeDayTab, selectedCategory, searchQuery, t]);
@@ -1435,9 +1481,22 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                               <div className="flex items-start gap-2.5 min-w-0 flex-1">
                                 <button
                                   onClick={() => {
-                                    const nextState = !act.isCompleted;
-                                    onToggleActivityCheck(day.dayNumber, act.id);
-                                    if (nextState) {
+                                    if (act.isCompleted) {
+                                      // User is unchecking completed activity
+                                      const linkedExpense = trip.expenses?.find(
+                                        (e) => e.activityId === act.id || (act.expenseId && e.id === act.expenseId)
+                                      );
+                                      if (linkedExpense) {
+                                        setUncompleteTarget({
+                                          dayNumber: day.dayNumber,
+                                          activity: act,
+                                          expense: linkedExpense,
+                                        });
+                                        return;
+                                      }
+                                      onToggleActivityCheck(day.dayNumber, act.id);
+                                    } else {
+                                      onToggleActivityCheck(day.dayNumber, act.id);
                                       handleOpenEditCompletedExpense(act, day.dayNumber);
                                     }
                                   }}
@@ -1466,6 +1525,12 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                                       {CATEGORY_ICONS[act.category]}
                                       <span>{t(`cat.${act.category}`) || act.category}</span>
                                     </span>
+
+                                    {typeof act.rating === 'number' && act.rating > 0 && (
+                                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-amber-50 text-amber-700 border border-amber-200/80">
+                                        ★ {act.rating.toFixed(1)}
+                                      </span>
+                                    )}
                                   </div>
 
                                   <h4
@@ -1647,6 +1712,12 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
             </div>
 
             <form onSubmit={handleFormSubmit} className="p-4 sm:p-6 space-y-3.5">
+              {activityFormError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{activityFormError}</span>
+                </div>
+              )}
               
               {/* Day selection */}
               <div>
@@ -3353,6 +3424,75 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                 alt="Receipt Full Preview"
                 className="max-h-[75vh] w-auto max-w-full rounded-lg object-contain shadow-xs"
               />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Xác nhận bỏ hoàn thành hoạt động có chi phí liên kết */}
+      {uncompleteTarget && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white w-full max-w-sm rounded-2xl border border-slate-200 shadow-2xl p-5 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center shrink-0">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-display font-bold text-slate-900 text-sm sm:text-base">
+                  {isVi ? 'Bỏ hoàn thành hoạt động?' : 'Unmark Activity as Done?'}
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5 truncate max-w-[200px]">
+                  "{uncompleteTarget.activity.title}"
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-900 space-y-1.5">
+              <p className="font-bold">
+                {isVi
+                  ? `Hoạt động này có khoản chi phí đã tạo trong Quỹ: ${formatMoney(uncompleteTarget.expense?.amount || 0, trip.currency)}.`
+                  : `This activity has an associated expense in the Fund: ${formatMoney(uncompleteTarget.expense?.amount || 0, trip.currency)}.`}
+              </p>
+              <p className="text-[11px] text-amber-800 leading-relaxed">
+                {isVi
+                  ? 'Bạn có muốn hủy bỏ hoàn thành và xóa khoản chi phí tương ứng khỏi Quỹ không?'
+                  : 'Do you want to unmark completion and delete the corresponding expense from the Fund?'}
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => {
+                  if (onDeleteExpense && uncompleteTarget.expense) {
+                    onDeleteExpense(uncompleteTarget.expense.id, uncompleteTarget.activity.id);
+                  }
+                  onToggleActivityCheck(uncompleteTarget.dayNumber, uncompleteTarget.activity.id);
+                  setUncompleteTarget(null);
+                }}
+                className="w-full py-2 px-3 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow-xs cursor-pointer transition-colors text-center"
+              >
+                {isVi ? 'Đồng ý xóa khoản chi & Bỏ xong' : 'Delete Expense & Uncheck'}
+              </button>
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setUncompleteTarget(null)}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                >
+                  {isVi ? 'Hủy' : 'Cancel'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onToggleActivityCheck(uncompleteTarget.dayNumber, uncompleteTarget.activity.id);
+                    setUncompleteTarget(null);
+                  }}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
+                >
+                  {isVi ? 'Chỉ bỏ xong, giữ chi phí' : 'Keep Expense, Just Uncheck'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

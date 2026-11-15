@@ -162,10 +162,11 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
     e.preventDefault();
     if (!newItemName.trim()) return;
 
+    const validQty = Math.max(1, Math.min(999, parseInt(String(newItemQty), 10) || 1));
     onAddItem({
       name: newItemName.trim(),
       category: newItemCategory,
-      quantity: newItemQty || 1,
+      quantity: validQty,
     });
 
     // Ensure newly added item's category is checked so it is immediately visible
@@ -191,10 +192,11 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
     e.preventDefault();
     if (!editingItem || !editName.trim()) return;
 
+    const validQty = Math.max(1, Math.min(999, parseInt(String(editQty), 10) || 1));
     onEditItem(editingItem.id, {
       name: editName.trim(),
       category: editCategory,
-      quantity: editQty || 1,
+      quantity: validQty,
       isPacked: editPacked,
     });
 
@@ -784,7 +786,16 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
         isOpen={isCategoryModalOpen}
         onClose={() => setIsCategoryModalOpen(false)}
         categories={categories}
-        onUpdateCategories={(newCats) => setCategories(newCats)}
+        onUpdateCategories={(newCats) => {
+          setCategories(newCats);
+          const validCatIds = new Set(newCats.map((c) => c.id));
+          const fallbackCatId = newCats[0]?.id || 'Essentials';
+          trip.packingList.forEach((item) => {
+            if (!validCatIds.has(item.category)) {
+              onEditItem(item.id, { category: fallbackCatId });
+            }
+          });
+        }}
       />
     </div>
   );

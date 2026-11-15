@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   X,
   Sparkles,
@@ -9,10 +9,22 @@ import {
   MapPin,
   FileText,
   RotateCw,
+  Star,
+  AlertTriangle,
 } from 'lucide-react';
 import { AIItineraryPrompt, Trip, PackingItem, SavedPlace, TravelDocument } from '../types';
 import { useLanguage } from '../context/LanguageContext';
 import { formatMoney } from '../utils/formatCurrency';
+import { getLocalDateString } from '../utils/dateUtils';
+import {
+  rankSavedPlacesForTrip,
+  mergeSavedAndGeneratedIntoDays,
+  convertCurrencyApprox,
+  computePraiseScore,
+  areSimilarPlaceNames,
+  normalizeCategory,
+  RankedPlaceCandidate,
+} from '../utils/itineraryPlannerUtils';
 
 interface AIItineraryModalProps {
   isOpen: boolean;
@@ -22,6 +34,7 @@ interface AIItineraryModalProps {
   initialDurationDays?: number;
   initialBudget?: number;
   targetTrip?: Trip | null;
+  savedPlaces?: SavedPlace[];
 }
 
 export type TabGenerationKey = 'itinerary' | 'packing' | 'places' | 'vault';
@@ -106,6 +119,7 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
   initialDurationDays,
   initialBudget,
   targetTrip,
+  savedPlaces = [],
 }) => {
   const { lang, t, isVi } = useLanguage();
 
@@ -124,6 +138,19 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
     'food', 'temple', 'photo'
   ]);
 
+  const rankedMatchingSaved = useMemo(() => {
+    const tripCur = targetTrip?.currency || 'USD';
+    const numBudget = budgetAmount ? parseFloat(budgetAmount) : (targetTrip?.budgetTotal || 500);
+    return rankSavedPlacesForTrip(savedPlaces, {
+      destination,
+      currency: tripCur,
+      budgetAmount: numBudget,
+      durationDays,
+      interests: selectedInterestIds,
+      travelStyle,
+    });
+  }, [savedPlaces, destination, targetTrip?.currency, targetTrip?.budgetTotal, budgetAmount, durationDays, selectedInterestIds, travelStyle]);
+
   // Tab Selection: 4 items (itinerary, packing, places, vault)
   const [selectedTabs, setSelectedTabs] = useState<TabGenerationKey[]>([
     'itinerary',
@@ -139,6 +166,13 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
   const [previewResult, setPreviewResult] = useState<any>(null);
   const [activePreviewTab, setActivePreviewTab] = useState<TabGenerationKey>('itinerary');
   const [errorMsg, setErrorMsg] = useState('');
+  const [showAutoFillConfirm, setShowAutoFillConfirm] = useState(false);
+  const [autoFillMode, setAutoFillMode] = useState<'auto' | 'saved_only'>('auto');
+
+  const requiredItinerarySlots = durationDays * 4;
+  const isSavedPlacesInsufficient =
+    selectedTabs.includes('itinerary') && rankedMatchingSaved.length < requiredItinerarySlots;
+  const missingSlotsCount = Math.max(0, requiredItinerarySlots - rankedMatchingSaved.length);
 
   // Sync initial values whenever modal opens or targetTrip changes
   useEffect(() => {
@@ -155,6 +189,8 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
       setPreviewResult(null);
       setErrorMsg('');
       setLoading(false);
+      setShowAutoFillConfirm(false);
+      setAutoFillMode('auto');
       setVariationIndex(0);
       setActivePreviewTab('itinerary');
     }
@@ -336,21 +372,23 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
       ];
     }
 
-    return placesList.map((p, idx) => ({
-      id: `p-saved-${variation}-${idx + 1}`,
-      cityName: dest,
-      name: p.name,
-      category: p.category,
-      address: p.address,
-      estimatedCost: p.estimatedCost,
-      currency: cur,
-      rating: p.rating,
-      notes: p.notes,
-      source: isVi ? 'Gợi ý từ AI' : 'AI Recommendation',
-      openTime: p.openTime,
-      closeTime: p.closeTime,
-      createdAt: new Date().toISOString(),
-    }));
+    return placesList
+      .map((p, idx) => ({
+        id: `p-saved-${variation}-${idx + 1}`,
+        cityName: dest,
+        name: p.name,
+        category: p.category,
+        address: p.address,
+        estimatedCost: p.estimatedCost,
+        currency: cur,
+        rating: p.rating,
+        notes: p.notes,
+        source: isVi ? 'Gợi ý sao cao từ AI' : 'AI Top Rated Recommendation',
+        openTime: p.openTime,
+        closeTime: p.closeTime,
+        createdAt: new Date().toISOString(),
+      }))
+      .sort((a, b) => (b.rating || 0) - (a.rating || 0));
   };
 
   const generateTailoredDocuments = (dest: string, budget: number, cur: string, variation: number): TravelDocument[] => {
@@ -365,7 +403,7 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
           : (isVi ? `Vé xe Limousine khứ hồi đến ${dest}` : `Round-trip bus tickets to ${dest}`),
         docType: isFlight ? 'Flight Ticket' : 'Bus Ticket',
         codeOrNumber: isFlight ? `VN-${Math.floor(1000 + Math.random() * 9000)}` : `LIMO-${Math.floor(100 + Math.random() * 900)}`,
-        date: targetTrip?.startDate || new Date().toISOString().split('T')[0],
+        date: targetTrip?.startDate || getLocalDateString(),
         cost: isVND ? (isFlight ? 1800000 : 350000) : (isFlight ? 120 : 25),
         notes: isVi
           ? 'Đã bao gồm hành lý xách tay 10kg & ký gửi 20kg. Vui lòng có mặt trước giờ xuất phát 90 phút.'
@@ -376,7 +414,7 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
         title: isVi ? `Xác nhận đặt phòng khách sạn tại ${dest}` : `Hotel Booking Voucher in ${dest}`,
         docType: 'Hotel Voucher',
         codeOrNumber: `HTL-${Math.floor(100000 + Math.random() * 900000)}`,
-        date: targetTrip?.startDate || new Date().toISOString().split('T')[0],
+        date: targetTrip?.startDate || getLocalDateString(),
         cost: isVND ? 1200000 : 80,
         notes: isVi
           ? 'Check-in: 14:00, Check-out: 12:00. Đã bao gồm buffet bữa sáng.'
@@ -385,8 +423,8 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
     ];
   };
 
-  // Main generation handler with variation support
-  const executeGeneration = async (currentVariation: number) => {
+  // Main generation handler with variation support & explicit user permission for auto-generated places
+  const executeGeneration = async (currentVariation: number, allowAutoGenerate: boolean = true) => {
     if (!destination.trim()) return;
     if (selectedTabs.length === 0) {
       setErrorMsg(isVi ? 'Vui lòng chọn ít nhất 1 mục để tạo dữ liệu.' : 'Please select at least 1 item to generate data.');
@@ -407,7 +445,10 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
     try {
       let generatedDays: any[] = [];
       let destinationTitle = destination.trim();
-      let country = targetTrip?.country || 'Việt Nam';
+      let country = targetTrip?.country || (isVi ? 'Việt Nam' : 'Global');
+      let usedSavedCount = 0;
+      let autoGeneratedCount = 0;
+      let totalEstimatedCost = 0;
 
       // 1. Generate Itinerary if selected
       if (selectedTabs.includes('itinerary')) {
@@ -421,7 +462,10 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
               travelStyle,
               groupType,
               budgetAmount: numBudget,
+              currency: tripCur,
               interests: interestsPayload,
+              savedPlaces,
+              allowAutoGenerate,
               language: lang,
               variation: currentVariation,
               seed: Date.now() + currentVariation * 1000,
@@ -433,58 +477,83 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
             generatedDays = data.days;
             destinationTitle = data.destinationTitle || destinationTitle;
             country = data.country || country;
+            usedSavedCount = typeof data.usedSavedCount === 'number'
+              ? data.usedSavedCount
+              : generatedDays.reduce((sum: number, d: any) => sum + (d.activities || []).filter((a: any) => a.isFromSavedPlaces).length, 0);
+            autoGeneratedCount = typeof data.autoGeneratedCount === 'number'
+              ? data.autoGeneratedCount
+              : generatedDays.reduce((sum: number, d: any) => sum + (d.activities || []).filter((a: any) => !a.isFromSavedPlaces).length, 0);
+            totalEstimatedCost = typeof data.totalEstimatedCost === 'number'
+              ? data.totalEstimatedCost
+              : generatedDays.reduce((sum: number, d: any) => sum + (d.activities || []).reduce((ds: number, a: any) => ds + (Number(a.estimatedCost) || 0), 0), 0);
           }
         } catch (apiErr) {
           console.warn('Backend itinerary call fallback:', apiErr);
         }
 
-        // Varied fallback days without generic boilerplate introductions
+        // Offline/Client Resilient Fallback: prioritize Saved Places + fill shortage (only if allowAutoGenerate is true)
         if (generatedDays.length === 0) {
-          const activityThemes = [
-            // Theme 0: Điểm đến biểu tượng & Ẩm thực nổi tiếng
-            [
-              { time: '08:30 AM', title: isVi ? `Thưởng thức điểm tâm & cà phê sáng tại ${destination}` : `Breakfast & coffee in ${destination}`, cat: 'food' },
-              { time: '10:00 AM', title: isVi ? `Check-in danh thắng nổi tiếng tại ${destination}` : `Visit iconic landmark in ${destination}`, cat: 'sightseeing' },
-              { time: '02:30 PM', title: isVi ? `Trải nghiệm văn hóa & dạo cảnh` : `Cultural walk & local highlights`, cat: 'activity' },
-              { time: '06:30 PM', title: isVi ? `Tiệc tối & dạo chơi phố đêm tại ${destination}` : `Dinner & night market stroll`, cat: 'food' },
-            ],
-            // Theme 1: Thiên nhiên, Săn cảnh đẹp & Bar chill
-            [
-              { time: '05:30 AM', title: isVi ? `Săn mây bình minh & ngắm cảnh núi non` : `Sunrise cloud hunting & scenic mountain view`, cat: 'activity' },
-              { time: '09:00 AM', title: isVi ? `Thưởng thức món ngon đặc sản địa phương` : `Authentic local specialty tasting`, cat: 'food' },
-              { time: '02:00 PM', title: isVi ? `Khám phá thung lũng & làng nghề truyền thống` : `Explore valleys & craft village`, cat: 'sightseeing' },
-              { time: '07:30 PM', title: isVi ? `Thưởng thức nhạc sống Acoustic & nhâm nhi đồ uống` : `Live acoustic music & chill lounge`, cat: 'activity' },
-            ],
-            // Theme 2: Khám phá thư thái, check-in quán đẹp & mua sắm
-            [
-              { time: '09:00 AM', title: isVi ? `Cà phê view đồi & check-in không gian mở` : `Scenic hilltop cafe & photo spots`, cat: 'food' },
-              { time: '11:00 AM', title: isVi ? `Tham quan bảo tàng di tích cổ kính` : `Historic museum & heritage monument`, cat: 'sightseeing' },
-              { time: '03:30 PM', title: isVi ? `Trải nghiệm máng trượt / chèo thuyền dạo hồ` : `Outdoor coaster adventure / lakeside rowing`, cat: 'activity' },
-              { time: '06:30 PM', title: isVi ? `Tiệc nướng BBQ ngoài trời cùng nhóm` : `Outdoor BBQ dinner gathering`, cat: 'food' },
-            ],
-          ];
+          const extraCandidates: RankedPlaceCandidate[] = [];
 
-          generatedDays = Array.from({ length: durationDays }, (_, idx) => {
-            const dayNum = idx + 1;
-            const themeIdx = (currentVariation + idx) % activityThemes.length;
-            const themeActs = activityThemes[themeIdx];
+          if (allowAutoGenerate) {
+            const tailoredCurated = generateTailoredSavedPlaces(destination.trim(), tripCur, currentVariation);
+            tailoredCurated.forEach((sp) => {
+              extraCandidates.push({
+                name: sp.name,
+                locationName: sp.address || destination.trim(),
+                category: normalizeCategory(sp.category),
+                estimatedCost: sp.estimatedCost || 0,
+                currency: tripCur,
+                rating: sp.rating || 4.8,
+                notes: sp.notes || '',
+                praiseScore: computePraiseScore(sp.notes, sp.source, sp.rating),
+                isFromSavedPlaces: false,
+                openTime: sp.openTime,
+                closeTime: sp.closeTime,
+              });
+            });
 
-            return {
-              dayNumber: dayNum,
-              title: isVi
-                ? (dayNum === 1 ? `Khám phá trung tâm ${destination}` : dayNum === durationDays ? `Mua sắm & Trải nghiệm ẩm thực` : `Danh thắng & Trải nghiệm ngày ${dayNum}`)
-                : (dayNum === 1 ? `Downtown ${destination}` : `Highlights & Culture Day ${dayNum}`),
-              summary: '',
-              activities: themeActs.map((act) => ({
-                time: act.time,
-                title: act.title,
-                locationName: `${destination}`,
+            const fallbackThemes: Array<{ titleVi: string; titleEn: string; cat: RankedPlaceCandidate['category']; costUSD: number; rating: number; notesVi: string; notesEn: string }> = [
+              { titleVi: `Quán đặc sản nổi tiếng tại ${destination}`, titleEn: `Top-Rated Local Kitchen in ${destination}`, cat: 'food', costUSD: 12, rating: 4.9, notesVi: 'Được nhiều du khách khen ngon, hương vị chuẩn địa phương.', notesEn: 'Highly praised local flavors.' },
+              { titleVi: `Danh thắng biểu tượng tại ${destination}`, titleEn: `Iconic Landmark in ${destination}`, cat: 'sightseeing', costUSD: 6, rating: 4.9, notesVi: 'Điểm check-in nổi bật và phong cảnh ấn tượng.', notesEn: 'Top-rated iconic attraction.' },
+              { titleVi: `Cà phê view đẹp & Thư giãn tại ${destination}`, titleEn: `Scenic Viewpoint Cafe in ${destination}`, cat: 'food', costUSD: 4, rating: 4.8, notesVi: 'Không gian thoáng đẹp, được khen nhiều trên mạng xã hội.', notesEn: 'Praised cozy viewpoint cafe.' },
+              { titleVi: `Trải nghiệm văn hóa & Dạo cảnh ${destination}`, titleEn: `Cultural Walk & Local Highlights`, cat: 'activity', costUSD: 10, rating: 4.8, notesVi: 'Hoạt động ngoài trời đặc sắc được đánh giá cao.', notesEn: 'Popular outdoor cultural experience.' },
+              { titleVi: `Chợ đêm & Ẩm thực đường phố ${destination}`, titleEn: `Night Market & Street Food in ${destination}`, cat: 'shopping', costUSD: 14, rating: 4.7, notesVi: 'Sôi động về đêm với đa dạng món ngon và quà lưu niệm.', notesEn: 'Lively night market with local snacks.' },
+              { titleVi: `Bảo tàng di tích cổ kính tại ${destination}`, titleEn: `Heritage Museum in ${destination}`, cat: 'sightseeing', costUSD: 5, rating: 4.7, notesVi: 'Kiến trúc lịch sử lâu đời, không gian yên bình.', notesEn: 'Historic cultural monument.' },
+            ];
+
+            fallbackThemes.forEach((act) => {
+              const notes = isVi ? act.notesVi : act.notesEn;
+              extraCandidates.push({
+                name: isVi ? act.titleVi : act.titleEn,
+                locationName: destination.trim(),
                 category: act.cat,
-                estimatedCost: tripCur === 'VND' ? 80000 : 5,
-                notes: '',
-              })),
-            };
+                estimatedCost: convertCurrencyApprox(act.costUSD, 'USD', tripCur),
+                currency: tripCur,
+                rating: act.rating,
+                notes,
+                praiseScore: computePraiseScore(notes, 'Top Rated', act.rating),
+                isFromSavedPlaces: false,
+              });
+            });
+          }
+
+          const merged = mergeSavedAndGeneratedIntoDays({
+            destination: destination.trim(),
+            durationDays,
+            currency: tripCur,
+            budgetAmount: numBudget,
+            interests: interestsPayload,
+            travelStyle,
+            language: lang,
+            savedPlaces,
+            extraCandidates,
           });
+
+          generatedDays = merged.days;
+          usedSavedCount = merged.usedSavedCount;
+          autoGeneratedCount = merged.autoGeneratedCount;
+          totalEstimatedCost = merged.totalEstimatedCost;
         }
       }
 
@@ -494,10 +563,38 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
         generatedPacking = generateTailoredPacking(destination.trim(), durationDays, currentVariation);
       }
 
-      // 3. Generate Saved Places if selected
+      // 3. Generate Saved Places if selected (only generate new places if allowAutoGenerate is permitted)
       let generatedPlaces: SavedPlace[] = [];
-      if (selectedTabs.includes('places')) {
-        generatedPlaces = generateTailoredSavedPlaces(destination.trim(), tripCur, currentVariation);
+      if (selectedTabs.includes('places') && allowAutoGenerate) {
+        const curatedPlaces = generateTailoredSavedPlaces(destination.trim(), tripCur, currentVariation);
+        const itineraryGeneratedPlaces: SavedPlace[] = [];
+        for (const d of generatedDays) {
+          for (const a of d.activities || []) {
+            if (a.isFromSavedPlaces) continue;
+            const alreadySaved = savedPlaces.some((sp) => areSimilarPlaceNames(sp.name, a.title || ''));
+            const alreadyAdded =
+              curatedPlaces.some((cp) => areSimilarPlaceNames(cp.name, a.title || '')) ||
+              itineraryGeneratedPlaces.some((ip) => areSimilarPlaceNames(ip.name, a.title || ''));
+            if (!alreadySaved && !alreadyAdded && a.title) {
+              itineraryGeneratedPlaces.push({
+                id: `p-auto-${currentVariation}-${itineraryGeneratedPlaces.length + 1}`,
+                cityName: destination.trim(),
+                name: a.title,
+                category: a.category || 'sightseeing',
+                address: a.locationName || destination.trim(),
+                estimatedCost: a.estimatedCost || 0,
+                currency: tripCur,
+                rating: typeof a.rating === 'number' ? a.rating : 4.8,
+                notes: a.notes || '',
+                source: isVi ? 'AI đề xuất sao cao' : 'AI Top Rated Pick',
+                createdAt: new Date().toISOString(),
+              });
+            }
+          }
+        }
+        generatedPlaces = [...itineraryGeneratedPlaces, ...curatedPlaces].sort(
+          (a, b) => (b.rating || 0) - (a.rating || 0)
+        );
       }
 
       // 4. Generate Travel Documents if selected
@@ -511,8 +608,13 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
         selectedTabs,
         destinationTitle,
         country,
-        overallSummary: '', // Bỏ hoàn toàn phần giới thiệu hành trình ... thư giãn
+        overallSummary: '',
         days: generatedDays,
+        usedSavedCount,
+        autoGeneratedCount,
+        totalEstimatedCost,
+        tripCurrency: tripCur,
+        tripBudget: numBudget,
         packingItems: generatedPacking,
         savedPlaces: generatedPlaces,
         documents: generatedDocuments,
@@ -530,14 +632,39 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
-    await executeGeneration(0);
+    if (!destination.trim()) return;
+    if (selectedTabs.length === 0) {
+      setErrorMsg(isVi ? 'Vui lòng chọn ít nhất 1 mục để tạo dữ liệu.' : 'Please select at least 1 item to generate data.');
+      return;
+    }
+
+    // Confirm with user BEFORE auto-generating extra places when Saved Places are insufficient
+    if (isSavedPlacesInsufficient) {
+      setShowAutoFillConfirm(true);
+      return;
+    }
+
+    setAutoFillMode(selectedTabs.includes('itinerary') ? 'saved_only' : 'auto');
+    await executeGeneration(0, !selectedTabs.includes('itinerary'));
+  };
+
+  const handleConfirmAutoFill = async () => {
+    setShowAutoFillConfirm(false);
+    setAutoFillMode('auto');
+    await executeGeneration(0, true);
+  };
+
+  const handleUseSavedOnly = async () => {
+    setShowAutoFillConfirm(false);
+    setAutoFillMode('saved_only');
+    await executeGeneration(0, false);
   };
 
   // Handler for "Đổi gợi ý khác"
   const handleRegenerate = async () => {
     const nextVariation = variationIndex + 1;
     setVariationIndex(nextVariation);
-    await executeGeneration(nextVariation);
+    await executeGeneration(nextVariation, autoFillMode === 'auto');
   };
 
   const handleApply = () => {
@@ -558,7 +685,7 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
             </div>
             <div>
               <h3 className="font-display font-bold text-sm sm:text-base text-white">
-                {isVi ? 'Kiến trúc sư Lịch trình AI' : 'AI Itinerary Architect'}
+                {isVi ? 'Lịch trình AI' : 'AI Itinerary'}
               </h3>
               <p className="text-[11px] text-teal-200/90 font-medium">
                 {isVi ? 'Chuyến đi gợi ý' : 'Suggested Trip'}
@@ -575,22 +702,105 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
           </button>
         </div>
 
-        {/* Form Body or Preview Mode */}
+        {/* Form Body, Auto-Generate Confirmation, or Preview Mode */}
         <div className="p-4 sm:p-6 overflow-y-auto flex-1 space-y-4">
-          {!previewResult ? (
+          {showAutoFillConfirm && !previewResult ? (
+            /* STEP 1.5: IN-APP CONFIRMATION DIALOG WHEN SAVED PLACES ARE INSUFFICIENT */
+            <div className="py-3 sm:py-5 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+              <div className="flex flex-col items-center text-center space-y-2.5">
+                <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200/80 text-amber-600 flex items-center justify-center shadow-2xs">
+                  <AlertTriangle className="w-6 h-6 text-amber-500" />
+                </div>
+                <h4 className="font-display font-bold text-slate-900 text-base sm:text-lg">
+                  {isVi ? 'Địa điểm lưu chưa đủ cho lịch trình' : 'Not Enough Saved Places'}
+                </h4>
+                <p className="text-xs sm:text-[13px] text-slate-600 max-w-md leading-relaxed">
+                  {rankedMatchingSaved.length > 0
+                    ? isVi
+                      ? `Mới có ${rankedMatchingSaved.length} điểm lưu tại ${destination} (${durationDays} ngày). Đồng ý tự bổ sung các điểm sao cao & khen nhiều nhất hợp ngân sách, sở thích nhé?`
+                      : `Only ${rankedMatchingSaved.length} saved places in ${destination} (${durationDays} days). Auto-fill top-rated, most-praised spots matching your budget & interests?`
+                    : isVi
+                    ? `Chưa có điểm lưu cho ${destination} (${durationDays} ngày). Đồng ý tự sinh các điểm sao cao & khen nhiều nhất hợp ngân sách, sở thích nhé?`
+                    : `No saved places for ${destination} (${durationDays} days). Auto-generate top-rated, most-praised spots matching your budget & interests?`}
+                </p>
+              </div>
+
+              <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3.5 grid grid-cols-3 gap-2 text-center">
+                <div className="p-2 bg-white rounded-xl border border-slate-200/60">
+                  <div className="text-[11px] text-slate-500">{isVi ? 'Đã lưu' : 'Saved'}</div>
+                  <div className="text-sm font-bold text-emerald-700 mt-0.5">{rankedMatchingSaved.length}</div>
+                </div>
+                <div className="p-2 bg-white rounded-xl border border-slate-200/60">
+                  <div className="text-[11px] text-slate-500">{isVi ? 'Thiếu thêm' : 'Missing'}</div>
+                  <div className="text-sm font-bold text-amber-600 mt-0.5">{missingSlotsCount}</div>
+                </div>
+                <div className="p-2 bg-white rounded-xl border border-slate-200/60">
+                  <div className="text-[11px] text-slate-500">{isVi ? 'Ngân sách' : 'Budget'}</div>
+                  <div className="text-xs font-bold text-slate-800 mt-1 truncate">
+                    {formatMoney(parseFloat(budgetAmount) || 500, targetTrip?.currency || 'USD', lang)}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowAutoFillConfirm(false)}
+                  className="py-2.5 px-4 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl transition-colors cursor-pointer"
+                >
+                  {isVi ? 'Hủy (Không tạo)' : 'Cancel'}
+                </button>
+
+                {rankedMatchingSaved.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleUseSavedOnly}
+                    className="py-2.5 px-4 text-xs font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-xl transition-colors cursor-pointer"
+                  >
+                    {isVi
+                      ? `Chỉ xếp ${rankedMatchingSaved.length} địa điểm đã lưu`
+                      : `Use only ${rankedMatchingSaved.length} saved`}
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleConfirmAutoFill}
+                  className="flex-1 py-2.5 px-4 text-xs font-bold text-white bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-700 hover:to-emerald-700 rounded-xl shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>{isVi ? 'Đồng ý, tự sinh & tạo lịch trình' : 'Yes, auto-generate & create'}</span>
+                </button>
+              </div>
+            </div>
+          ) : !previewResult ? (
             /* STEP 1: FORM WITH ITEM CHOOSER */
             <form onSubmit={handleGenerate} className="space-y-4 sm:space-y-5">
               
               {/* Trip Target Info Card (Destination & Budget already selected) */}
-              <div className="p-3 bg-teal-50/70 border border-teal-200/80 rounded-2xl flex items-center justify-between gap-3 text-xs">
-                <div className="flex items-center gap-2 text-teal-900 font-semibold truncate">
-                  <MapPin className="w-4 h-4 text-teal-600 shrink-0" />
-                  <span className="truncate">{destination}</span>
-                  <span className="text-teal-400">•</span>
-                  <span>{durationDays} {isVi ? 'ngày' : 'days'}</span>
+              <div className="p-3 bg-teal-50/70 border border-teal-200/80 rounded-2xl space-y-2 text-xs">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-teal-900 font-semibold truncate">
+                    <MapPin className="w-4 h-4 text-teal-600 shrink-0" />
+                    <span className="truncate">{destination}</span>
+                    <span className="text-teal-400">•</span>
+                    <span>{durationDays} {isVi ? 'ngày' : 'days'}</span>
+                  </div>
+                  <div className="font-bold text-teal-800 shrink-0 bg-white px-2.5 py-1 rounded-xl border border-teal-200/80 shadow-2xs">
+                    {formatMoney(parseFloat(budgetAmount) || 500, targetTrip?.currency || 'USD', lang)}
+                  </div>
                 </div>
-                <div className="font-bold text-teal-800 shrink-0 bg-white px-2.5 py-1 rounded-xl border border-teal-200/80 shadow-2xs">
-                  {formatMoney(parseFloat(budgetAmount) || 500, targetTrip?.currency || 'USD', lang)}
+                <div className="flex items-start gap-1.5 text-[11px] text-teal-800/90 leading-relaxed border-t border-teal-200/60 pt-2">
+                  <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-400 shrink-0 mt-0.5" />
+                  <span>
+                    {rankedMatchingSaved.length > 0
+                      ? isVi
+                        ? `Tìm thấy ${rankedMatchingSaved.length} địa điểm đã lưu tại ${destination}. Lịch trình sẽ ưu tiên các địa điểm này trước, phần còn thiếu tự sinh thêm địa điểm đánh giá sao cao nhất phù hợp ngân sách & sở thích đã chọn.`
+                        : `Found ${rankedMatchingSaved.length} saved places in ${destination}. They will be prioritized first, with missing slots auto-filled by top-rated places matching your budget & interests.`
+                      : isVi
+                      ? `Chưa đủ địa điểm lưu sẵn tại ${destination} — hệ thống sẽ tự sinh các địa điểm đánh giá sao cao và được khen nhiều nhất phù hợp ngân sách & sở thích chuyến đi.`
+                      : `No saved places yet for ${destination} — AI will auto-generate top-rated, most-praised places matching your budget & interests.`}
+                  </span>
                 </div>
               </div>
 
@@ -758,27 +968,52 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
             <div className="space-y-4">
               
               {/* Destination Overview Banner with prominent 'Đổi gợi ý khác' button */}
-              <div className="p-3.5 bg-teal-50/70 border border-teal-200 rounded-2xl flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <h4 className="font-semibold text-slate-800 text-sm sm:text-base truncate">
-                    {previewResult.destinationTitle}
-                  </h4>
-                  <span className="text-xs font-medium text-teal-700">
-                    {durationDays} {isVi ? 'ngày' : 'days'}
-                  </span>
+              <div className="p-3.5 bg-teal-50/70 border border-teal-200 rounded-2xl space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <h4 className="font-semibold text-slate-800 text-sm sm:text-base truncate">
+                      {previewResult.destinationTitle}
+                    </h4>
+                    <span className="text-xs font-medium text-teal-700">
+                      {durationDays} {isVi ? 'ngày' : 'days'}
+                    </span>
+                  </div>
+
+                  {/* Nút Đổi gợi ý khác trên banner */}
+                  <button
+                    type="button"
+                    onClick={handleRegenerate}
+                    disabled={loading}
+                    className="px-3 py-1.5 text-xs font-medium text-teal-800 bg-white hover:bg-teal-100/70 border border-teal-200/80 rounded-xl shadow-2xs transition-all flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-50 active:scale-95"
+                    title={isVi ? 'Tạo phương án gợi ý khác' : 'Try alternative suggestion'}
+                  >
+                    <RotateCw className={`w-3.5 h-3.5 text-teal-600 ${loading ? 'animate-spin' : ''}`} />
+                    <span>{isVi ? 'Đổi gợi ý khác' : 'Try another'}</span>
+                  </button>
                 </div>
 
-                {/* Nút Đổi gợi ý khác trên banner */}
-                <button
-                  type="button"
-                  onClick={handleRegenerate}
-                  disabled={loading}
-                  className="px-3 py-1.5 text-xs font-medium text-teal-800 bg-white hover:bg-teal-100/70 border border-teal-200/80 rounded-xl shadow-2xs transition-all flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-50 active:scale-95"
-                  title={isVi ? 'Tạo phương án gợi ý khác' : 'Try alternative suggestion'}
-                >
-                  <RotateCw className={`w-3.5 h-3.5 text-teal-600 ${loading ? 'animate-spin' : ''}`} />
-                  <span>{isVi ? 'Đổi gợi ý khác' : 'Try another'}</span>
-                </button>
+                {selectedTabs.includes('itinerary') && (
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-600 pt-1.5 border-t border-teal-200/60">
+                    <span>
+                      {isVi ? 'Từ danh sách lưu:' : 'From saved:'}{' '}
+                      <strong className="text-emerald-700">{previewResult.usedSavedCount || 0}</strong>
+                    </span>
+                    <span>•</span>
+                    <span>
+                      {isVi ? 'Tự sinh ★ cao:' : 'Top-rated auto-added:'}{' '}
+                      <strong className="text-teal-700">{previewResult.autoGeneratedCount || 0}</strong>
+                    </span>
+                    <span>•</span>
+                    <span>
+                      {isVi ? 'Dự toán:' : 'Est. cost:'}{' '}
+                      <strong className="text-slate-800">
+                        {formatMoney(previewResult.totalEstimatedCost || 0, previewResult.tripCurrency || targetTrip?.currency || 'USD', lang)}
+                      </strong>
+                      {' / '}
+                      {formatMoney(previewResult.tripBudget || parseFloat(budgetAmount) || 500, previewResult.tripCurrency || targetTrip?.currency || 'USD', lang)}
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Sub-tab navigation in Preview */}
@@ -818,7 +1053,7 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
 
               {/* Content of Active Preview Tab */}
               <div className="space-y-3 min-h-[200px]">
-                {/* 1. Itinerary Preview (Chỉ mốc thời gian + Tiêu đề, chữ thanh thoát, không in đậm dồn dập) */}
+                {/* 1. Itinerary Preview (Hiển thị giờ, tên, sao đánh giá, nguồn lưu/tự sinh và chi phí) */}
                 {activePreviewTab === 'itinerary' && (
                   <div className="space-y-3">
                     {previewResult.days?.map((d: any) => {
@@ -829,15 +1064,44 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
                             {displayTitle}
                           </h5>
                           
-                          {/* Danh sách mốc thời gian: Nhẹ nhàng, dễ đọc, không lạm dụng in đậm */}
-                          <ul className="space-y-2">
+                          <ul className="space-y-2.5">
                             {d.activities?.map((a: any, idx: number) => (
-                              <li key={idx} className="text-xs text-slate-700 flex items-center gap-2.5 py-0.5">
-                                <span className="font-medium text-teal-700 shrink-0 text-[11px] bg-teal-50/80 px-2 py-0.5 rounded-md border border-teal-200/50 font-mono">
-                                  {a.time}
-                                </span>
-                                <span className="font-normal text-slate-700 truncate text-xs sm:text-[13px]">
-                                  {a.title}
+                              <li key={idx} className="text-xs text-slate-700 flex items-start justify-between gap-2 py-0.5">
+                                <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                                  <span className="font-medium text-teal-700 shrink-0 text-[11px] bg-teal-50/80 px-2 py-0.5 rounded-md border border-teal-200/50 font-mono mt-0.5">
+                                    {a.time}
+                                  </span>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="font-medium text-slate-800 text-xs sm:text-[13px]">
+                                        {a.title}
+                                      </span>
+                                      {typeof a.rating === 'number' && (
+                                        <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200/70 px-1.5 py-0.2 rounded-md shrink-0">
+                                          ★ {Number(a.rating).toFixed(1)}
+                                        </span>
+                                      )}
+                                      <span
+                                        className={`text-[10px] font-medium px-1.5 py-0.2 rounded-md border shrink-0 ${
+                                          a.isFromSavedPlaces
+                                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200/70'
+                                            : 'bg-teal-50 text-teal-700 border-teal-200/70'
+                                        }`}
+                                      >
+                                        {a.isFromSavedPlaces
+                                          ? isVi ? 'Đã lưu' : 'Saved'
+                                          : isVi ? 'Tự sinh' : 'Auto-pick'}
+                                      </span>
+                                    </div>
+                                    {a.notes && (
+                                      <p className="text-[11px] text-slate-500 line-clamp-1 mt-0.5">{a.notes}</p>
+                                    )}
+                                  </div>
+                                </div>
+                                <span className="text-[11px] font-semibold text-emerald-700 shrink-0 mt-0.5">
+                                  {a.estimatedCost > 0
+                                    ? formatMoney(a.estimatedCost, previewResult.tripCurrency || targetTrip?.currency || 'USD', lang)
+                                    : (isVi ? 'Miễn phí' : 'Free')}
                                 </span>
                               </li>
                             ))}

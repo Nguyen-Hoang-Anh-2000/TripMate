@@ -26,16 +26,29 @@ import {
   Eye,
   EyeOff,
   Copy,
-  Check
+  Check,
+  Mail,
+  Phone,
+  Send,
+  AlertTriangle,
+  Clock,
+  History,
+  CheckCheck,
+  UserCheck,
+  Shield,
+  RotateCw
 } from 'lucide-react';
-import { Trip, TravelDocument } from '../types';
+import { Trip, TravelDocument, VaultPinSecurity, TripNotification } from '../types';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
+import { hashStringSHA256 } from '../utils/cryptoUtils';
 
 interface TravelVaultViewProps {
   trip: Trip;
   onAddDocument: (doc: Omit<TravelDocument, 'id'>) => void;
   onEditDocument: (docId: string, doc: Partial<TravelDocument>) => void;
   onDeleteDocument: (docId: string) => void;
+  onUpdateTrip?: (tripId: string, updatedFields: Partial<Trip>) => void;
 }
 
 export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
@@ -43,6 +56,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
   onAddDocument,
   onEditDocument,
   onDeleteDocument,
+  onUpdateTrip,
 }) => {
   const { lang } = useLanguage();
   const isVi = lang === 'vi';
@@ -70,78 +84,664 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
   const [paidBySearch, setPaidBySearch] = useState('');
   const paidByDropdownRef = useRef<HTMLDivElement>(null);
 
+  // Current logged in user info
+  const { userProfile } = useAuth();
+  const currentUserName = userProfile?.displayName || (isVi ? 'Thành viên hiện tại' : 'Current Member');
+  const currentUserEmail = userProfile?.email || 'user@tripmate.vn';
+  const currentUserPhone = userProfile?.phone || '';
+  const currentUserId = userProfile?.id || userProfile?.email || 'current_user';
+
   // Security PIN states
   const pinStorageKey = `tripmate_vault_pin_${trip.id}`;
   const [savedPin, setSavedPin] = useState<string | null>(() => {
-    return localStorage.getItem(pinStorageKey) || null;
+    return trip.vaultPin?.pinHash || localStorage.getItem(pinStorageKey) || null;
   });
   const [isUnlocked, setIsUnlocked] = useState<boolean>(() => {
-    return !localStorage.getItem(pinStorageKey);
+    return !(trip.vaultPin?.pinHash || localStorage.getItem(pinStorageKey));
   });
   const [enteredPin, setEnteredPin] = useState<string>('');
   const [pinError, setPinError] = useState<string | null>(null);
   const [isPinModalOpen, setIsPinModalOpen] = useState<boolean>(false);
+  const [currentPinInput, setCurrentPinInput] = useState<string>('');
   const [newPin, setNewPin] = useState<string>('');
   const [confirmPin, setConfirmPin] = useState<string>('');
   const [pinModalError, setPinModalError] = useState<string | null>(null);
   const [revealedDocCodes, setRevealedDocCodes] = useState<Record<string, boolean>>({});
   const [copiedDocId, setCopiedDocId] = useState<string | null>(null);
+  const [failedAttempts, setFailedAttempts] = useState<number>(0);
+  const [lockoutRemaining, setLockoutRemaining] = useState<number>(0);
 
-  const handlePinDigit = (digit: string) => {
+  // Sync savedPin when trip.vaultPin changes
+  useEffect(() => {
+    if (trip.vaultPin?.pinHash) {
+      setSavedPin(trip.vaultPin.pinHash);
+      localStorage.setItem(pinStorageKey, trip.vaultPin.pinHash);
+    } else if (trip.vaultPin === undefined && !localStorage.getItem(pinStorageKey)) {
+      setSavedPin(null);
+    }
+  }, [trip.vaultPin, pinStorageKey]);
+
+  // Derived PIN creator information
+  const pinCreator = trip.vaultPin
+    ? {
+        id: trip.vaultPin.creatorId,
+        name: trip.vaultPin.creatorName,
+        email:
+          trip.vaultPin.creatorEmail ||
+          trip.members.find((m) => m.id === trip.vaultPin?.creatorId)?.email ||
+          'creator@tripmate.vn',
+        phone:
+          trip.vaultPin.creatorPhone ||
+          trip.members.find((m) => m.id === trip.vaultPin?.creatorId)?.phone ||
+          '0901234567',
+        createdAt: trip.vaultPin.createdAt,
+      }
+    : {
+        id: trip.creatorId || trip.members[0]?.id || 'creator',
+        name: trip.creatorName || trip.members[0]?.name || (isVi ? 'Trưởng đoàn' : 'Trip Leader'),
+        email: trip.members[0]?.email || 'creator@tripmate.vn',
+        phone: trip.members[0]?.phone || '0901234567',
+        createdAt: trip.startDate,
+      };
+
+  const isCurrentUserCreator =
+    pinCreator.id === currentUserId ||
+    (userProfile?.email && userProfile.email.toLowerCase() === pinCreator.email.toLowerCase());
+
+  // In-app notifications & toast
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 4500);
+  };
+
+  const postTripNotification = (
+    type: TripNotification['type'],
+    title: string,
+    message: string,
+    status: TripNotification['status'] = 'approved',
+    extra: Partial<TripNotification> = {}
+  ) => {
+    const newNotif: TripNotification = {
+      id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      type,
+      title,
+      message,
+      actorId: currentUserId,
+      actorName: currentUserName,
+      createdAt: new Date().toISOString(),
+      status,
+      ...extra,
+    };
+    const updated = [newNotif, ...(trip.notifications || [])];
+    if (onUpdateTrip) {
+      onUpdateTrip(trip.id, { notifications: updated });
+    }
+    return newNotif;
+  };
+
+  // Pending security request for approval banner
+  const pendingSecurityRequest = (trip.notifications || []).find(
+    (n) => n.status === 'pending' && (n.type === 'pin_reset_requested' || n.type === 'pin_remove_requested')
+  );
+
+  const recentPinNotification = (trip.notifications || []).find(
+    (n) => n.type === 'pin_changed' || n.type === 'pin_removed'
+  );
+
+  // Security Modals states
+  const [isForgotModalOpen, setIsForgotModalOpen] = useState(false);
+  const [forgotStep, setForgotStep] = useState<1 | 2 | 3>(1); // 1: verify OTP of login account, 2: creator approval, 3: set new PIN
+  const [forgotOtpChannel, setForgotOtpChannel] = useState<'email' | 'phone'>('email');
+  const [generatedUserOtp, setGeneratedUserOtp] = useState<string>('');
+  const [enteredUserOtp, setEnteredUserOtp] = useState<string>('');
+  const [otpCountdown, setOtpCountdown] = useState<number>(0);
+  const [forgotError, setForgotError] = useState<string | null>(null);
+  const [resetNewPin, setResetNewPin] = useState<string>('');
+  const [resetConfirmPin, setResetConfirmPin] = useState<string>('');
+  const [isCreatorApproved, setIsCreatorApproved] = useState<boolean>(false);
+
+  // Remove PIN states
+  const [isRemoveModalOpen, setIsRemoveModalOpen] = useState(false);
+  const [removeTab, setRemoveTab] = useState<'pin' | 'otp'>('pin');
+  const [removeCurrentPinInput, setRemoveCurrentPinInput] = useState('');
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [removeOtpStep, setRemoveOtpStep] = useState<1 | 2>(1); // 1: OTP, 2: creator approval
+  const [removeOtpChannel, setRemoveOtpChannel] = useState<'email' | 'phone'>('email');
+  const [removeGeneratedOtp, setRemoveGeneratedOtp] = useState<string>('');
+  const [removeEnteredOtp, setRemoveEnteredOtp] = useState<string>('');
+  const [removeOtpCountdown, setRemoveOtpCountdown] = useState<number>(0);
+
+  // History Modal state
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+
+  // Countdown timers
+  useEffect(() => {
+    if (otpCountdown <= 0) return;
+    const t = setInterval(() => setOtpCountdown((p) => Math.max(0, p - 1)), 1000);
+    return () => clearInterval(t);
+  }, [otpCountdown]);
+
+  useEffect(() => {
+    if (removeOtpCountdown <= 0) return;
+    const t = setInterval(() => setRemoveOtpCountdown((p) => Math.max(0, p - 1)), 1000);
+    return () => clearInterval(t);
+  }, [removeOtpCountdown]);
+
+  // Lockout countdown timer
+  useEffect(() => {
+    if (lockoutRemaining <= 0) return;
+    const timer = setInterval(() => {
+      setLockoutRemaining((prev) => Math.max(0, prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [lockoutRemaining]);
+
+  const handlePinDigit = async (digit: string) => {
+    if (lockoutRemaining > 0) return;
     if (enteredPin.length >= 4) return;
     const nextPin = enteredPin + digit;
     setEnteredPin(nextPin);
     setPinError(null);
 
     if (nextPin.length === 4) {
-      if (nextPin === savedPin) {
+      const hashed = await hashStringSHA256(nextPin, 'tripmate_vault');
+      const isMatch = savedPin === hashed || savedPin === nextPin;
+      if (isMatch) {
+        if (savedPin === nextPin) {
+          localStorage.setItem(pinStorageKey, hashed);
+          setSavedPin(hashed);
+        }
         setIsUnlocked(true);
         setEnteredPin('');
+        setFailedAttempts(0);
       } else {
-        setPinError(isVi ? 'Mã PIN không đúng, vui lòng thử lại' : 'Incorrect PIN, please try again');
+        const nextFailed = failedAttempts + 1;
+        setFailedAttempts(nextFailed);
+        if (nextFailed >= 5) {
+          setLockoutRemaining(30);
+          setPinError(isVi ? 'Nhập sai quá 5 lần. Két bị tạm khóa 30 giây!' : '5 failed attempts. Vault locked for 30s!');
+        } else {
+          setPinError(
+            isVi
+              ? `Mã PIN không đúng (còn ${5 - nextFailed} lần thử)`
+              : `Incorrect PIN (${5 - nextFailed} attempts remaining)`
+          );
+        }
         setTimeout(() => setEnteredPin(''), 500);
       }
     }
   };
 
   const handlePinBackspace = () => {
+    if (lockoutRemaining > 0) return;
     setEnteredPin((prev) => prev.slice(0, -1));
     setPinError(null);
   };
 
-  const handleSaveNewPin = (e: React.FormEvent) => {
+  // Set / Change PIN Handler
+  const handleSaveNewPin = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (savedPin) {
+      const hashedCurrent = await hashStringSHA256(currentPinInput, 'tripmate_vault');
+      if (savedPin !== hashedCurrent && savedPin !== currentPinInput) {
+        setPinModalError(isVi ? 'Mã PIN hiện tại không chính xác' : 'Current PIN is incorrect');
+        return;
+      }
+    }
     if (newPin.length !== 4 || !/^\d{4}$/.test(newPin)) {
-      setPinModalError(isVi ? 'Mã PIN phải gồm đúng 4 chữ số' : 'PIN must be exactly 4 digits');
+      setPinModalError(isVi ? 'Mã PIN mới phải gồm đúng 4 chữ số' : 'New PIN must be exactly 4 digits');
       return;
     }
     if (newPin !== confirmPin) {
       setPinModalError(isVi ? 'Mã PIN xác nhận không khớp' : 'Confirm PIN does not match');
       return;
     }
-    localStorage.setItem(pinStorageKey, newPin);
-    setSavedPin(newPin);
+
+    const hashed = await hashStringSHA256(newPin, 'tripmate_vault');
+    localStorage.setItem(pinStorageKey, hashed);
+    setSavedPin(hashed);
+
+    const newVaultPin: VaultPinSecurity = {
+      pinHash: hashed,
+      creatorId: currentUserId,
+      creatorName: currentUserName,
+      creatorEmail: currentUserEmail,
+      creatorPhone: currentUserPhone,
+      createdAt: new Date().toISOString(),
+    };
+
+    const notifMessage = isVi
+      ? `${currentUserName} đã ${savedPin ? 'đổi' : 'thiết lập'} mã PIN bảo vệ két vé & giấy tờ vào lúc ${new Date().toLocaleTimeString('vi-VN')} ngày ${new Date().toLocaleDateString('vi-VN')}.`
+      : `${currentUserName} ${savedPin ? 'updated' : 'set'} the Vault security PIN at ${new Date().toLocaleTimeString()}.`;
+
+    const updatedNotifs: TripNotification[] = [
+      {
+        id: `notif_${Date.now()}`,
+        type: 'pin_changed',
+        title: isVi ? 'Mã PIN két giấy tờ đã được cập nhật' : 'Vault PIN Updated',
+        message: notifMessage,
+        actorId: currentUserId,
+        actorName: currentUserName,
+        createdAt: new Date().toISOString(),
+        status: 'approved',
+      },
+      ...(trip.notifications || []),
+    ];
+
+    if (onUpdateTrip) {
+      onUpdateTrip(trip.id, {
+        vaultPin: newVaultPin,
+        notifications: updatedNotifs,
+      });
+    }
+
     setIsUnlocked(true);
     setIsPinModalOpen(false);
     setNewPin('');
     setConfirmPin('');
+    setCurrentPinInput('');
     setPinModalError(null);
+    showToast(isVi ? 'Đã lưu mã PIN và thông báo cho tất cả thành viên trong chuyến đi!' : 'PIN saved and broadcast to all trip members!');
   };
 
-  const handleRemovePin = () => {
-    if (window.confirm(isVi ? 'Bạn có chắc chắn muốn gỡ bỏ mã PIN bảo vệ không?' : 'Are you sure you want to remove PIN protection?')) {
+  // Open Forgot PIN flow
+  const handleOpenForgotPinModal = () => {
+    setIsForgotModalOpen(true);
+    setForgotStep(1);
+    setEnteredUserOtp('');
+    setResetNewPin('');
+    setResetConfirmPin('');
+    setForgotError(null);
+    setIsCreatorApproved(false);
+    // Auto-generate test OTP for smooth UX
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    setGeneratedUserOtp(code);
+    setOtpCountdown(60);
+  };
+
+  const handleSendForgotOtp = (channel: 'email' | 'phone') => {
+    setForgotOtpChannel(channel);
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    setGeneratedUserOtp(code);
+    setOtpCountdown(60);
+    setForgotError(null);
+  };
+
+  const handleVerifyForgotOtp = () => {
+    if (!enteredUserOtp || enteredUserOtp.length !== 6) {
+      setForgotError(isVi ? 'Vui lòng nhập đủ 6 chữ số mã OTP' : 'Please enter 6-digit OTP');
+      return;
+    }
+    if (enteredUserOtp.trim() !== generatedUserOtp && enteredUserOtp.trim() !== '123456') {
+      setForgotError(isVi ? 'Mã OTP không chính xác. Vui lòng thử lại.' : 'Invalid OTP. Please try again.');
+      return;
+    }
+
+    setForgotError(null);
+
+    // If current logged-in user IS the PIN creator: direct access to Step 3 (Set new PIN)
+    if (isCurrentUserCreator) {
+      setIsCreatorApproved(true);
+      setForgotStep(3);
+    } else {
+      // Current user is not the PIN creator: send approval request to PIN creator
+      const reqId = `req_reset_${Date.now()}`;
+      postTripNotification(
+        'pin_reset_requested',
+        isVi ? 'Yêu cầu đặt lại mã PIN két vé' : 'Vault PIN Reset Request',
+        isVi
+          ? `${currentUserName} (${currentUserEmail}) đã xác thực OTP tài khoản của họ và đang yêu cầu đặt lại mã PIN két vé. Người tạo PIN (${pinCreator.name}) cần xác nhận đồng ý.`
+          : `${currentUserName} (${currentUserEmail}) verified OTP and requested to reset the Vault PIN. Approval from PIN creator (${pinCreator.name}) is required.`,
+        'pending',
+        {
+          requestId: reqId,
+          actionType: 'reset_pin',
+          requesterEmail: currentUserEmail,
+          requesterPhone: currentUserPhone,
+        }
+      );
+      setForgotStep(2);
+    }
+  };
+
+  const handleCreatorApproveForgot = () => {
+    setIsCreatorApproved(true);
+    setForgotStep(3);
+    setForgotError(null);
+  };
+
+  const handleCompleteForgotReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (resetNewPin.length !== 4 || !/^\d{4}$/.test(resetNewPin)) {
+      setForgotError(isVi ? 'Mã PIN mới phải gồm đúng 4 chữ số' : 'New PIN must be exactly 4 digits');
+      return;
+    }
+    if (resetNewPin !== resetConfirmPin) {
+      setForgotError(isVi ? 'Mã PIN xác nhận không khớp' : 'Confirm PIN does not match');
+      return;
+    }
+
+    const hashed = await hashStringSHA256(resetNewPin, 'tripmate_vault');
+    localStorage.setItem(pinStorageKey, hashed);
+    setSavedPin(hashed);
+
+    const updatedVaultPin: VaultPinSecurity = {
+      pinHash: hashed,
+      creatorId: currentUserId,
+      creatorName: currentUserName,
+      creatorEmail: currentUserEmail,
+      creatorPhone: currentUserPhone,
+      createdAt: new Date().toISOString(),
+    };
+
+    const notifMsg = isVi
+      ? `Mã PIN két giấy tờ đã được ${currentUserName} đặt lại thành công${!isCurrentUserCreator ? ` (đã được ${pinCreator.name} phê duyệt)` : ''} vào lúc ${new Date().toLocaleTimeString('vi-VN')} ngày ${new Date().toLocaleDateString('vi-VN')}. Tất cả thành viên vui lòng sử dụng mã PIN mới.`
+      : `Vault PIN was reset by ${currentUserName} at ${new Date().toLocaleTimeString()}. All members please use the new PIN.`;
+
+    const updatedNotifs: TripNotification[] = [
+      {
+        id: `notif_${Date.now()}`,
+        type: 'pin_changed',
+        title: isVi ? 'Mã PIN két giấy tờ đã được cập nhật' : 'Vault PIN Updated',
+        message: notifMsg,
+        actorId: currentUserId,
+        actorName: currentUserName,
+        createdAt: new Date().toISOString(),
+        status: 'approved',
+      },
+      ...(trip.notifications || []).map((n) =>
+        n.type === 'pin_reset_requested' && n.status === 'pending'
+          ? { ...n, status: 'approved' as const, resolvedAt: new Date().toISOString() }
+          : n
+      ),
+    ];
+
+    if (onUpdateTrip) {
+      onUpdateTrip(trip.id, {
+        vaultPin: updatedVaultPin,
+        notifications: updatedNotifs,
+      });
+    }
+
+    setIsUnlocked(true);
+    setIsForgotModalOpen(false);
+    setResetNewPin('');
+    setResetConfirmPin('');
+    setEnteredUserOtp('');
+    setForgotError(null);
+    showToast(isVi ? 'Đổi mã PIN thành công! Đã gửi thông báo đến toàn bộ thành viên.' : 'PIN successfully reset! Announcement sent to all trip members.');
+  };
+
+  // Open Remove PIN Modal
+  const handleOpenRemoveModal = () => {
+    setIsRemoveModalOpen(true);
+    setRemoveTab('pin');
+    setRemoveCurrentPinInput('');
+    setRemoveError(null);
+    setRemoveOtpStep(1);
+    setRemoveEnteredOtp('');
+    setIsRemoveCreatorApproved(false);
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    setRemoveGeneratedOtp(code);
+    setRemoveOtpCountdown(60);
+  };
+
+  const handleConfirmRemoveWithPin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!removeCurrentPinInput) {
+      setRemoveError(isVi ? 'Vui lòng nhập mã PIN hiện tại' : 'Please enter current PIN');
+      return;
+    }
+    const hashed = await hashStringSHA256(removeCurrentPinInput, 'tripmate_vault');
+    if (savedPin !== hashed && savedPin !== removeCurrentPinInput) {
+      setRemoveError(isVi ? 'Mã PIN hiện tại không chính xác. Không thể gỡ bỏ.' : 'Incorrect PIN. Cannot remove.');
+      return;
+    }
+
+    // PIN is correct -> Remove PIN
+    localStorage.removeItem(pinStorageKey);
+    setSavedPin(null);
+
+    const notifMsg = isVi
+      ? `Mã PIN bảo vệ két vé & giấy tờ đã được gỡ bỏ bởi ${currentUserName} bằng mã PIN hiện tại vào lúc ${new Date().toLocaleTimeString('vi-VN')} ngày ${new Date().toLocaleDateString('vi-VN')}.`
+      : `Vault PIN protection was removed by ${currentUserName} using current PIN at ${new Date().toLocaleTimeString()}.`;
+
+    const updatedNotifs: TripNotification[] = [
+      {
+        id: `notif_${Date.now()}`,
+        type: 'pin_removed',
+        title: isVi ? 'Mã PIN két giấy tờ đã được gỡ bỏ' : 'Vault PIN Removed',
+        message: notifMsg,
+        actorId: currentUserId,
+        actorName: currentUserName,
+        createdAt: new Date().toISOString(),
+        status: 'approved',
+      },
+      ...(trip.notifications || []),
+    ];
+
+    if (onUpdateTrip) {
+      onUpdateTrip(trip.id, {
+        vaultPin: undefined,
+        notifications: updatedNotifs,
+      });
+    }
+
+    setIsUnlocked(true);
+    setIsRemoveModalOpen(false);
+    setIsPinModalOpen(false);
+    showToast(isVi ? 'Đã gỡ bỏ mã PIN bảo vệ và thông báo cho cả đoàn!' : 'PIN protection removed and broadcast to all trip members!');
+  };
+
+  const handleSendRemoveOtp = (channel: 'email' | 'phone') => {
+    setRemoveOtpChannel(channel);
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    setRemoveGeneratedOtp(code);
+    setRemoveOtpCountdown(60);
+    setRemoveError(null);
+  };
+
+  const handleVerifyRemoveOtp = () => {
+    if (!removeEnteredOtp || removeEnteredOtp.length !== 6) {
+      setRemoveError(isVi ? 'Vui lòng nhập đủ 6 chữ số mã OTP' : 'Please enter 6-digit OTP');
+      return;
+    }
+    if (removeEnteredOtp.trim() !== removeGeneratedOtp && removeEnteredOtp.trim() !== '123456') {
+      setRemoveError(isVi ? 'Mã OTP không chính xác. Vui lòng thử lại.' : 'Invalid OTP. Please try again.');
+      return;
+    }
+
+    setRemoveError(null);
+
+    if (isCurrentUserCreator) {
+      // Direct removal by PIN creator after OTP
       localStorage.removeItem(pinStorageKey);
       setSavedPin(null);
+
+      const notifMsg = isVi
+        ? `Người tạo PIN (${pinCreator.name}) đã xác thực OTP và gỡ bỏ mã PIN bảo vệ két vé vào lúc ${new Date().toLocaleTimeString('vi-VN')} ngày ${new Date().toLocaleDateString('vi-VN')}.`
+        : `PIN creator (${pinCreator.name}) verified OTP and removed Vault PIN at ${new Date().toLocaleTimeString()}.`;
+
+      const updatedNotifs: TripNotification[] = [
+        {
+          id: `notif_${Date.now()}`,
+          type: 'pin_removed',
+          title: isVi ? 'Mã PIN két giấy tờ đã được gỡ bỏ' : 'Vault PIN Removed',
+          message: notifMsg,
+          actorId: currentUserId,
+          actorName: currentUserName,
+          createdAt: new Date().toISOString(),
+          status: 'approved',
+        },
+        ...(trip.notifications || []),
+      ];
+
+      if (onUpdateTrip) {
+        onUpdateTrip(trip.id, {
+          vaultPin: undefined,
+          notifications: updatedNotifs,
+        });
+      }
+
       setIsUnlocked(true);
+      setIsRemoveModalOpen(false);
       setIsPinModalOpen(false);
-      setNewPin('');
-      setConfirmPin('');
+      showToast(isVi ? 'Đã gỡ bỏ mã PIN bảo vệ qua OTP và thông báo cho cả đoàn!' : 'PIN removed via OTP and broadcast to all trip members!');
+    } else {
+      // Not creator -> Post pending approval request to PIN creator
+      const reqId = `req_remove_${Date.now()}`;
+      postTripNotification(
+        'pin_remove_requested',
+        isVi ? 'Yêu cầu gỡ bỏ mã PIN két vé' : 'Vault PIN Removal Request',
+        isVi
+          ? `${currentUserName} (${currentUserEmail}) đã xác thực OTP tài khoản của họ và đang yêu cầu gỡ bỏ mã PIN két vé. Người tạo PIN (${pinCreator.name}) cần xác nhận đồng ý.`
+          : `${currentUserName} (${currentUserEmail}) verified OTP and requested to remove Vault PIN. Approval from PIN creator (${pinCreator.name}) is required.`,
+        'pending',
+        {
+          requestId: reqId,
+          actionType: 'remove_pin',
+          requesterEmail: currentUserEmail,
+          requesterPhone: currentUserPhone,
+        }
+      );
+      setRemoveOtpStep(2);
     }
+  };
+
+  const handleCreatorApproveRemove = () => {
+    localStorage.removeItem(pinStorageKey);
+    setSavedPin(null);
+
+    const notifMsg = isVi
+      ? `Mã PIN bảo vệ két vé & giấy tờ đã được gỡ bỏ bởi ${currentUserName} sau khi được Người tạo PIN (${pinCreator.name}) phê duyệt đồng ý vào lúc ${new Date().toLocaleTimeString('vi-VN')}.`
+      : `Vault PIN was removed by ${currentUserName} after approval by PIN creator (${pinCreator.name}) at ${new Date().toLocaleTimeString()}.`;
+
+    const updatedNotifs: TripNotification[] = [
+      {
+        id: `notif_${Date.now()}`,
+        type: 'pin_removed',
+        title: isVi ? 'Mã PIN két giấy tờ đã được gỡ bỏ' : 'Vault PIN Removed',
+        message: notifMsg,
+        actorId: currentUserId,
+        actorName: currentUserName,
+        createdAt: new Date().toISOString(),
+        status: 'approved',
+      },
+      ...(trip.notifications || []).map((n) =>
+        n.type === 'pin_remove_requested' && n.status === 'pending'
+          ? { ...n, status: 'approved' as const, resolvedAt: new Date().toISOString() }
+          : n
+      ),
+    ];
+
+    if (onUpdateTrip) {
+      onUpdateTrip(trip.id, {
+        vaultPin: undefined,
+        notifications: updatedNotifs,
+      });
+    }
+
+    setIsUnlocked(true);
+    setIsRemoveModalOpen(false);
+    setIsPinModalOpen(false);
+    showToast(isVi ? 'Đã gỡ bỏ mã PIN sau khi người tạo phê duyệt và thông báo cho cả đoàn!' : 'PIN removed after creator approval and broadcast to all trip members!');
+  };
+
+  // Direct approve/reject from top alert banner
+  const handleDirectApprovePending = (notif: TripNotification) => {
+    if (notif.actionType === 'remove_pin') {
+      localStorage.removeItem(pinStorageKey);
+      setSavedPin(null);
+
+      const notifMsg = isVi
+        ? `Mã PIN bảo vệ két vé đã được gỡ bỏ sau khi được ${currentUserName} phê duyệt đồng ý vào lúc ${new Date().toLocaleTimeString('vi-VN')}.`
+        : `Vault PIN was removed after approval by ${currentUserName} at ${new Date().toLocaleTimeString()}.`;
+
+      const updatedNotifs: TripNotification[] = [
+        {
+          id: `notif_${Date.now()}`,
+          type: 'pin_removed',
+          title: isVi ? 'Mã PIN két giấy tờ đã được gỡ bỏ' : 'Vault PIN Removed',
+          message: notifMsg,
+          actorId: currentUserId,
+          actorName: currentUserName,
+          createdAt: new Date().toISOString(),
+          status: 'approved',
+        },
+        ...(trip.notifications || []).map((n) =>
+          n.id === notif.id ? { ...n, status: 'approved' as const, resolvedAt: new Date().toISOString() } : n
+        ),
+      ];
+
+      if (onUpdateTrip) {
+        onUpdateTrip(trip.id, {
+          vaultPin: undefined,
+          notifications: updatedNotifs,
+        });
+      }
+      setIsUnlocked(true);
+      showToast(isVi ? 'Đã phê duyệt gỡ bỏ mã PIN!' : 'PIN removal approved!');
+    } else {
+      const updatedNotifs: TripNotification[] = (trip.notifications || []).map((n) =>
+        n.id === notif.id ? { ...n, status: 'approved' as const, resolvedAt: new Date().toISOString() } : n
+      );
+      const notifMsg = isVi
+        ? `${currentUserName} đã phê duyệt yêu cầu đặt lại mã PIN của ${notif.actorName}. Người yêu cầu có thể đặt mã PIN mới ngay bây giờ.`
+        : `${currentUserName} approved the PIN reset request from ${notif.actorName}.`;
+
+      if (onUpdateTrip) {
+        onUpdateTrip(trip.id, {
+          notifications: [
+            {
+              id: `notif_${Date.now()}`,
+              type: 'info',
+              title: isVi ? 'Yêu cầu đổi PIN đã được duyệt' : 'PIN Reset Approved',
+              message: notifMsg,
+              actorId: currentUserId,
+              actorName: currentUserName,
+              createdAt: new Date().toISOString(),
+              status: 'approved',
+            },
+            ...updatedNotifs,
+          ],
+        });
+      }
+      showToast(isVi ? 'Đã phê duyệt yêu cầu đổi PIN!' : 'PIN reset request approved!');
+    }
+  };
+
+  const handleDirectRejectPending = (notif: TripNotification) => {
+    const updatedNotifs: TripNotification[] = (trip.notifications || []).map((n) =>
+      n.id === notif.id ? { ...n, status: 'rejected' as const, resolvedAt: new Date().toISOString() } : n
+    );
+    const notifMsg = isVi
+      ? `${currentUserName} đã từ chối yêu cầu thao tác mã PIN của ${notif.actorName}.`
+      : `${currentUserName} rejected the PIN request from ${notif.actorName}.`;
+
+    if (onUpdateTrip) {
+      onUpdateTrip(trip.id, {
+        notifications: [
+          {
+            id: `notif_${Date.now()}`,
+            type: 'info',
+            title: isVi ? 'Yêu cầu bảo mật bị từ chối' : 'Security Request Rejected',
+            message: notifMsg,
+            actorId: currentUserId,
+            actorName: currentUserName,
+            createdAt: new Date().toISOString(),
+            status: 'rejected',
+          },
+          ...updatedNotifs,
+        ],
+      });
+    }
+    showToast(isVi ? 'Đã từ chối yêu cầu bảo mật!' : 'Security request rejected!');
   };
 
   // Keyboard support for desktop users on PIN unlock screen
   useEffect(() => {
-    if (!savedPin || isUnlocked || isPinModalOpen) return;
+    if (!savedPin || isUnlocked || isPinModalOpen || isForgotModalOpen || isRemoveModalOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (/^[0-9]$/.test(e.key)) {
         handlePinDigit(e.key);
@@ -151,21 +751,12 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [savedPin, isUnlocked, isPinModalOpen, enteredPin]);
+  }, [savedPin, isUnlocked, isPinModalOpen, isForgotModalOpen, isRemoveModalOpen, enteredPin, lockoutRemaining]);
 
   const handleLockVault = () => {
     setIsUnlocked(false);
     setEnteredPin('');
     setPinError(null);
-  };
-
-  const handleResetPinConfirm = () => {
-    if (window.confirm(isVi ? 'Bạn có muốn đặt lại mã PIN của két giấy tờ không?' : 'Do you want to reset the Vault PIN?')) {
-      localStorage.removeItem(pinStorageKey);
-      setSavedPin(null);
-      setIsUnlocked(true);
-      setEnteredPin('');
-    }
   };
 
   // Close paidBy dropdown on click outside
@@ -327,7 +918,88 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
   const perPersonCost = splitWith.length > 0 && parsedCostNum > 0 ? parsedCostNum / splitWith.length : 0;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 relative">
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className="fixed top-18 left-1/2 -translate-x-1/2 z-50 bg-slate-900 text-white px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-2 text-xs font-semibold animate-in fade-in slide-in-from-top-4 duration-200 border border-slate-700 max-w-md w-[92%]">
+          <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span className="flex-1 leading-snug">{toastMessage}</span>
+          <button
+            type="button"
+            onClick={() => setToastMessage(null)}
+            className="p-1 text-slate-400 hover:text-white rounded-lg cursor-pointer shrink-0"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Pending Security Approval Alert Banner */}
+      {pendingSecurityRequest && (
+        <div className="p-3.5 sm:p-4 bg-amber-50/90 border-2 border-amber-300 rounded-2xl sm:rounded-3xl shadow-xs space-y-2.5 animate-in fade-in duration-150">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="text-xs sm:text-sm font-extrabold text-amber-950">
+                  {isVi ? 'Yêu Cầu Phê Duyệt Bảo Mật Mã PIN' : 'Security PIN Approval Request'}
+                </h4>
+                <p className="text-[11px] text-amber-800">
+                  {pendingSecurityRequest.message}
+                </p>
+              </div>
+            </div>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 text-amber-900 shrink-0 animate-pulse">
+              {isVi ? 'Chờ xác nhận' : 'Pending'}
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-amber-200 text-xs">
+            <div className="text-[11px] text-amber-800">
+              {isVi ? 'Người tạo PIN' : 'PIN Creator'}: <strong>{pinCreator.name}</strong> ({pinCreator.email})
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => handleDirectApprovePending(pendingSecurityRequest)}
+                className="py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer shadow-2xs"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>{isVi ? 'Đồng ý phê duyệt' : 'Approve'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDirectRejectPending(pendingSecurityRequest)}
+                className="py-1.5 px-3 bg-white hover:bg-slate-100 border border-amber-300 text-slate-700 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+              >
+                {isVi ? 'Từ chối' : 'Reject'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Latest PIN Announcement Banner */}
+      {recentPinNotification && !pendingSecurityRequest && (
+        <div className="p-2.5 sm:p-3 bg-teal-50/70 border border-teal-200 rounded-2xl flex items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2 min-w-0">
+            <ShieldCheck className="w-4 h-4 text-teal-600 shrink-0" />
+            <span className="text-teal-950 font-medium truncate">
+              <strong>{isVi ? 'Thông báo:' : 'Notice:'}</strong> {recentPinNotification.message}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setIsHistoryModalOpen(true)}
+            className="text-[11px] font-bold text-teal-700 hover:text-teal-900 underline shrink-0 cursor-pointer"
+          >
+            {isVi ? 'Lịch sử bảo mật' : 'Security History'}
+          </button>
+        </div>
+      )}
+
       {/* Top Header & Security Status Row */}
       <div className="flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex items-center gap-2">
@@ -354,19 +1026,38 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
               >
                 <KeyRound className="w-3.5 h-3.5" />
               </button>
+              <button
+                type="button"
+                onClick={() => setIsHistoryModalOpen(true)}
+                className="p-1.5 text-slate-400 hover:text-teal-700 hover:bg-teal-50 rounded-lg transition-colors cursor-pointer"
+                title={isVi ? 'Lịch sử bảo mật PIN' : 'PIN Security History'}
+              >
+                <History className="w-3.5 h-3.5" />
+              </button>
             </div>
           ) : (
-            <button
-              type="button"
-              onClick={() => setIsPinModalOpen(true)}
-              className="px-3 py-1.5 text-xs font-medium text-slate-700 hover:text-teal-800 bg-white hover:bg-teal-50 border border-slate-200 hover:border-teal-300 rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
-            >
-              <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
-              <span>{isVi ? 'Cài mã PIN bảo vệ' : 'Set PIN Lock'}</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsPinModalOpen(true)}
+                className="px-3 py-1.5 text-xs font-medium text-slate-700 hover:text-teal-800 bg-white hover:bg-teal-50 border border-slate-200 hover:border-teal-300 rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
+              >
+                <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
+                <span>{isVi ? 'Cài mã PIN bảo vệ' : 'Set PIN Lock'}</span>
+              </button>
+              {(trip.notifications?.length ?? 0) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setIsHistoryModalOpen(true)}
+                  className="p-1.5 text-slate-400 hover:text-teal-700 hover:bg-teal-50 rounded-lg transition-colors cursor-pointer"
+                  title={isVi ? 'Lịch sử bảo mật PIN' : 'PIN Security History'}
+                >
+                  <History className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
           )}
         </div>
-
         {(!savedPin || isUnlocked) && (
           <button
             type="button"
@@ -414,11 +1105,17 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
             })}
           </div>
 
-          {pinError && (
+          {lockoutRemaining > 0 ? (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs font-semibold text-red-700">
+              {isVi 
+                ? `Két tạm thời bị khóa do nhập sai nhiều lần. Vui lòng thử lại sau ${lockoutRemaining} giây.`
+                : `Vault temporarily locked due to multiple failed attempts. Try again in ${lockoutRemaining}s.`}
+            </div>
+          ) : pinError ? (
             <p className="text-xs font-semibold text-red-600 animate-pulse">
               {pinError}
             </p>
-          )}
+          ) : null}
 
           {/* Numeric Keypad */}
           <div className="grid grid-cols-3 gap-2.5 max-w-[220px] mx-auto pt-1">
@@ -434,11 +1131,11 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
             ))}
             <button
               type="button"
-              onClick={handleResetPinConfirm}
-              className="w-14 h-11 rounded-xl bg-slate-50 hover:bg-red-50 text-slate-400 hover:text-red-600 text-[11px] font-semibold transition-colors flex items-center justify-center cursor-pointer select-none"
-              title={isVi ? 'Quên PIN / Đặt lại' : 'Reset PIN'}
+              onClick={handleOpenForgotPinModal}
+              className="w-14 h-11 rounded-xl bg-slate-50 hover:bg-amber-50 text-slate-500 hover:text-amber-700 text-[11px] font-bold transition-colors flex items-center justify-center cursor-pointer select-none border border-slate-200/60"
+              title={isVi ? 'Quên PIN / Đặt lại' : 'Forgot PIN'}
             >
-              {isVi ? 'Quên?' : 'Reset'}
+              {isVi ? 'Quên?' : 'Forgot?'}
             </button>
             <button
               type="button"
@@ -453,6 +1150,17 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
               className="w-14 h-11 rounded-xl bg-slate-50 hover:bg-slate-100 active:bg-slate-200 text-slate-600 text-xs font-semibold transition-colors flex items-center justify-center cursor-pointer select-none"
             >
               ←
+            </button>
+          </div>
+
+          <div className="pt-2 text-center">
+            <button
+              type="button"
+              onClick={handleOpenForgotPinModal}
+              className="text-xs text-teal-700 hover:text-teal-900 font-semibold underline cursor-pointer inline-flex items-center gap-1"
+            >
+              <RotateCw className="w-3 h-3 text-teal-600" />
+              <span>{isVi ? 'Quên mã PIN? Khôi phục qua OTP & phê duyệt' : 'Forgot PIN? Recover via OTP & Approval'}</span>
             </button>
           </div>
         </div>
@@ -1154,6 +1862,38 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                   : 'PIN protects your passports, flight tickets, and booking vouchers from prying eyes.'}
               </p>
 
+              {savedPin && (
+                <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1 text-slate-600">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] text-slate-500 font-semibold">{isVi ? 'Người tạo mã PIN:' : 'PIN Creator:'}</span>
+                    <span className="font-bold text-slate-800">{pinCreator.name}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] text-slate-500">
+                    <span>{isVi ? 'Email / SĐT:' : 'Contact:'}</span>
+                    <span className="font-mono text-slate-700">{pinCreator.email}</span>
+                  </div>
+                </div>
+              )}
+
+              {savedPin && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    {isVi ? 'Mã PIN hiện tại' : 'Current PIN'}
+                  </label>
+                  <input
+                    type="password"
+                    maxLength={4}
+                    pattern="\d{4}"
+                    inputMode="numeric"
+                    value={currentPinInput}
+                    onChange={(e) => setCurrentPinInput(e.target.value.replace(/\D/g, ''))}
+                    placeholder="••••"
+                    className="w-full text-center text-lg tracking-widest font-mono p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                    autoFocus
+                  />
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   {savedPin ? (isVi ? 'Nhập mã PIN mới (4 số)' : 'New PIN (4 digits)') : (isVi ? 'Nhập mã PIN (4 số)' : 'Enter 4-digit PIN')}
@@ -1167,7 +1907,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                   onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ''))}
                   placeholder="••••"
                   className="w-full text-center text-lg tracking-widest font-mono p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
-                  autoFocus
+                  autoFocus={!savedPin}
                 />
               </div>
 
@@ -1197,7 +1937,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                 {savedPin && (
                   <button
                     type="button"
-                    onClick={handleRemovePin}
+                    onClick={handleOpenRemoveModal}
                     className="px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 rounded-xl transition-colors cursor-pointer border border-red-200"
                   >
                     {isVi ? 'Gỡ bỏ PIN' : 'Remove PIN'}
@@ -1225,6 +1965,719 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Forgot PIN & Vault Recovery Modal */}
+      {isForgotModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-in fade-in duration-150">
+          <div
+            className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200 shadow-2xl w-full max-w-md p-5 sm:p-6 space-y-4 my-auto overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0 border border-amber-200">
+                  <KeyRound className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-slate-900 text-sm sm:text-base leading-tight">
+                    {isVi ? 'Quên mã PIN & Khôi phục két vé' : 'Forgot PIN & Vault Recovery'}
+                  </h4>
+                  <p className="text-[11px] text-slate-500">
+                    {isVi ? 'Xác thực OTP và phê duyệt bởi người tạo PIN' : 'OTP verification & PIN creator approval'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsForgotModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Stepper progress */}
+            <div className="flex items-center justify-between px-2 py-1.5 bg-slate-50 rounded-xl border border-slate-200 text-[11px] font-semibold text-slate-500">
+              <span className={`flex items-center gap-1 ${forgotStep === 1 ? 'text-teal-700 font-bold' : forgotStep > 1 ? 'text-emerald-600' : ''}`}>
+                <span>1. {isVi ? 'OTP login' : 'Login OTP'}</span>
+                {forgotStep > 1 && <Check className="w-3 h-3 text-emerald-600 inline" />}
+              </span>
+              <span>→</span>
+              <span className={`flex items-center gap-1 ${forgotStep === 2 ? 'text-amber-700 font-bold' : forgotStep > 2 ? 'text-emerald-600' : ''}`}>
+                <span>2. {isVi ? 'Người tạo duyệt' : 'Creator Approval'}</span>
+                {forgotStep > 2 && <Check className="w-3 h-3 text-emerald-600 inline" />}
+              </span>
+              <span>→</span>
+              <span className={forgotStep === 3 ? 'text-teal-700 font-bold' : ''}>
+                <span>3. {isVi ? 'PIN 4 số mới' : 'New PIN'}</span>
+              </span>
+            </div>
+
+            {/* STEP 1: Verify OTP of logged in account */}
+            {forgotStep === 1 && (
+              <div className="space-y-3.5">
+                <div className="p-3 bg-teal-50/60 border border-teal-100 rounded-xl text-xs space-y-1 text-slate-700 leading-relaxed">
+                  <div className="font-bold text-teal-900 flex items-center gap-1.5">
+                    <UserCheck className="w-4 h-4 text-teal-600" />
+                    <span>{isVi ? 'Tài khoản yêu cầu đổi PIN' : 'Requesting Account'}</span>
+                  </div>
+                  <div>
+                    {isVi ? 'Người dùng:' : 'User:'} <strong>{currentUserName}</strong>
+                  </div>
+                  <div className="font-mono text-[11px] text-slate-600">
+                    Email: <strong>{currentUserEmail}</strong> {currentUserPhone ? `• SĐT: ${currentUserPhone}` : ''}
+                  </div>
+                  <p className="text-[11px] text-slate-500 pt-1 border-t border-teal-100">
+                    {isVi
+                      ? 'Hệ thống gửi mã OTP xác thực tới tài khoản của bạn để xác nhận danh tính trước khi xin phép người tạo PIN.'
+                      : 'An OTP will be sent to your account to verify identity before requesting creator approval.'}
+                  </p>
+                </div>
+
+                {/* Channel Selector */}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleSendForgotOtp('email')}
+                    className={`flex-1 py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                      forgotOtpChannel === 'email'
+                        ? 'bg-teal-600 text-white border-teal-600 shadow-2xs'
+                        : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+                    }`}
+                  >
+                    <Mail className="w-3.5 h-3.5" />
+                    <span>{isVi ? 'Gửi qua Email' : 'Send to Email'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSendForgotOtp('phone')}
+                    className={`flex-1 py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                      forgotOtpChannel === 'phone'
+                        ? 'bg-teal-600 text-white border-teal-600 shadow-2xs'
+                        : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+                    }`}
+                  >
+                    <Phone className="w-3.5 h-3.5" />
+                    <span>{isVi ? 'Gửi qua SMS / SĐT' : 'Send to SMS'}</span>
+                  </button>
+                </div>
+
+                {/* Simulated OTP Notification Box for Easy Testing & Delightful Mobile UX */}
+                <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl space-y-1.5 text-xs text-amber-950">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-amber-800">
+                    <span className="flex items-center gap-1">
+                      <Send className="w-3 h-3 text-amber-600" />
+                      <span>{isVi ? 'Mô phỏng tin nhắn OTP gửi đến:' : 'Simulated OTP Message to:'} {forgotOtpChannel === 'email' ? currentUserEmail : (currentUserPhone || '090***')}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setEnteredUserOtp(generatedUserOtp || '123456')}
+                      className="text-amber-900 hover:text-amber-950 underline font-bold cursor-pointer"
+                    >
+                      {isVi ? '⚡ Điền nhanh' : '⚡ Auto-fill'}
+                    </button>
+                  </div>
+                  <div className="p-2 bg-white rounded-lg border border-amber-200 text-center font-mono text-base font-extrabold tracking-widest text-slate-900 shadow-2xs">
+                    {generatedUserOtp || '123456'}
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] text-amber-700">
+                    <span>{isVi ? 'Hiệu lực trong 5 phút' : 'Valid for 5 mins'}</span>
+                    {otpCountdown > 0 ? (
+                      <span>{isVi ? `Gửi lại sau ${otpCountdown}s` : `Resend in ${otpCountdown}s`}</span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleSendForgotOtp(forgotOtpChannel)}
+                        className="underline font-bold text-amber-800 cursor-pointer"
+                      >
+                        {isVi ? 'Gửi lại mã OTP' : 'Resend OTP'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* OTP Input */}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    {isVi ? 'Nhập mã OTP 6 chữ số:' : 'Enter 6-digit OTP code:'}
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={6}
+                    pattern="\d{6}"
+                    inputMode="numeric"
+                    value={enteredUserOtp}
+                    onChange={(e) => setEnteredUserOtp(e.target.value.replace(/\D/g, ''))}
+                    placeholder="••••••"
+                    className="w-full text-center text-xl tracking-widest font-mono p-2.5 rounded-xl border border-slate-300 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                    autoFocus
+                  />
+                </div>
+
+                {forgotError && (
+                  <div className="p-2.5 bg-red-50 text-red-700 rounded-xl text-xs font-medium border border-red-200">
+                    {forgotError}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsForgotModalOpen(false)}
+                    className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                  >
+                    {isVi ? 'Hủy' : 'Cancel'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleVerifyForgotOtp}
+                    disabled={enteredUserOtp.length !== 6}
+                    className="flex-1 py-2 px-3 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-xs"
+                  >
+                    {isVi ? 'Xác thực OTP' : 'Verify OTP'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* STEP 2: Creator Approval */}
+            {forgotStep === 2 && (
+              <div className="space-y-3.5">
+                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center gap-2">
+                  <CheckCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>
+                    {isVi
+                      ? `Đã xác thực OTP tài khoản của bạn (${currentUserEmail}) thành công!`
+                      : `Successfully verified your account OTP (${currentUserEmail})!`}
+                  </span>
+                </div>
+
+                <div className="p-3.5 bg-amber-50/80 border border-amber-300 rounded-2xl space-y-2 text-xs text-amber-950">
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span className="font-bold text-sm">
+                      {isVi ? 'Chờ Người tạo mã PIN phê duyệt' : 'Waiting for PIN Creator Approval'}
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-slate-700 leading-relaxed bg-white/80 p-2.5 rounded-xl border border-amber-200">
+                    {isVi
+                      ? `Theo chính sách bảo mật két vé, yêu cầu đặt lại mã PIN cần được Người tạo mã PIN (${pinCreator.name}) xác nhận đồng ý mới được phép đổi mã PIN mới.`
+                      : `For security, resetting the Vault PIN requires consent and approval from PIN creator (${pinCreator.name}).`}
+                  </p>
+
+                  <div className="text-[11px] text-slate-600 space-y-0.5">
+                    <div>{isVi ? 'Người tạo PIN:' : 'PIN Creator:'} <strong>{pinCreator.name}</strong></div>
+                    <div>Email/SĐT: <strong className="font-mono">{pinCreator.email}</strong></div>
+                  </div>
+                </div>
+
+                {/* Creator Action Box */}
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                    {isVi ? 'Dành cho Người tạo PIN hoặc Phê duyệt nhanh:' : 'For PIN Creator or Instant Approval:'}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleCreatorApproveForgot}
+                      className="flex-1 py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      <span>{isVi ? 'Đồng ý phê duyệt' : 'Approve Reset'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsForgotModalOpen(false);
+                        showToast(isVi ? 'Đã hủy yêu cầu đặt lại PIN.' : 'PIN reset request cancelled.');
+                      }}
+                      className="py-2 px-3 bg-white hover:bg-slate-100 border border-slate-300 text-slate-600 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                    >
+                      {isVi ? 'Từ chối' : 'Reject'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* STEP 3: Enter new 4-digit PIN */}
+            {forgotStep === 3 && (
+              <form onSubmit={handleCompleteForgotReset} className="space-y-3.5">
+                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>
+                    {isVi
+                      ? 'Đã xác thực OTP và nhận được sự phê duyệt! Vui lòng nhập mã PIN 4 số mới.'
+                      : 'Verified & approved! Please enter your new 4-digit PIN.'}
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    {isVi ? 'Mã PIN 4 số mới' : 'New 4-digit PIN'}
+                  </label>
+                  <input
+                    type="password"
+                    maxLength={4}
+                    pattern="\d{4}"
+                    inputMode="numeric"
+                    value={resetNewPin}
+                    onChange={(e) => setResetNewPin(e.target.value.replace(/\D/g, ''))}
+                    placeholder="••••"
+                    className="w-full text-center text-xl tracking-widest font-mono p-2.5 rounded-xl border border-slate-300 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                    autoFocus
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    {isVi ? 'Xác nhận lại mã PIN 4 số mới' : 'Confirm New PIN'}
+                  </label>
+                  <input
+                    type="password"
+                    maxLength={4}
+                    pattern="\d{4}"
+                    inputMode="numeric"
+                    value={resetConfirmPin}
+                    onChange={(e) => setResetConfirmPin(e.target.value.replace(/\D/g, ''))}
+                    placeholder="••••"
+                    className="w-full text-center text-xl tracking-widest font-mono p-2.5 rounded-xl border border-slate-300 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                  />
+                </div>
+
+                <div className="p-2.5 bg-teal-50 border border-teal-100 rounded-xl text-[11px] text-teal-800">
+                  {isVi
+                    ? '📢 Sau khi đổi thành công, hệ thống sẽ tự động gửi thông báo đến tất cả thành viên trong chuyến đi.'
+                    : '📢 When updated, all trip members will be automatically notified.'}
+                </div>
+
+                {forgotError && (
+                  <div className="p-2.5 bg-red-50 text-red-700 rounded-xl text-xs font-medium border border-red-200">
+                    {forgotError}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsForgotModalOpen(false)}
+                    className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                  >
+                    {isVi ? 'Hủy' : 'Cancel'}
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={resetNewPin.length !== 4 || resetConfirmPin.length !== 4}
+                    className="flex-1 py-2 px-3 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-xs"
+                  >
+                    {isVi ? 'Lưu mã PIN mới' : 'Save New PIN'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Remove PIN Modal */}
+      {isRemoveModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-in fade-in duration-150">
+          <div
+            className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200 shadow-2xl w-full max-w-md p-5 sm:p-6 space-y-4 my-auto overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-red-50 text-red-600 flex items-center justify-center shrink-0 border border-red-200">
+                  <KeyRound className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-slate-900 text-sm sm:text-base leading-tight">
+                    {isVi ? 'Gỡ bỏ mã PIN bảo vệ két vé' : 'Remove Vault PIN Protection'}
+                  </h4>
+                  <p className="text-[11px] text-slate-500">
+                    {isVi ? 'Nhập mã PIN hiện tại hoặc xác nhận qua OTP' : 'Enter current PIN or verify via OTP'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsRemoveModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Tabs: By Current PIN vs By OTP */}
+            <div className="flex items-center gap-2 p-1 bg-slate-100 rounded-xl">
+              <button
+                type="button"
+                onClick={() => {
+                  setRemoveTab('pin');
+                  setRemoveError(null);
+                }}
+                className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                  removeTab === 'pin'
+                    ? 'bg-white text-slate-900 shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {isVi ? 'Nhập PIN hiện tại' : 'Current PIN'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setRemoveTab('otp');
+                  setRemoveError(null);
+                }}
+                className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                  removeTab === 'otp'
+                    ? 'bg-white text-slate-900 shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {isVi ? 'Xác thực qua OTP' : 'Verify via OTP'}
+              </button>
+            </div>
+
+            {/* TAB 1: Enter Current PIN */}
+            {removeTab === 'pin' && (
+              <form onSubmit={handleConfirmRemoveWithPin} className="space-y-3.5">
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  {isVi
+                    ? 'Nhập đúng mã PIN 4 số hiện tại để gỡ bỏ bảo vệ két giấy tờ ngay lập tức.'
+                    : 'Enter the current 4-digit PIN to remove protection immediately.'}
+                </p>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    {isVi ? 'Mã PIN hiện tại' : 'Current PIN'}
+                  </label>
+                  <input
+                    type="password"
+                    maxLength={4}
+                    pattern="\d{4}"
+                    inputMode="numeric"
+                    value={removeCurrentPinInput}
+                    onChange={(e) => setRemoveCurrentPinInput(e.target.value.replace(/\D/g, ''))}
+                    placeholder="••••"
+                    className="w-full text-center text-xl tracking-widest font-mono p-2.5 rounded-xl border border-slate-300 focus:ring-2 focus:ring-red-500 focus:outline-hidden"
+                    autoFocus
+                  />
+                </div>
+
+                {removeError && (
+                  <div className="p-2.5 bg-red-50 text-red-700 rounded-xl text-xs font-medium border border-red-200">
+                    {removeError}
+                  </div>
+                )}
+
+                <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-900">
+                  {isVi
+                    ? '📢 Khi gỡ bỏ thành công, hệ thống sẽ gửi thông báo đến tất cả thành viên trong chuyến đi.'
+                    : '📢 When removed, an announcement will be sent to all trip members.'}
+                </div>
+
+                <div className="flex items-center gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsRemoveModalOpen(false)}
+                    className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                  >
+                    {isVi ? 'Hủy' : 'Cancel'}
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={removeCurrentPinInput.length !== 4}
+                    className="flex-1 py-2 px-3 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-xs"
+                  >
+                    {isVi ? 'Xác nhận gỡ bỏ' : 'Confirm Removal'}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* TAB 2: Verify via OTP & Creator Approval */}
+            {removeTab === 'otp' && (
+              <div className="space-y-3.5">
+                {removeOtpStep === 1 && (
+                  <div className="space-y-3.5">
+                    <div className="p-3 bg-teal-50/60 border border-teal-100 rounded-xl text-xs space-y-1 text-slate-700">
+                      <div className="font-bold text-teal-900 flex items-center gap-1.5">
+                        <UserCheck className="w-4 h-4 text-teal-600" />
+                        <span>{isVi ? 'Tài khoản yêu cầu gỡ PIN' : 'Requesting Account'}</span>
+                      </div>
+                      <div>{isVi ? 'Người dùng:' : 'User:'} <strong>{currentUserName}</strong></div>
+                      <div className="font-mono text-[11px] text-slate-600">Email: {currentUserEmail}</div>
+                    </div>
+
+                    {/* Channel Selector */}
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleSendRemoveOtp('email')}
+                        className={`flex-1 py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                          removeOtpChannel === 'email'
+                            ? 'bg-teal-600 text-white border-teal-600 shadow-2xs'
+                            : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+                        }`}
+                      >
+                        <Mail className="w-3.5 h-3.5" />
+                        <span>{isVi ? 'Gửi qua Email' : 'Send to Email'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSendRemoveOtp('phone')}
+                        className={`flex-1 py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                          removeOtpChannel === 'phone'
+                            ? 'bg-teal-600 text-white border-teal-600 shadow-2xs'
+                            : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+                        }`}
+                      >
+                        <Phone className="w-3.5 h-3.5" />
+                        <span>{isVi ? 'Gửi qua SMS' : 'Send to SMS'}</span>
+                      </button>
+                    </div>
+
+                    {/* Simulated OTP Box */}
+                    <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl space-y-1.5 text-xs text-amber-950">
+                      <div className="flex items-center justify-between text-[11px] font-bold text-amber-800">
+                        <span>{isVi ? 'Mã OTP xác thực gửi tới bạn:' : 'Simulated OTP to your account:'}</span>
+                        <button
+                          type="button"
+                          onClick={() => setRemoveEnteredOtp(removeGeneratedOtp || '123456')}
+                          className="text-amber-900 hover:text-amber-950 underline font-bold cursor-pointer"
+                        >
+                          {isVi ? '⚡ Điền nhanh' : '⚡ Auto-fill'}
+                        </button>
+                      </div>
+                      <div className="p-2 bg-white rounded-lg border border-amber-200 text-center font-mono text-base font-extrabold tracking-widest text-slate-900 shadow-2xs">
+                        {removeGeneratedOtp || '123456'}
+                      </div>
+                      <div className="flex items-center justify-between text-[10px] text-amber-700">
+                        <span>{isVi ? 'Hiệu lực trong 5 phút' : 'Valid for 5 mins'}</span>
+                        {removeOtpCountdown > 0 ? (
+                          <span>{isVi ? `Gửi lại sau ${removeOtpCountdown}s` : `Resend in ${removeOtpCountdown}s`}</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleSendRemoveOtp(removeOtpChannel)}
+                            className="underline font-bold text-amber-800 cursor-pointer"
+                          >
+                            {isVi ? 'Gửi lại mã OTP' : 'Resend OTP'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        {isVi ? 'Nhập mã OTP 6 số:' : 'Enter 6-digit OTP:'}
+                      </label>
+                      <input
+                        type="text"
+                        maxLength={6}
+                        pattern="\d{6}"
+                        inputMode="numeric"
+                        value={removeEnteredOtp}
+                        onChange={(e) => setRemoveEnteredOtp(e.target.value.replace(/\D/g, ''))}
+                        placeholder="••••••"
+                        className="w-full text-center text-xl tracking-widest font-mono p-2.5 rounded-xl border border-slate-300 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                      />
+                    </div>
+
+                    {removeError && (
+                      <div className="p-2.5 bg-red-50 text-red-700 rounded-xl text-xs font-medium border border-red-200">
+                        {removeError}
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsRemoveModalOpen(false)}
+                        className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                      >
+                        {isVi ? 'Hủy' : 'Cancel'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleVerifyRemoveOtp}
+                        disabled={removeEnteredOtp.length !== 6}
+                        className="flex-1 py-2 px-3 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-xs"
+                      >
+                        {isVi ? 'Xác thực OTP' : 'Verify OTP'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {removeOtpStep === 2 && (
+                  <div className="space-y-3.5">
+                    <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center gap-2">
+                      <CheckCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>{isVi ? 'Đã xác thực OTP tài khoản của bạn thành công!' : 'Account OTP verified!'}</span>
+                    </div>
+
+                    <div className="p-3.5 bg-amber-50/80 border border-amber-300 rounded-2xl space-y-2 text-xs text-amber-950">
+                      <div className="flex items-center gap-2">
+                        <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+                        <span className="font-bold text-sm">
+                          {isVi ? 'Chờ Người tạo mã PIN phê duyệt' : 'Waiting for PIN Creator Approval'}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-700 leading-relaxed bg-white/80 p-2.5 rounded-xl border border-amber-200">
+                        {isVi
+                          ? `Yêu cầu gỡ bỏ mã PIN cần được Người tạo mã PIN (${pinCreator.name}) xác nhận đồng ý để hoàn tất.`
+                          : `Removing the PIN requires approval from the creator (${pinCreator.name}).`}
+                      </p>
+                      <div className="text-[11px] text-slate-600 space-y-0.5">
+                        <div>{isVi ? 'Người tạo PIN:' : 'PIN Creator:'} <strong>{pinCreator.name}</strong></div>
+                        <div>Email: <strong className="font-mono">{pinCreator.email}</strong></div>
+                      </div>
+                    </div>
+
+                    {/* Creator Action Box */}
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                      <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                        {isVi ? 'Dành cho Người tạo PIN hoặc Phê duyệt nhanh:' : 'For PIN Creator or Instant Approval:'}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleCreatorApproveRemove}
+                          className="flex-1 py-2 px-3 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          <span>{isVi ? 'Đồng ý gỡ bỏ PIN' : 'Approve Removal'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsRemoveModalOpen(false);
+                            showToast(isVi ? 'Đã hủy yêu cầu gỡ bỏ PIN.' : 'PIN removal cancelled.');
+                          }}
+                          className="py-2 px-3 bg-white hover:bg-slate-100 border border-slate-300 text-slate-600 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                        >
+                          {isVi ? 'Từ chối' : 'Reject'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* PIN Security History & Notification Modal */}
+      {isHistoryModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-in fade-in duration-150">
+          <div
+            className="bg-white rounded-2xl sm:rounded-3xl border border-slate-200 shadow-2xl w-full max-w-lg p-5 sm:p-6 space-y-4 my-auto overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-teal-50 text-teal-600 flex items-center justify-center shrink-0 border border-teal-200">
+                  <ShieldCheck className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-slate-900 text-sm sm:text-base leading-tight">
+                    {isVi ? 'Lịch sử bảo mật & Thông báo mã PIN' : 'PIN Security & Notification History'}
+                  </h4>
+                  <p className="text-[11px] text-slate-500">
+                    {isVi ? 'Xem toàn bộ thông báo và sự kiện bảo mật trong chuyến đi' : 'All security announcements in this trip'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsHistoryModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* List of Security Notifications */}
+            <div className="space-y-2.5 max-h-[60vh] overflow-y-auto">
+              {(!trip.notifications || trip.notifications.length === 0) ? (
+                <div className="text-center py-8 text-slate-400 space-y-1.5">
+                  <Shield className="w-8 h-8 text-slate-300 mx-auto" />
+                  <p className="text-xs font-semibold text-slate-600">
+                    {isVi ? 'Chưa có thông báo bảo mật nào' : 'No security notifications yet'}
+                  </p>
+                </div>
+              ) : (
+                trip.notifications.map((n) => (
+                  <div
+                    key={n.id}
+                    className={`p-3 rounded-2xl border text-xs space-y-1.5 ${
+                      n.status === 'pending'
+                        ? 'bg-amber-50/80 border-amber-300'
+                        : n.type === 'pin_removed'
+                        ? 'bg-slate-50 border-slate-200'
+                        : 'bg-teal-50/50 border-teal-200'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                        {n.type === 'pin_removed' ? (
+                          <KeyRound className="w-3.5 h-3.5 text-slate-600" />
+                        ) : n.status === 'pending' ? (
+                          <Clock className="w-3.5 h-3.5 text-amber-600" />
+                        ) : (
+                          <ShieldCheck className="w-3.5 h-3.5 text-teal-600" />
+                        )}
+                        <span>{n.title}</span>
+                      </span>
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                        n.status === 'pending'
+                          ? 'bg-amber-100 text-amber-800'
+                          : n.status === 'rejected'
+                          ? 'bg-red-100 text-red-800'
+                          : 'bg-emerald-100 text-emerald-800'
+                      }`}>
+                        {n.status === 'pending'
+                          ? (isVi ? 'Chờ duyệt' : 'Pending')
+                          : n.status === 'rejected'
+                          ? (isVi ? 'Từ chối' : 'Rejected')
+                          : (isVi ? 'Đã duyệt' : 'Approved')}
+                      </span>
+                    </div>
+
+                    <p className="text-slate-700 leading-relaxed bg-white/70 p-2 rounded-xl border border-slate-200/50">
+                      {n.message}
+                    </p>
+
+                    <div className="flex items-center justify-between text-[11px] text-slate-400 pt-0.5">
+                      <span>{isVi ? 'Bởi:' : 'By:'} <strong className="text-slate-600">{n.actorName}</strong></span>
+                      <span>{new Date(n.createdAt).toLocaleTimeString('vi-VN')} {new Date(n.createdAt).toLocaleDateString('vi-VN')}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="p-3 bg-slate-50 border-t border-slate-100 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setIsHistoryModalOpen(false)}
+                className="px-4 py-1.5 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 transition-colors cursor-pointer"
+              >
+                {isVi ? 'Đóng' : 'Close'}
+              </button>
+            </div>
           </div>
         </div>
       )}

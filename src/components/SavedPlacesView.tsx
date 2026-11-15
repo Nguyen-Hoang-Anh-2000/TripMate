@@ -56,6 +56,7 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingPlace, setEditingPlace] = useState<SavedPlace | null>(null);
   const [schedulingPlace, setSchedulingPlace] = useState<SavedPlace | null>(null);
+  const [placeToDelete, setPlaceToDelete] = useState<SavedPlace | null>(null);
 
   // Form state for Add/Edit
   const [formName, setFormName] = useState('');
@@ -543,11 +544,7 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
                       {/* Delete */}
                       <button
                         type="button"
-                        onClick={() => {
-                          if (window.confirm(isVi ? `Xóa địa điểm "${place.name}" khỏi danh sách lưu?` : `Delete "${place.name}"?`)) {
-                            onDeletePlace(place.id);
-                          }
-                        }}
+                        onClick={() => setPlaceToDelete(place)}
                         className="p-2 rounded-xl hover:bg-rose-50 text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
                         title={isVi ? 'Xóa địa điểm' : 'Delete place'}
                       >
@@ -915,6 +912,54 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
                 </div>
               </form>
             )}
+          </div>
+        </div>
+      )}
+      {/* In-app Delete Saved Place Confirmation Modal */}
+      {placeToDelete && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/65 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"
+          onClick={() => setPlaceToDelete(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white w-full max-w-sm rounded-2xl border border-slate-200 shadow-2xl p-5 space-y-4 animate-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="font-display font-bold text-slate-900 text-sm sm:text-base">
+                  {isVi ? 'Xóa địa điểm đã lưu?' : 'Delete Saved Place?'}
+                </h3>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                  {isVi
+                    ? `Bạn có chắc muốn xóa địa điểm "${placeToDelete.name}" khỏi danh sách lưu?`
+                    : `Are you sure you want to delete "${placeToDelete.name}"?`}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setPlaceToDelete(null)}
+                className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer transition-colors"
+              >
+                {isVi ? 'Hủy' : 'Cancel'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onDeletePlace(placeToDelete.id);
+                  setPlaceToDelete(null);
+                }}
+                className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow-xs cursor-pointer transition-colors"
+              >
+                {isVi ? 'Xác nhận xóa' : 'Confirm Delete'}
+              </button>
+            </div>
           </div>
         </div>
       )}

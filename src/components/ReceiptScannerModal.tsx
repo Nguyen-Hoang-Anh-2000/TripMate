@@ -3,6 +3,8 @@ import { Camera, Upload, Sparkles, X, Check, AlertCircle, RefreshCw, Receipt, Fi
 import { CategoryType } from '../types';
 import { useLanguage } from '../context/LanguageContext';
 import { formatMoney } from '../utils/formatCurrency';
+import { getLocalDateString } from '../utils/dateUtils';
+import { compressImage } from '../utils/imageUtils';
 
 export interface ScannedReceiptData {
   storeName: string;
@@ -64,13 +66,13 @@ export const ReceiptScannerModal: React.FC<ReceiptScannerModalProps> = ({
         }),
       });
 
-      const json = await response.json();
-      if (json.success && json.data) {
+      const json = await response.json().catch(() => null);
+      if (response.ok && json?.success && json?.data) {
         setScannedResult({
           storeName: json.data.storeName || (isVi ? 'Hóa đơn chi tiêu' : 'Expense Receipt'),
           totalAmount: Number(json.data.totalAmount) || 0,
           currency: json.data.currency || currency,
-          date: json.data.date || new Date().toISOString().split('T')[0],
+          date: json.data.date || getLocalDateString(),
           time: json.data.time || '',
           category: json.data.category || 'food',
           items: Array.isArray(json.data.items) ? json.data.items : [],
@@ -78,10 +80,14 @@ export const ReceiptScannerModal: React.FC<ReceiptScannerModalProps> = ({
           receiptImageBase64: base64,
         });
       } else {
-        throw new Error(json.error || 'Failed to scan receipt');
+        setErrorMessage(
+          json?.error ||
+            (isVi
+              ? 'Không thể phân tích ảnh tự động. Bạn vẫn có thể nhập thông tin thủ công.'
+              : 'Could not auto-scan receipt. You can still input manually.')
+        );
       }
-    } catch (err: any) {
-      console.error('[Receipt Scanner Error]:', err);
+    } catch {
       setErrorMessage(
         isVi
           ? 'Không thể phân tích ảnh tự động. Bạn vẫn có thể nhập thông tin thủ công.'
@@ -92,7 +98,7 @@ export const ReceiptScannerModal: React.FC<ReceiptScannerModalProps> = ({
     }
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -101,12 +107,19 @@ export const ReceiptScannerModal: React.FC<ReceiptScannerModalProps> = ({
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      handleProcessImage(result, file.type || 'image/jpeg');
-    };
-    reader.readAsDataURL(file);
+    try {
+      setIsScanning(true);
+      const compressedDataUrl = await compressImage(file, 1200, 0.75);
+      handleProcessImage(compressedDataUrl, 'image/jpeg');
+    } catch (compressErr) {
+      console.warn('Image compression fallback:', compressErr);
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        handleProcessImage(result, file.type || 'image/jpeg');
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   const handleApply = () => {

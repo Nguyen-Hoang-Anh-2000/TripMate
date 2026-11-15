@@ -163,7 +163,7 @@ const translations: Record<Language, Record<string, string>> = {
     'vault.typeOther': 'Other Note',
 
     // AI Itinerary Modal
-    'aiModal.headerTitle': 'AI Travel Itinerary Architect',
+    'aiModal.headerTitle': 'AI Itinerary',
     'aiModal.poweredBy': 'Powered by Gemini 3.6 Flash',
     'aiModal.destLabel': 'Destination City or Country',
     'aiModal.durationLabel': 'Duration (Days)',
@@ -200,7 +200,10 @@ const translations: Record<Language, Record<string, string>> = {
     'interest.tech': 'Anime & Tech',
 
     // AI Assistant Chat
-    'chat.title': 'TripMate AI Assistant',
+    'aiChat.title': 'TripMate Chat',
+    'aiChat.thinking': 'TripMate AI is thinking...',
+    'aiChat.inputPlaceholder': 'Hello',
+    'chat.title': 'TripMate Chat',
     'chat.context': 'Context: {dest}',
     'chat.greeting': "Hello! I'm your TripMate AI travel guide for {dest}. How can I assist you today?",
     'chat.prompt1': 'Must-try dishes in {dest}? 🍜',
@@ -208,7 +211,7 @@ const translations: Record<Language, Record<string, string>> = {
     'chat.prompt3': 'Best public transit pass to buy? 🚆',
     'chat.prompt4': 'Safety tips & emergency numbers? 🛡️',
     'chat.thinking': 'TripMate AI is thinking...',
-    'chat.askPlaceholder': 'Ask anything about {dest}...',
+    'chat.askPlaceholder': 'Hello',
 
     // New Trip Modal
     'newTrip.modalTitle': 'Create Trip',
@@ -395,7 +398,7 @@ const translations: Record<Language, Record<string, string>> = {
     'vault.typeOther': 'Ghi chú khác',
 
     // AI Itinerary Modal
-    'aiModal.headerTitle': 'Kiến trúc sư Lịch trình AI',
+    'aiModal.headerTitle': 'Lịch trình AI',
     'aiModal.poweredBy': 'Cung cấp bởi Gemini 3.6 Flash',
     'aiModal.destLabel': 'Thành phố hoặc Quốc gia Điểm đến',
     'aiModal.durationLabel': 'Thời gian (Số ngày)',
@@ -432,7 +435,10 @@ const translations: Record<Language, Record<string, string>> = {
     'interest.tech': 'Công nghệ & Manga',
 
     // AI Assistant Chat
-    'chat.title': 'Trợ lý Du lịch TripMate AI',
+    'aiChat.title': 'TripMate Chat',
+    'aiChat.thinking': 'TripMate AI đang suy nghĩ...',
+    'aiChat.inputPlaceholder': 'Hello',
+    'chat.title': 'TripMate Chat',
     'chat.context': 'Ngữ cảnh: {dest}',
     'chat.greeting': 'Xin chào! Tôi là trợ lý du lịch AI TripMate của bạn tại {dest}. Tôi có thể giúp gì cho chuyến đi của bạn?',
     'chat.prompt1': 'Món ăn nhất định phải thử tại {dest}? 🍜',
@@ -440,7 +446,7 @@ const translations: Record<Language, Record<string, string>> = {
     'chat.prompt3': 'Vé giao thông công cộng tốt nhất nên mua? 🚆',
     'chat.prompt4': 'Mẹo an toàn & số điện thoại khẩn cấp? 🛡️',
     'chat.thinking': 'TripMate AI đang suy nghĩ...',
-    'chat.askPlaceholder': 'Hỏi bất kỳ điều gì về {dest}...',
+    'chat.askPlaceholder': 'Hello',
 
     // New Trip Modal
     'newTrip.modalTitle': 'Tạo Chuyến Đi',

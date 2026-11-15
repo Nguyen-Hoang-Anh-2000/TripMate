@@ -29,6 +29,8 @@ export interface ActivityItem {
   memberSplits?: { memberId: string; amount: number }[];
   expenseId?: string;
   receiptImageUrl?: string;
+  rating?: number;
+  isFromSavedPlaces?: boolean;
 }
 
 export interface ItineraryDay {
@@ -63,7 +65,7 @@ export interface TripMember {
   phone?: string;
   uid?: string; // Link to registered Firebase Auth user UID
   isRegistered?: boolean;
-  invitationStatus?: 'accepted' | 'pending' | 'offline';
+  invitationStatus?: 'accepted' | 'pending' | 'declined' | 'offline';
   invitationId?: string;
   contributedAmount?: number; // Số tiền đã góp vào quỹ nhóm
 }
@@ -75,6 +77,7 @@ export interface UserProfile {
   phone?: string;
   avatar: string;
   createdAt: string;
+  passwordHash?: string;
 }
 
 export interface TripInvitation {
@@ -115,6 +118,56 @@ export interface TravelDocument {
   expenseId?: string; // linked expense id in trip.expenses
 }
 
+export interface VaultPinSecurity {
+  pinHash: string;
+  creatorId: string;
+  creatorName: string;
+  creatorEmail?: string;
+  creatorPhone?: string;
+  createdAt: string;
+}
+
+export interface TripNotification {
+  id: string;
+  type: 'pin_changed' | 'pin_removed' | 'pin_reset_requested' | 'pin_remove_requested' | 'info';
+  title: string;
+  message: string;
+  actorId: string;
+  actorName: string;
+  createdAt: string;
+  status?: 'pending' | 'approved' | 'rejected';
+  requestId?: string;
+  actionType?: 'reset_pin' | 'remove_pin';
+  requestedNewPinHash?: string;
+  requesterEmail?: string;
+  requesterPhone?: string;
+  resolvedAt?: string;
+}
+
+export interface UserTripNotification {
+  id: string;
+  type: 'trip_deleted' | 'trip_deleted_settlement' | 'info';
+  tripId: string;
+  tripTitle: string;
+  title: string;
+  message: string;
+  actorId: string;
+  actorName: string;
+  targetUid?: string;
+  targetEmail?: string;
+  targetPhone?: string;
+  targetMemberName?: string;
+  fromMemberId?: string;
+  fromMemberName?: string;
+  toMemberId?: string;
+  toMemberName?: string;
+  amount?: number;
+  currency?: string;
+  status: 'unread' | 'read';
+  createdAt: string;
+  readAt?: string;
+}
+
 export interface Trip {
   id: string;
   title: string;
@@ -140,6 +193,8 @@ export interface Trip {
   creatorId?: string; // UID of user who created the trip
   creatorName?: string;
   memberUids?: string[]; // UIDs of members who accepted the invitation
+  vaultPin?: VaultPinSecurity;
+  notifications?: TripNotification[];
 }
 
 export interface SavedPlace {

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Upload, Camera, AlertCircle } from 'lucide-react';
 import { Trip } from '../types';
 import { useLanguage } from '../context/LanguageContext';
+import { compressImage } from '../utils/imageUtils';
 
 interface EditTripModalProps {
   isOpen: boolean;
@@ -58,24 +59,30 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
   if (!isOpen || !trip) return null;
 
   // Handle local image file upload from mobile or desktop
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 5 * 1024 * 1024) {
-      setUploadError(isVi ? 'Kích thước ảnh tối đa là 5MB.' : 'Image size must be less than 5MB.');
+    if (!file.type.startsWith('image/')) {
+      setUploadError(isVi ? 'Vui lòng chọn tệp hình ảnh hợp lệ (PNG, JPG, WEBP).' : 'Please select an image file.');
       return;
     }
     setUploadError('');
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const dataUrl = event.target?.result as string;
-      if (dataUrl) {
-        setCoverImage(dataUrl);
-      }
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressedDataUrl = await compressImage(file, 1400, 0.75);
+      setCoverImage(compressedDataUrl);
+    } catch (err) {
+      console.warn('Cover compression error, falling back:', err);
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const dataUrl = event.target?.result as string;
+        if (dataUrl) {
+          setCoverImage(dataUrl);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   const calcDaysCount = (sDate: string, eDate: string) => {
@@ -90,10 +97,20 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
   const oldDaysCount = trip.days?.length || calcDaysCount(trip.startDate, trip.endDate);
   const newDaysCount = calcDaysCount(startDate || trip.startDate, endDate || trip.endDate);
   const isDurationIncreased = newDaysCount > oldDaysCount;
+  const isDurationShortened = newDaysCount < oldDaysCount;
+  const truncatedDays = (trip.days || []).filter((d) => d.dayNumber > newDaysCount);
+  const affectedActivitiesCount = truncatedDays.reduce((acc, d) => acc + (d.activities?.length || 0), 0);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !destination.trim()) return;
+
+    const safeBudget = (() => {
+      if (!budgetTotal) return trip.budgetTotal;
+      const num = parseFloat(budgetTotal);
+      if (isNaN(num) || num < 0) return trip.budgetTotal;
+      return Math.min(num, 100000000000);
+    })();
 
     onUpdateTrip(trip.id, {
       title: title.trim(),
@@ -101,7 +118,7 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
       country: country.trim() || destination.trim(),
       startDate: startDate || trip.startDate,
       endDate: endDate || trip.endDate,
-      budgetTotal: budgetTotal ? parseFloat(budgetTotal) : trip.budgetTotal,
+      budgetTotal: safeBudget,
       currency,
       coverImage: coverImage || trip.coverImage,
       rearrangeAllDays: isDurationIncreased ? rearrangeAllDays : false,
@@ -215,9 +232,22 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
               </label>
               <input
                 type="number"
+                min="0"
+                max="100000000000"
+                step="any"
                 placeholder={isVi ? 'Ví dụ: 500' : 'e.g. 500'}
                 value={budgetTotal}
-                onChange={(e) => setBudgetTotal(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === '') {
+                    setBudgetTotal('');
+                    return;
+                  }
+                  const num = parseFloat(val);
+                  if (!isNaN(num) && num >= 0 && num <= 100000000000) {
+                    setBudgetTotal(val);
+                  }
+                }}
                 className="w-full text-xs p-2.5 sm:p-3 rounded-xl border border-slate-200 bg-slate-50/40 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden transition-all"
               />
             </div>
@@ -241,6 +271,29 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
               </select>
             </div>
           </div>
+
+          {/* If duration shortened and has activities: show clear warning */}
+          {isDurationShortened && (
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl space-y-1 text-xs">
+              <p className="font-bold text-rose-800 flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>
+                  {isVi
+                    ? `Cảnh báo: Rút ngắn chuyến đi từ ${oldDaysCount} ngày còn ${newDaysCount} ngày`
+                    : `Warning: Trip shortened from ${oldDaysCount} to ${newDaysCount} days`}
+                </span>
+              </p>
+              <p className="text-[11px] text-rose-700 leading-relaxed pl-5">
+                {affectedActivitiesCount > 0
+                  ? (isVi
+                      ? `Có ${affectedActivitiesCount} hoạt động ở các ngày vượt quá sẽ được tự động chuyển về ngày cuối cùng (Ngày ${newDaysCount}) để đảm bảo bạn không bị mất lịch trình hay chi phí đã lên.`
+                      : `${affectedActivitiesCount} activities from truncated days will be automatically consolidated into the last day (Day ${newDaysCount}) so no plans or expenses are lost.`)
+                  : (isVi
+                      ? 'Lịch trình chuyến đi sẽ được điều chỉnh về số ngày mới.'
+                      : 'Trip schedule will be adjusted to the new duration.')}
+              </p>
+            </div>
+          )}
 
           {/* If duration increased: interactive in-modal option instead of browser confirm */}
           {isDurationIncreased && (

@@ -2,6 +2,10 @@ import React, { useState } from 'react';
 import { X, Upload, Camera, Sparkles, Loader2, Compass, Calendar, MapPin, ArrowLeft, AlertCircle } from 'lucide-react';
 import { Trip, DayPlan, ActivityItem } from '../types';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
+import { getLocalDateString } from '../utils/dateUtils';
+import { compressImage } from '../utils/imageUtils';
+import { buildDefaultAvatar } from '../utils/avatarSyncUtils';
 
 interface NewTripModalProps {
   isOpen: boolean;
@@ -24,6 +28,7 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
   onCreateTrip,
 }) => {
   const { lang, t } = useLanguage();
+  const { userProfile } = useAuth();
   const isVi = lang === 'vi';
 
   const [title, setTitle] = useState('');
@@ -76,29 +81,35 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
     return Math.max(1, Math.ceil(diff / (1000 * 60 * 60 * 24)) + 1);
   };
 
-  const effectiveStartDate = startDate || new Date().toISOString().split('T')[0];
-  const effectiveEndDate = endDate || new Date(Date.now() + 86400000 * 2).toISOString().split('T')[0];
+  const effectiveStartDate = startDate || getLocalDateString();
+  const effectiveEndDate = endDate || getLocalDateString(Date.now() + 86400000 * 2);
   const calculatedDaysCount = getDaysCount(effectiveStartDate, effectiveEndDate);
 
   // Handle local image file upload from mobile or desktop
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 5 * 1024 * 1024) {
-      setUploadError(isVi ? 'Kích thước ảnh tối đa là 5MB.' : 'Image size must be less than 5MB.');
+    if (!file.type.startsWith('image/')) {
+      setUploadError(isVi ? 'Vui lòng chọn tệp hình ảnh hợp lệ (PNG, JPG, WEBP).' : 'Please select an image file.');
       return;
     }
     setUploadError('');
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const dataUrl = event.target?.result as string;
-      if (dataUrl) {
-        setCoverImage(dataUrl);
-      }
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressedDataUrl = await compressImage(file, 1400, 0.75);
+      setCoverImage(compressedDataUrl);
+    } catch (err) {
+      console.warn('Cover compression error, falling back:', err);
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const dataUrl = event.target?.result as string;
+        if (dataUrl) {
+          setCoverImage(dataUrl);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   // Generate completely empty days without any prefilled activities
@@ -144,18 +155,29 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
       startDate: effectiveStartDate,
       endDate: effectiveEndDate,
       coverImage: coverImage || COVER_PRESETS[0].url,
-      budgetTotal: budgetTotal ? parseFloat(budgetTotal) : 500,
+      budgetTotal: (() => {
+        if (!budgetTotal) return 500;
+        const parsed = parseFloat(budgetTotal);
+        if (isNaN(parsed) || parsed < 0) return 500;
+        return Math.min(parsed, 100000000000);
+      })(),
       currency,
+      ...(userProfile?.id ? { creatorId: userProfile.id } : {}),
+      ...(userProfile?.displayName ? { creatorName: userProfile.displayName } : {}),
       members: wantSuggestedItinerary
         ? [
             {
               id: 'm1',
-              name: isVi ? 'Bạn (Trưởng nhóm)' : 'Alex Rivera (You)',
-              avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=150&q=80',
+              ...(userProfile?.id ? { uid: userProfile.id } : {}),
+              name: userProfile?.displayName || (isVi ? 'Bạn (Trưởng nhóm)' : 'Alex Rivera (You)'),
+              ...(userProfile?.email ? { email: userProfile.email } : {}),
+              ...(userProfile?.phone ? { phone: userProfile.phone } : {}),
+              avatar: userProfile?.avatar || buildDefaultAvatar(userProfile?.displayName || 'TripMate'),
+              ...(userProfile?.id ? { isRegistered: true } : {}),
             },
           ]
         : [],
-      fundHolderId: wantSuggestedItinerary ? 'm1' : undefined,
+      ...(wantSuggestedItinerary ? { fundHolderId: 'm1' } : {}),
       days: finalDays,
       expenses: [],
       packingList: [],
@@ -201,8 +223,8 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
               </h4>
               <p className="text-xs text-slate-500 max-w-sm mx-auto">
                 {isVi
-                  ? `Bạn có muốn mở Kiến trúc sư AI để tạo lịch trình cho ${destination} (${calculatedDaysCount} ngày) không?`
-                  : `Open AI Itinerary Architect to create a custom plan for ${destination} (${calculatedDaysCount} days)?`}
+                  ? `Bạn có muốn mở Lịch trình AI để tạo lịch trình cho ${destination} (${calculatedDaysCount} ngày) không?`
+                  : `Open AI Itinerary to create a custom plan for ${destination} (${calculatedDaysCount} days)?`}
               </p>
             </div>
 
@@ -312,9 +334,22 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
                 <label className="block text-xs font-semibold text-slate-700 mb-1">{t('newTrip.fieldBudget')}</label>
                 <input
                   type="number"
+                  min="0"
+                  max="100000000000"
+                  step="any"
                   placeholder={t('newTrip.budgetPlaceholder')}
                   value={budgetTotal}
-                  onChange={(e) => setBudgetTotal(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === '') {
+                      setBudgetTotal('');
+                      return;
+                    }
+                    const num = parseFloat(val);
+                    if (!isNaN(num) && num >= 0 && num <= 100000000000) {
+                      setBudgetTotal(val);
+                    }
+                  }}
                   className="w-full text-xs p-2.5 sm:p-3 rounded-xl border border-slate-200 bg-slate-50/40 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden transition-all"
                 />
               </div>

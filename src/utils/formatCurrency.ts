@@ -1,18 +1,18 @@
 export function formatMoney(amount: number, currency: string = 'VND', lang: 'en' | 'vi' = 'vi'): string {
-  if (!amount && amount !== 0) return '0 ₫';
+  const num = Number(amount) || 0;
+  const curr = (currency || 'VND').toUpperCase();
 
-  if (lang === 'vi') {
-    // If amount is small (e.g. previously configured in USD < 10000), convert to VND equivalent for realistic display
-    let vndValue = amount;
-    if (currency === 'USD' && amount < 10000) {
-      vndValue = amount * 25000;
-    }
-    return `${Math.round(vndValue).toLocaleString('vi-VN')} ₫`;
-  } else {
-    // English mode
-    if (currency === 'VND' || (currency !== 'USD' && amount > 10000)) {
-      return `${Math.round(amount).toLocaleString('en-US')} VND`;
-    }
-    return `$${amount.toLocaleString('en-US')}`;
+  if (curr === 'VND') {
+    return `${Math.round(num).toLocaleString(lang === 'vi' ? 'vi-VN' : 'en-US')} ₫`;
   }
+  if (curr === 'USD') {
+    return `$${num.toLocaleString('en-US', { minimumFractionDigits: num % 1 !== 0 ? 2 : 0, maximumFractionDigits: 2 })}`;
+  }
+  if (curr === 'EUR') {
+    return `€${num.toLocaleString('en-US')}`;
+  }
+  if (curr === 'JPY') {
+    return `¥${Math.round(num).toLocaleString('en-US')}`;
+  }
+  return `${num.toLocaleString(lang === 'vi' ? 'vi-VN' : 'en-US')} ${curr}`;
 }
