@@ -1,16 +1,41 @@
-import React, { useState } from 'react';
-import { X, Upload, Camera, Sparkles, Loader2, Compass, Calendar, MapPin, ArrowLeft, AlertCircle } from 'lucide-react';
-import { Trip, DayPlan, ActivityItem } from '../types';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+  X,
+  Upload,
+  Camera,
+  Sparkles,
+  AlertCircle,
+  Search,
+  Check,
+  Mail,
+  Loader2,
+  ChevronDown,
+} from 'lucide-react';
+import { collection, getDocs } from 'firebase/firestore';
+import { Trip, ItineraryDay, TripMember, UserProfile } from '../types';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
+import { db } from '../firebase';
 import { getLocalDateString } from '../utils/dateUtils';
 import { compressImage } from '../utils/imageUtils';
 import { buildDefaultAvatar } from '../utils/avatarSyncUtils';
+import { normalizeText } from '../utils/itineraryPlannerUtils';
+import { InterestsComboSelect } from './InterestsComboSelect';
 
 interface NewTripModalProps {
   isOpen: boolean;
   onClose: () => void;
   onCreateTrip: (newTrip: Trip, openAiArchitect?: boolean) => void;
+}
+
+interface PendingInviteDraft {
+  key: string;
+  uid?: string;
+  name: string;
+  email?: string;
+  phone?: string;
+  avatar: string;
+  isRegistered: boolean;
 }
 
 const COVER_PRESETS = [
@@ -28,7 +53,7 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
   onCreateTrip,
 }) => {
   const { lang, t } = useLanguage();
-  const { userProfile } = useAuth();
+  const { userProfile, searchRegisteredUser } = useAuth();
   const isVi = lang === 'vi';
 
   const [title, setTitle] = useState('');
@@ -41,8 +66,23 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
   const [coverImage, setCoverImage] = useState(COVER_PRESETS[0].url);
   const [uploadError, setUploadError] = useState('');
 
-  // Prompt step state: asking user whether they want a suggested itinerary
-  const [isPromptingItinerary, setIsPromptingItinerary] = useState(false);
+  // Interests combo selectbox state
+  const [selectedInterests, setSelectedInterests] = useState<string[]>([]);
+
+  // Invite members combo selectbox state
+  const [registeredUsers, setRegisteredUsers] = useState<UserProfile[]>([]);
+  const [isLoadingUsers, setIsLoadingUsers] = useState(false);
+  const [isMemberDropdownOpen, setIsMemberDropdownOpen] = useState(false);
+  const [isMemberInputFocused, setIsMemberInputFocused] = useState(false);
+  const [memberSearchTerm, setMemberSearchTerm] = useState('');
+  const [invitedMembers, setInvitedMembers] = useState<PendingInviteDraft[]>([]);
+  const [isSearchingExactUser, setIsSearchingExactUser] = useState(false);
+
+  const memberDropdownRef = useRef<HTMLDivElement>(null);
+  const memberSearchInputRef = useRef<HTMLInputElement>(null);
+
+  // Inline checkbox: open AI itinerary after creating trip if checked
+  const [wantSuggestedItinerary, setWantSuggestedItinerary] = useState(false);
 
   // Helper to reset all form inputs to pristine state
   const resetForm = () => {
@@ -55,15 +95,139 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
     setCurrency('USD');
     setCoverImage(COVER_PRESETS[0].url);
     setUploadError('');
-    setIsPromptingItinerary(false);
+    setSelectedInterests([]);
+    setInvitedMembers([]);
+    setMemberSearchTerm('');
+    setIsMemberDropdownOpen(false);
+    setIsMemberInputFocused(false);
+    setWantSuggestedItinerary(false);
   };
 
-  // Reset form whenever modal opens or closes
-  React.useEffect(() => {
-    if (isOpen) {
-      resetForm();
-    }
-  }, [isOpen]);
+  // Reset form and fetch registered TripMate accounts whenever modal opens
+  useEffect(() => {
+    if (!isOpen) return;
+    resetForm();
+
+    let cancelled = false;
+    const loadRegisteredUsers = async () => {
+      setIsLoadingUsers(true);
+      try {
+        const snap = await getDocs(collection(db, 'users'));
+        if (cancelled) return;
+        const currentEmail = (userProfile?.email || '').trim().toLowerCase();
+        const currentPhone = (userProfile?.phone || '').replace(/[\s\-().]/g, '').trim();
+        const seenKeys = new Set<string>();
+        const list: UserProfile[] = [];
+
+        snap.forEach((d) => {
+          const data = d.data() as Omit<UserProfile, 'id'>;
+          const uid = d.id;
+          const email = (data.email || '').trim().toLowerCase();
+          const phone = (data.phone || '').replace(/[\s\-().]/g, '').trim();
+
+          if (userProfile?.id && uid === userProfile.id) return;
+          if (currentEmail && email && email === currentEmail) return;
+          if (currentPhone && phone && phone === currentPhone) return;
+          if (!data.displayName && !email) return;
+
+          const dedupeKey = email || uid;
+          if (seenKeys.has(dedupeKey)) return;
+          seenKeys.add(dedupeKey);
+
+          list.push({
+            ...data,
+            id: uid,
+          });
+        });
+
+        list.sort((a, b) =>
+          (a.displayName || a.email || '').localeCompare(b.displayName || b.email || '', 'vi')
+        );
+        setRegisteredUsers(list);
+      } catch (err) {
+        console.warn('Unable to load TripMate users list:', err);
+      } finally {
+        if (!cancelled) setIsLoadingUsers(false);
+      }
+    };
+
+    loadRegisteredUsers();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, userProfile?.id, userProfile?.email, userProfile?.phone]);
+
+  // Close invite member dropdown on outside click or Escape
+  useEffect(() => {
+    const handleOutside = (e: MouseEvent) => {
+      if (memberDropdownRef.current && !memberDropdownRef.current.contains(e.target as Node)) {
+        setIsMemberDropdownOpen(false);
+        setIsMemberInputFocused(false);
+      }
+    };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsMemberDropdownOpen(false);
+        setIsMemberInputFocused(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('keydown', handleEsc);
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('keydown', handleEsc);
+    };
+  }, []);
+
+  // Exact email/phone fallback search when typing in invite member box
+  useEffect(() => {
+    const trimmed = memberSearchTerm.trim();
+    if (trimmed.length < 3) return;
+    const looksLikeContact = trimmed.includes('@') || /^[+0-9\s\-()]{6,}$/.test(trimmed);
+    if (!looksLikeContact) return;
+
+    const alreadyListed = registeredUsers.some(
+      (u) =>
+        (u.email || '').toLowerCase() === trimmed.toLowerCase() ||
+        (u.phone || '').replace(/[\s\-().]/g, '') === trimmed.replace(/[\s\-().]/g, '')
+    );
+    if (alreadyListed) return;
+
+    const timer = setTimeout(async () => {
+      setIsSearchingExactUser(true);
+      try {
+        const found = await searchRegisteredUser(trimmed);
+        if (found && found.id !== userProfile?.id) {
+          setRegisteredUsers((prev) =>
+            prev.some((u) => u.id === found.id) ? prev : [found, ...prev]
+          );
+        }
+      } catch (err) {
+        console.warn('Exact user search error:', err);
+      } finally {
+        setIsSearchingExactUser(false);
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [memberSearchTerm, registeredUsers, searchRegisteredUser, userProfile?.id]);
+
+  const filteredRegisteredUsers = useMemo(() => {
+    const rawLower = memberSearchTerm.trim().toLowerCase();
+    const cleanPhoneQuery = rawLower.replace(/[\s\-().]/g, '');
+    const q = normalizeText(memberSearchTerm);
+    if (!rawLower) return [];
+    return registeredUsers.filter((u) => {
+      const emailLower = (u.email || '').toLowerCase();
+      const phoneClean = (u.phone || '').replace(/[\s\-().]/g, '');
+      const nameNorm = normalizeText(u.displayName || '');
+      return (
+        emailLower.includes(rawLower) ||
+        (phoneClean && cleanPhoneQuery && phoneClean.includes(cleanPhoneQuery)) ||
+        (q && nameNorm.includes(q))
+      );
+    });
+  }, [registeredUsers, memberSearchTerm]);
 
   const handleModalClose = () => {
     resetForm();
@@ -83,7 +247,32 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
 
   const effectiveStartDate = startDate || getLocalDateString();
   const effectiveEndDate = endDate || getLocalDateString(Date.now() + 86400000 * 2);
-  const calculatedDaysCount = getDaysCount(effectiveStartDate, effectiveEndDate);
+
+  // Toggle selecting/deselecting a registered user to invite
+  const handleToggleRegisteredInvitee = (user: UserProfile) => {
+    const draftKey = `uid:${user.id}`;
+    const exists = invitedMembers.some((m) => m.key === draftKey || (m.uid && m.uid === user.id));
+    if (exists) {
+      setInvitedMembers((prev) => prev.filter((m) => m.key !== draftKey && m.uid !== user.id));
+    } else {
+      setInvitedMembers((prev) => [
+        ...prev,
+        {
+          key: draftKey,
+          uid: user.id,
+          name: user.displayName || user.email.split('@')[0],
+          email: user.email,
+          phone: user.phone,
+          avatar: user.avatar || buildDefaultAvatar(user.displayName || user.email),
+          isRegistered: true,
+        },
+      ]);
+    }
+  };
+
+  const handleRemoveInvitee = (draftKey: string) => {
+    setInvitedMembers((prev) => prev.filter((m) => m.key !== draftKey));
+  };
 
   // Handle local image file upload from mobile or desktop
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -113,7 +302,7 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
   };
 
   // Generate completely empty days without any prefilled activities
-  const generateEmptyDays = (startStr: string, endStr: string): DayPlan[] => {
+  const generateEmptyDays = (startStr: string, endStr: string): ItineraryDay[] => {
     const daysCount = getDaysCount(startStr, endStr);
     const s = new Date(startStr);
 
@@ -136,19 +325,67 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
     });
   };
 
-  // Step 1: Form submit -> Do not create yet, ask user if they want a suggested itinerary
+  // Create trip directly: open AI Itinerary only if user checked "Tạo lịch trình gợi ý"
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !destination.trim()) return;
-    setIsPromptingItinerary(true);
+    setIsMemberDropdownOpen(false);
+    handleConfirmCreate(wantSuggestedItinerary);
   };
 
-  // Step 2: User responds to the itinerary prompt
-  const handleConfirmCreate = (wantSuggestedItinerary: boolean) => {
+  const handleConfirmCreate = (openAiItinerary: boolean) => {
     const finalDays = generateEmptyDays(effectiveStartDate, effectiveEndDate);
+    const nowTs = Date.now();
+
+    const shouldIncludeCreator = Boolean(
+      userProfile?.id || openAiItinerary || invitedMembers.length > 0
+    );
+
+    const creatorMember: TripMember = {
+      id: 'm1',
+      ...(userProfile?.id ? { uid: userProfile.id } : {}),
+      name: userProfile?.displayName || (isVi ? 'Bạn (Trưởng nhóm)' : 'Alex Rivera (You)'),
+      ...(userProfile?.email ? { email: userProfile.email } : {}),
+      ...(userProfile?.phone ? { phone: userProfile.phone } : {}),
+      avatar: userProfile?.avatar || buildDefaultAvatar(userProfile?.displayName || 'TripMate'),
+      ...(userProfile?.id ? { isRegistered: true, invitationStatus: 'accepted' as const } : {}),
+      contributedAmount: 0,
+    };
+
+    const invitedTripMembers: TripMember[] = invitedMembers.map((inv, idx) => {
+      const memberId = `m-${nowTs}-${idx + 1}`;
+      if (inv.isRegistered && inv.uid) {
+        return {
+          id: memberId,
+          name: inv.name,
+          avatar: inv.avatar || buildDefaultAvatar(inv.name),
+          ...(inv.email ? { email: inv.email } : {}),
+          ...(inv.phone ? { phone: inv.phone } : {}),
+          uid: inv.uid,
+          isRegistered: true,
+          invitationStatus: 'pending',
+          invitationId: `inv-${nowTs}-${idx + 1}`,
+          contributedAmount: 0,
+        };
+      }
+      return {
+        id: memberId,
+        name: inv.name,
+        avatar: inv.avatar || buildDefaultAvatar(inv.name),
+        ...(inv.email ? { email: inv.email } : {}),
+        ...(inv.phone ? { phone: inv.phone } : {}),
+        isRegistered: false,
+        invitationStatus: 'offline',
+        contributedAmount: 0,
+      };
+    });
+
+    const finalMembers = shouldIncludeCreator
+      ? [creatorMember, ...invitedTripMembers]
+      : [];
 
     const newTrip: Trip = {
-      id: `trip-${Date.now()}`,
+      id: `trip-${nowTs}`,
       title: title.trim(),
       destination: destination.trim(),
       country: country.trim() || destination.trim(),
@@ -162,30 +399,20 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
         return Math.min(parsed, 100000000000);
       })(),
       currency,
+      ...(selectedInterests.length > 0 ? { interests: selectedInterests } : {}),
       ...(userProfile?.id ? { creatorId: userProfile.id } : {}),
       ...(userProfile?.displayName ? { creatorName: userProfile.displayName } : {}),
-      members: wantSuggestedItinerary
-        ? [
-            {
-              id: 'm1',
-              ...(userProfile?.id ? { uid: userProfile.id } : {}),
-              name: userProfile?.displayName || (isVi ? 'Bạn (Trưởng nhóm)' : 'Alex Rivera (You)'),
-              ...(userProfile?.email ? { email: userProfile.email } : {}),
-              ...(userProfile?.phone ? { phone: userProfile.phone } : {}),
-              avatar: userProfile?.avatar || buildDefaultAvatar(userProfile?.displayName || 'TripMate'),
-              ...(userProfile?.id ? { isRegistered: true } : {}),
-            },
-          ]
-        : [],
-      ...(wantSuggestedItinerary ? { fundHolderId: 'm1' } : {}),
+      ...(userProfile?.id ? { memberUids: [userProfile.id] } : {}),
+      members: finalMembers,
+      ...(finalMembers.length > 0 ? { fundHolderId: 'm1' } : {}),
       days: finalDays,
       expenses: [],
       packingList: [],
       documents: [],
     };
 
-    // If user clicks "Đồng ý", pass openAiArchitect: true so the AI Itinerary Architect modal opens
-    onCreateTrip(newTrip, wantSuggestedItinerary);
+    // If user checked "Tạo lịch trình gợi ý", pass openAiArchitect: true so the AI Itinerary modal opens
+    onCreateTrip(newTrip, openAiItinerary);
     resetForm();
     onClose();
   };
@@ -197,11 +424,10 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
         {/* Header */}
         <div className="px-4 py-3 sm:px-6 sm:py-3.5 bg-slate-900 text-white flex items-center justify-between shrink-0">
           <h3 className="font-display font-bold text-sm sm:text-base">
-            {isPromptingItinerary
-              ? (isVi ? 'Gợi ý lịch trình' : 'Suggested Itinerary')
-              : t('newTrip.modalTitle')}
+            {t('newTrip.modalTitle')}
           </h3>
           <button
+            type="button"
             onClick={handleModalClose}
             className="p-1.5 rounded-xl hover:bg-white/10 text-slate-300 transition-colors cursor-pointer"
           >
@@ -210,47 +436,7 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
         </div>
 
         {/* Content Area */}
-        {isPromptingItinerary ? (
-          /* Step 2: Prompt asking whether user wants a suggested itinerary */
-          <div className="p-5 sm:p-6 space-y-4 text-center">
-            <div className="w-12 h-12 rounded-2xl bg-teal-50 border border-teal-200/80 text-teal-600 flex items-center justify-center mx-auto shadow-2xs">
-              <Sparkles className="w-6 h-6 text-teal-600" />
-            </div>
-
-            <div className="space-y-1">
-              <h4 className="font-display font-bold text-slate-900 text-base">
-                {isVi ? 'Tạo lịch trình gợi ý?' : 'Generate suggested itinerary?'}
-              </h4>
-              <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                {isVi
-                  ? `Bạn có muốn mở Lịch trình AI để tạo lịch trình cho ${destination} (${calculatedDaysCount} ngày) không?`
-                  : `Open AI Itinerary to create a custom plan for ${destination} (${calculatedDaysCount} days)?`}
-              </p>
-            </div>
-
-            {/* Compact 2-button choice */}
-            <div className="flex items-center gap-2.5 pt-2 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => handleConfirmCreate(false)}
-                className="flex-1 py-2.5 px-3 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 font-semibold text-xs rounded-xl transition-colors cursor-pointer min-h-[38px]"
-              >
-                {isVi ? 'Không' : 'No'}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleConfirmCreate(true)}
-                className="flex-1 py-2.5 px-3 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer min-h-[38px]"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-amber-200" />
-                <span>{isVi ? 'Đồng ý' : 'Yes'}</span>
-              </button>
-            </div>
-          </div>
-        ) : (
-          /* Step 1: Standard Trip Details Form */
-          <form onSubmit={handleFormSubmit} className="overflow-y-auto flex-1 p-4 sm:p-6 space-y-3.5">
+        <form onSubmit={handleFormSubmit} className="overflow-y-auto flex-1 p-4 sm:p-6 space-y-3.5">
             {uploadError && (
               <div className="p-2.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0" />
@@ -371,6 +557,294 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
               </div>
             </div>
 
+            {/* Sở thích - Combo Selectbox */}
+            <InterestsComboSelect
+              selectedIds={selectedInterests}
+              onChange={setSelectedInterests}
+              isVi={isVi}
+              label={isVi ? 'Sở thích' : 'Interests'}
+              placeholder={isVi ? 'Chọn sở thích chuyến đi...' : 'Select trip interests...'}
+              dropdownId="new-trip-interests"
+            />
+
+            {/* Thành viên (Tất cả nằm gọn trong Combobox) */}
+            <div ref={memberDropdownRef} className="relative space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  htmlFor="new-trip-invite-member-input"
+                  className="block text-xs font-semibold text-slate-700"
+                >
+                  {isVi ? 'Thành viên' : 'Members'}
+                </label>
+                {invitedMembers.length > 0 && (
+                  <span className="text-[11px] font-semibold text-teal-700">
+                    {isVi
+                      ? `Đã chọn ${invitedMembers.length} người`
+                      : `${invitedMembers.length} invited`}
+                  </span>
+                )}
+              </div>
+
+              {/* Combobox Field: Displays selected summary when closed, or direct email/phone search input */}
+              <div
+                onClick={() => {
+                  setIsMemberInputFocused(true);
+                  if (memberSearchTerm.trim().length > 0 || invitedMembers.length > 0) {
+                    setIsMemberDropdownOpen(true);
+                  }
+                  setTimeout(() => memberSearchInputRef.current?.focus(), 0);
+                }}
+                className={`relative flex items-center rounded-xl border transition-all ${
+                  isMemberDropdownOpen || isMemberInputFocused
+                    ? 'bg-white border-teal-500 ring-2 ring-teal-500/20'
+                    : 'bg-slate-50/40 border-slate-200 hover:bg-white hover:border-slate-300'
+                }`}
+              >
+                <Search className="w-3.5 h-3.5 text-teal-600 ml-3 shrink-0 pointer-events-none" />
+
+                {invitedMembers.length > 0 && !isMemberInputFocused && !memberSearchTerm ? (
+                  <div className="flex-1 min-w-0 px-2.5 py-2.5 sm:py-3 text-xs font-medium text-slate-800 truncate cursor-text">
+                    {invitedMembers.length <= 2
+                      ? invitedMembers.map((m) => m.name).join(', ')
+                      : `${invitedMembers.slice(0, 2).map((m) => m.name).join(', ')} (+${invitedMembers.length - 2})`}
+                  </div>
+                ) : (
+                  <input
+                    id="new-trip-invite-member-input"
+                    ref={memberSearchInputRef}
+                    type="text"
+                    role="combobox"
+                    aria-expanded={
+                      isMemberDropdownOpen &&
+                      (memberSearchTerm.trim().length > 0 || invitedMembers.length > 0)
+                    }
+                    aria-controls="new-trip-invite-members-listbox"
+                    aria-autocomplete="list"
+                    value={memberSearchTerm}
+                    onFocus={() => {
+                      setIsMemberInputFocused(true);
+                      if (memberSearchTerm.trim().length > 0 || invitedMembers.length > 0) {
+                        setIsMemberDropdownOpen(true);
+                      }
+                    }}
+                    onChange={(e) => {
+                      const nextVal = e.target.value;
+                      setMemberSearchTerm(nextVal);
+                      setIsMemberDropdownOpen(nextVal.trim().length > 0 || invitedMembers.length > 0);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                      }
+                    }}
+                    placeholder={
+                      invitedMembers.length > 0
+                        ? isVi
+                          ? 'Nhập thêm email hoặc SĐT để tìm...'
+                          : 'Enter another email or phone...'
+                        : isVi
+                        ? 'Nhập email hoặc số điện thoại để gợi ý tích chọn...'
+                        : 'Enter email or phone to see suggestions...'
+                    }
+                    className="w-full min-w-0 px-2.5 py-2.5 sm:py-3 text-xs bg-transparent text-slate-800 placeholder:text-slate-400 focus:outline-hidden"
+                  />
+                )}
+
+                {memberSearchTerm ? (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMemberSearchTerm('');
+                      if (invitedMembers.length === 0) {
+                        setIsMemberDropdownOpen(false);
+                      }
+                    }}
+                    aria-label={isVi ? 'Xóa tìm kiếm thành viên' : 'Clear member search'}
+                    className="p-1.5 mr-1.5 text-slate-400 hover:text-slate-600 cursor-pointer shrink-0"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                ) : invitedMembers.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const nextOpen = !isMemberDropdownOpen;
+                      setIsMemberDropdownOpen(nextOpen);
+                      setIsMemberInputFocused(nextOpen);
+                      if (nextOpen) {
+                        setTimeout(() => memberSearchInputRef.current?.focus(), 0);
+                      }
+                    }}
+                    aria-label={isVi ? 'Xem thành viên đã chọn' : 'View selected members'}
+                    className="p-1.5 mr-1.5 text-slate-400 hover:text-teal-700 cursor-pointer shrink-0"
+                  >
+                    <ChevronDown
+                      className={`w-4 h-4 transition-transform duration-150 ${
+                        isMemberDropdownOpen ? 'rotate-180 text-teal-600' : ''
+                      }`}
+                    />
+                  </button>
+                ) : null}
+              </div>
+
+              {/* Suggestions & Selected Members Dropdown (strictly inside Combobox, never rendered outside) */}
+              {isMemberDropdownOpen &&
+                (memberSearchTerm.trim().length > 0 || invitedMembers.length > 0) && (
+                  <div
+                    id="new-trip-invite-members-listbox"
+                    role="listbox"
+                    aria-multiselectable="true"
+                    className="absolute left-0 right-0 top-full mt-1.5 z-30 bg-white border border-slate-200 rounded-2xl shadow-xl overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150"
+                  >
+                    <div className="max-h-56 overflow-y-auto divide-y divide-slate-100/80">
+                      {/* Matching Suggestions when typing email or phone */}
+                      {memberSearchTerm.trim().length > 0 && (
+                        <>
+                          {isLoadingUsers || isSearchingExactUser ? (
+                            <div className="px-3 py-4 text-center text-xs text-slate-500 flex items-center justify-center gap-2">
+                              <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-600" />
+                              <span>
+                                {isVi
+                                  ? 'Đang tìm tài khoản phù hợp...'
+                                  : 'Searching matching accounts...'}
+                              </span>
+                            </div>
+                          ) : filteredRegisteredUsers.length === 0 ? (
+                            <div className="px-3 py-3 text-center text-xs text-slate-500">
+                              {isVi
+                                ? 'Không tìm thấy tài khoản TripMate khớp email / SĐT này.'
+                                : 'No TripMate account matches this email / phone.'}
+                            </div>
+                          ) : (
+                            filteredRegisteredUsers.map((account) => {
+                              const isSelected = invitedMembers.some(
+                                (m) => m.uid === account.id || m.key === `uid:${account.id}`
+                              );
+                              return (
+                                <button
+                                  key={account.id}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={isSelected}
+                                  onClick={() => handleToggleRegisteredInvitee(account)}
+                                  className={`w-full flex items-center justify-between gap-2.5 px-3 py-2 text-left text-xs transition-colors cursor-pointer ${
+                                    isSelected
+                                      ? 'bg-teal-50/80 text-teal-900'
+                                      : 'text-slate-700 hover:bg-slate-50'
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                    <img
+                                      src={
+                                        account.avatar ||
+                                        buildDefaultAvatar(account.displayName || account.email)
+                                      }
+                                      alt={account.displayName}
+                                      className="w-7 h-7 rounded-full object-cover border border-slate-200 shrink-0"
+                                    />
+                                    <div className="min-w-0 flex-1">
+                                      <div className="font-semibold text-slate-800 truncate flex items-center gap-1.5">
+                                        <span className="truncate">{account.displayName}</span>
+                                        <span className="text-[10px] font-medium px-1.5 py-0.2 rounded bg-emerald-50 text-emerald-700 border border-emerald-200/70 shrink-0">
+                                          TripMate
+                                        </span>
+                                      </div>
+                                      <div className="text-[11px] text-slate-500 truncate">
+                                        {account.email}
+                                        {account.phone ? ` • ${account.phone}` : ''}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <span
+                                    className={`w-4 h-4 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
+                                      isSelected
+                                        ? 'bg-teal-600 border-teal-600 text-white'
+                                        : 'border-slate-300 bg-white'
+                                    }`}
+                                  >
+                                    {isSelected && <Check className="w-3 h-3 stroke-[2.5]" />}
+                                  </span>
+                                </button>
+                              );
+                            })
+                          )}
+                        </>
+                      )}
+
+                      {/* Already Checked / Selected Members kept inside Combobox */}
+                      {invitedMembers.length > 0 && memberSearchTerm.trim().length === 0 && (
+                        <>
+                          <div className="px-3 py-1.5 bg-slate-50/90 text-[11px] font-semibold text-slate-500">
+                            {isVi
+                              ? `Thành viên đã chọn (${invitedMembers.length})`
+                              : `Selected members (${invitedMembers.length})`}
+                          </div>
+                          {invitedMembers.map((member) => (
+                            <button
+                              key={member.key}
+                              type="button"
+                              role="option"
+                              aria-selected={true}
+                              onClick={() => handleRemoveInvitee(member.key)}
+                              className="w-full flex items-center justify-between gap-2.5 px-3 py-2 text-left text-xs bg-teal-50/60 hover:bg-teal-50 transition-colors cursor-pointer"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                <img
+                                  src={member.avatar}
+                                  alt={member.name}
+                                  className="w-7 h-7 rounded-full object-cover border border-teal-200 shrink-0"
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <div className="font-semibold text-slate-800 truncate flex items-center gap-1.5">
+                                    <span className="truncate">{member.name}</span>
+                                    <span
+                                      className={`text-[10px] font-medium px-1.5 py-0.2 rounded shrink-0 ${
+                                        member.isRegistered
+                                          ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                                          : 'bg-slate-100 text-slate-600 border border-slate-200'
+                                      }`}
+                                    >
+                                      {member.isRegistered
+                                        ? isVi
+                                          ? 'Mời qua app'
+                                          : 'App invite'
+                                        : isVi
+                                        ? 'Ngoại tuyến'
+                                        : 'Offline'}
+                                    </span>
+                                  </div>
+                                  {(member.email || member.phone) && (
+                                    <div className="text-[11px] text-slate-500 truncate">
+                                      {member.email || member.phone}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                              <span className="w-4 h-4 rounded-md border bg-teal-600 border-teal-600 text-white flex items-center justify-center shrink-0">
+                                <Check className="w-3 h-3 stroke-[2.5]" />
+                              </span>
+                            </button>
+                          ))}
+                        </>
+                      )}
+                    </div>
+
+                    <div className="px-3 py-2.5 bg-slate-50 border-t border-slate-100">
+                      <div className="text-[11px] text-slate-600 flex items-start gap-1.5 leading-snug">
+                        <Mail className="w-3.5 h-3.5 text-teal-600 shrink-0 mt-0.5" />
+                        <span>
+                          {isVi
+                            ? 'Tài khoản đã tích chọn sẽ nhận lời mời qua app'
+                            : 'Checked accounts receive an in-app invitation'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+            </div>
+
             {/* Photo Upload */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
@@ -408,7 +882,29 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
               )}
             </div>
 
-            {/* Action Buttons: Next to prompt */}
+            {/* Suggested AI Itinerary Checkbox */}
+            <label
+              htmlFor="new-trip-suggest-ai-checkbox"
+              className={`flex items-center gap-2.5 p-3 rounded-xl border transition-colors cursor-pointer select-none ${
+                wantSuggestedItinerary
+                  ? 'bg-teal-50/70 border-teal-300'
+                  : 'bg-slate-50/70 border-slate-200 hover:bg-slate-50'
+              }`}
+            >
+              <input
+                id="new-trip-suggest-ai-checkbox"
+                type="checkbox"
+                checked={wantSuggestedItinerary}
+                onChange={(e) => setWantSuggestedItinerary(e.target.checked)}
+                className="w-4 h-4 rounded-md border-slate-300 text-teal-600 focus:ring-teal-500 cursor-pointer shrink-0 accent-teal-600"
+              />
+              <div className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                <span>{isVi ? 'Tạo lịch trình gợi ý' : 'Generate suggested itinerary'}</span>
+              </div>
+            </label>
+
+            {/* Action Buttons */}
             <div className="flex justify-end gap-2 pt-3 border-t border-slate-100 shrink-0">
               <button
                 type="button"
@@ -425,7 +921,6 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
               </button>
             </div>
           </form>
-        )}
 
       </div>
     </div>

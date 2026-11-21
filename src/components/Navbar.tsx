@@ -9,6 +9,7 @@ import { Trip } from '../types';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { ForgotPasswordFlow } from './ForgotPasswordFlow';
+import { PWAInstallButton } from './PWAInstallButton';
 import { compressAvatarImage } from '../utils/imageUtils';
 
 interface NavbarProps {
@@ -455,17 +456,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-md text-[10px] font-bold">
                           ✓ {isVi ? 'Tài khoản hoạt động' : 'Active Account'}
                         </span>
-                        <label className="inline-flex items-center gap-1 px-2 py-0.5 bg-white hover:bg-teal-100 text-teal-800 border border-teal-200 rounded-md text-[10px] font-bold cursor-pointer transition-colors">
-                          <Camera className="w-2.5 h-2.5" />
-                          <span>{isUploadingAvatar ? (isVi ? 'Đang lưu...' : 'Saving...') : (isVi ? 'Đổi ảnh' : 'Change photo')}</span>
-                          <input
-                            type="file"
-                            accept="image/*"
-                            disabled={isUploadingAvatar}
-                            onChange={handleMobileAvatarChange}
-                            className="hidden"
-                          />
-                        </label>
                       </div>
                     </div>
                   </>
@@ -499,31 +489,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* VIEW 1: MAIN ACCOUNT & QUICK ACTIONS */}
             {mobileSheetView === 'main' && (
               <div className="space-y-1.5">
-                {/* Inline Change Password (brought directly outside when tapping Avatar) */}
-                {userProfile && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSheetErrorMsg(null);
-                      setSheetSuccessMsg(null);
-                      setMobileSheetView('change-password');
-                    }}
-                    className="w-full flex items-center gap-3 p-3 rounded-2xl bg-teal-50/50 hover:bg-teal-50 active:bg-teal-100/70 transition-colors text-left cursor-pointer border border-teal-200/70"
-                  >
-                    <div className="w-10 h-10 rounded-xl bg-teal-600 text-white flex items-center justify-center shrink-0 shadow-xs">
-                      <KeyRound className="w-5 h-5" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs font-bold text-slate-900">{isVi ? 'Đổi mật khẩu' : 'Change Password'}</div>
-                      <div className="text-[11px] text-slate-500 truncate">
-                        {isVi ? 'Đổi mật khẩu hoặc khôi phục khi quên' : 'Update or reset password'}
-                      </div>
-                    </div>
-                    <ChevronRight className="w-4 h-4 text-teal-600 shrink-0" />
-                  </button>
-                )}
-
-                {/* New Trip */}
+                {/* 2. New Trip */}
                 <button
                   type="button"
                   onClick={() => {
@@ -539,14 +505,11 @@ export const Navbar: React.FC<NavbarProps> = ({
                     <div className="text-xs font-bold text-slate-900">
                       {isVi ? 'Tạo chuyến đi mới' : 'Create New Trip'}
                     </div>
-                    <div className="text-[11px] text-slate-500">
-                      {isVi ? 'Khởi tạo hành trình du lịch mới' : 'Start a brand new adventure'}
-                    </div>
                   </div>
                   <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
                 </button>
 
-                {/* AI Assistant Chat */}
+                {/* 3. AI Assistant Chat */}
                 {activeTrip && (
                   <button
                     type="button"
@@ -574,7 +537,10 @@ export const Navbar: React.FC<NavbarProps> = ({
                   </button>
                 )}
 
-                {/* Language Switcher */}
+                {/* 4. Add to Home Screen (iOS, Android, Windows) for logged-in users */}
+                {userProfile && <PWAInstallButton variant="sheet-row" />}
+
+                {/* 5. Language Switcher */}
                 <div className="flex items-center justify-between gap-2 p-3 rounded-2xl bg-slate-50/70 border border-slate-200/60">
                   <div className="flex items-center gap-2.5 min-w-0">
                     <div className="w-9 h-9 rounded-xl bg-white text-slate-600 border border-slate-200 flex items-center justify-center shrink-0 shadow-2xs">
@@ -611,7 +577,31 @@ export const Navbar: React.FC<NavbarProps> = ({
                   </div>
                 </div>
 
-                {/* Sign Out (if logged in) */}
+                {/* 6. Change Password (directly above Sign Out) */}
+                {userProfile && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSheetErrorMsg(null);
+                      setSheetSuccessMsg(null);
+                      setMobileSheetView('change-password');
+                    }}
+                    className="w-full flex items-center gap-3 p-3 rounded-2xl bg-teal-50/50 hover:bg-teal-50 active:bg-teal-100/70 transition-colors text-left cursor-pointer border border-teal-200/70"
+                  >
+                    <div className="w-10 h-10 rounded-xl bg-teal-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                      <KeyRound className="w-5 h-5" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-bold text-slate-900">{isVi ? 'Đổi mật khẩu' : 'Change Password'}</div>
+                      <div className="text-[11px] text-slate-500 truncate">
+                        {isVi ? 'Đổi mật khẩu hoặc khôi phục khi quên' : 'Update or reset password'}
+                      </div>
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-teal-600 shrink-0" />
+                  </button>
+                )}
+
+                {/* 7. Sign Out (if logged in) */}
                 {userProfile && (
                   <button
                     type="button"

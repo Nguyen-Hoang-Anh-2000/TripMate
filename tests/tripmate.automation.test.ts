@@ -28,6 +28,10 @@ import {
   isMemberParticipatingForUser,
   getUserTripsCacheKey,
 } from '../src/utils/tripAccessUtils';
+import {
+  detectInstallPlatform,
+  getInstallGuideContent,
+} from '../src/utils/pwaInstallUtils';
 import type { SavedPlace, Trip, TripInvitation, TripNotification } from '../src/types';
 
 const ROOT_DIR = process.cwd();
@@ -710,6 +714,9 @@ describe('UI Regression & Security Rules Verification', () => {
     assert.ok(!content.includes('hoặc dùng Email / Số điện thoại'));
     assert.ok(!content.includes('Bảo mật bởi Firebase Firestore & Google Cloud'));
     assert.ok(!content.includes('Đăng nhập vào TripMate'));
+    assert.ok(!content.includes('(Demo: 123456)'));
+    const authModal = fs.readFileSync(path.join(ROOT_DIR, 'src/components/AuthModal.tsx'), 'utf8');
+    assert.ok(!authModal.includes('(Demo: 123456)'));
   });
 
   test('TC-UI-02: Mobile Cover Banner chỉ giữ icon 3 chấm dọc, bỏ chữ "Tùy chọn" & bỏ subtitle popup', () => {
@@ -745,6 +752,10 @@ describe('UI Regression & Security Rules Verification', () => {
     assert.ok(!notif.includes('Lời mời chuyến đi và bảo mật két vé'));
     assert.ok(!notif.includes('Khi người tạo chuyến đi thêm bạn bằng email hoặc số điện thoại'));
     assert.ok(!notif.includes('{readItems.length}'));
+    assert.ok(notif.includes("isVi ? 'Đồng ý' : 'Accept'"));
+    assert.ok(!notif.includes('Đồng ý tham gia'));
+    const invModal = fs.readFileSync(path.join(ROOT_DIR, 'src/components/InvitationsModal.tsx'), 'utf8');
+    assert.ok(!invModal.includes('Đồng ý tham gia'));
   });
 
   test('TC-SEC-01: Firestore Rules giữ Default Deny, bất biến email/creatorId, chặn delete user và tách allow get/list cho trips & invitations', () => {
@@ -858,10 +869,17 @@ describe('UI Regression & Security Rules Verification', () => {
 
   test('TC-DEPLOY-01: server.ts dùng import .ts và type-only để chạy trực tiếp bằng node server.ts (Cloud Run)', () => {
     const serverSrc = fs.readFileSync(path.join(ROOT_DIR, 'server.ts'), 'utf8');
+    const viteSrc = fs.readFileSync(path.join(ROOT_DIR, 'vite.config.ts'), 'utf8');
     const plannerSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/utils/itineraryPlannerUtils.ts'), 'utf8');
     assert.ok(serverSrc.includes("from './src/utils/itineraryPlannerUtils.ts'"));
     assert.ok(serverSrc.includes('type RankedPlaceCandidate'));
     assert.ok(plannerSrc.includes("import type { SavedPlace } from '../types.ts'"));
+    assert.ok(serverSrc.includes('hmr: false'));
+    assert.ok(serverSrc.includes('ws: false'));
+    assert.ok(viteSrc.includes('hmr: false'));
+    assert.ok(viteSrc.includes('ws: false'));
+    assert.ok(viteSrc.includes('disable-hmr-websocket'));
+    assert.ok(viteSrc.includes('send was called before connect'));
   });
 
   test('TC-UI-11: Đổi toàn bộ nhãn "Kiến trúc sư Lịch trình AI" / "Kiến trúc sư AI" sang "Lịch trình AI"', () => {
@@ -959,11 +977,13 @@ describe('UI Regression & Security Rules Verification', () => {
     assert.ok(authCtx.includes('updateUserAvatar'));
     assert.ok(authCtx.includes('tripmate_user_avatar_updated'));
     assert.ok(authModal.includes('compressAvatarImage'));
-    assert.ok(authModal.includes('Đổi ảnh đại diện'));
+    assert.ok(authModal.includes('Thêm / Đổi ảnh đại diện'));
+    assert.ok(!authModal.includes('<span>{isUploadingAvatar ? (isVi ? \'Đang lưu...\' : \'Saving...\') : (isVi ? \'Đổi ảnh đại diện\' : \'Change avatar\')}</span>'));
     assert.ok(authScreen.includes('compressAvatarImage'));
     assert.ok(authScreen.includes('registerAvatar'));
     assert.ok(navbar.includes('compressAvatarImage'));
     assert.ok(navbar.includes('updateUserAvatar'));
+    assert.ok(!navbar.includes('<span>{isUploadingAvatar ? (isVi ? \'Đang lưu...\' : \'Saving...\') : (isVi ? \'Đổi ảnh\' : \'Change photo\')}</span>'));
 
     assert.ok(appContent.includes('syncUserAvatarIntoTrips'));
     assert.ok(!appContent.includes('Banner Synced Member Avatar Stack'));
@@ -1112,7 +1132,171 @@ describe('UI Regression & Security Rules Verification', () => {
     assert.ok(navbar.includes('trips.length > 0 && activeTrip'));
     assert.ok(navbar.includes('disabled={!activeTrip}'));
   });
+
+  test('TC-AUTO-11: pwaInstallUtils nhận diện đúng iOS, Android, Laptop Windows & cung cấp hướng dẫn Thêm vào màn hình chính', () => {
+    const iphoneUA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
+    const ipadDesktopUA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15';
+    const androidUA = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
+    const windowsUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+    assert.equal(detectInstallPlatform(iphoneUA, 5), 'ios');
+    assert.equal(detectInstallPlatform(ipadDesktopUA, 5), 'ios');
+    assert.equal(detectInstallPlatform(androidUA, 5), 'android');
+    assert.equal(detectInstallPlatform(windowsUA, 0), 'windows');
+
+    const iosGuide = getInstallGuideContent('ios', true);
+    const androidGuide = getInstallGuideContent('android', true);
+    const windowsGuide = getInstallGuideContent('windows', true);
+
+    assert.ok(iosGuide.title.includes('iOS') || iosGuide.title.includes('iPhone'));
+    assert.ok(iosGuide.steps.some((s) => s.includes('Safari') && s.includes('Chia sẻ') || s.includes('Thêm vào Màn hình chính')));
+    assert.ok(androidGuide.title.includes('Android'));
+    assert.ok(androidGuide.steps.some((s) => s.includes('Chrome') || s.includes('Cài đặt ứng dụng')));
+    assert.ok(windowsGuide.title.includes('Windows'));
+    assert.ok(windowsGuide.steps.some((s) => s.includes('Chrome') && s.includes('Edge')));
+  });
+
+  test('TC-UI-15: PWA manifest, icons, service worker & nút Thêm vào màn hình chính trong Thông tin tài khoản', () => {
+    const viteConfig = fs.readFileSync(path.join(ROOT_DIR, 'vite.config.ts'), 'utf8');
+    const indexHtml = fs.readFileSync(path.join(ROOT_DIR, 'index.html'), 'utf8');
+    const mainTsx = fs.readFileSync(path.join(ROOT_DIR, 'src/main.tsx'), 'utf8');
+    const authModal = fs.readFileSync(path.join(ROOT_DIR, 'src/components/AuthModal.tsx'), 'utf8');
+    const navbar = fs.readFileSync(path.join(ROOT_DIR, 'src/components/Navbar.tsx'), 'utf8');
+    const pwaBtn = fs.readFileSync(path.join(ROOT_DIR, 'src/components/PWAInstallButton.tsx'), 'utf8');
+
+    assert.ok(viteConfig.includes('VitePWA('));
+    assert.ok(viteConfig.includes("display: 'standalone'"));
+    assert.ok(viteConfig.includes("start_url: '/'"));
+    assert.ok(viteConfig.includes('/pwa-192x192.png'));
+    assert.ok(viteConfig.includes('/pwa-512x512.png'));
+    assert.ok(viteConfig.includes('/pwa-maskable-512x512.png'));
+    assert.ok(viteConfig.includes("purpose: 'maskable'"));
+
+    assert.ok(fs.existsSync(path.join(ROOT_DIR, 'public/pwa-192x192.png')));
+    assert.ok(fs.existsSync(path.join(ROOT_DIR, 'public/pwa-512x512.png')));
+    assert.ok(fs.existsSync(path.join(ROOT_DIR, 'public/pwa-maskable-512x512.png')));
+    assert.ok(fs.existsSync(path.join(ROOT_DIR, 'public/apple-touch-icon.png')));
+    assert.ok(fs.existsSync(path.join(ROOT_DIR, 'public/icon.svg')));
+
+    assert.ok(indexHtml.includes('rel="apple-touch-icon" href="/apple-touch-icon.png"'));
+    assert.ok(indexHtml.includes('apple-mobile-web-app-capable'));
+    assert.ok(mainTsx.includes('virtual:pwa-register'));
+    assert.ok(mainTsx.includes('initPwaInstallCapture'));
+
+    assert.ok(authModal.includes('<PWAInstallButton'));
+    assert.ok(navbar.includes('<PWAInstallButton'));
+
+    // Verify exact order in Navbar mobile sheet:
+    // 1. Account Info -> 2. Tạo chuyến đi mới -> 3. Trợ lý du lịch AI -> 4. Thêm vào màn hình chính -> 5. Ngôn ngữ -> 6. Đổi mật khẩu -> 7. Đăng xuất
+    const sheetStart = navbar.indexOf("mobileSheetView === 'main'");
+    const sheetSlice = navbar.slice(sheetStart);
+    const pwdIdx = sheetSlice.indexOf('Đổi mật khẩu');
+    const newTripIdx = sheetSlice.indexOf('Tạo chuyến đi mới');
+    const aiChatIdx = sheetSlice.indexOf('Trợ lý du lịch AI');
+    const pwaIdx = sheetSlice.indexOf('<PWAInstallButton');
+    const langIdx = sheetSlice.indexOf('Ngôn ngữ hiển thị');
+    const logoutIdx = sheetSlice.indexOf('Đăng xuất');
+    assert.ok(
+      newTripIdx >= 0 &&
+        newTripIdx < aiChatIdx &&
+        aiChatIdx < pwaIdx &&
+        pwaIdx < langIdx &&
+        langIdx < pwdIdx &&
+        pwdIdx < logoutIdx,
+      'Navbar mobile sheet buttons must follow exact requested order with Đổi mật khẩu right above Đăng xuất'
+    );
+
+    assert.ok(pwaBtn.includes('Thêm vào màn hình chính'));
+    assert.ok(pwaBtn.includes('Add to Home Screen'));
+    assert.ok(pwaBtn.includes('triggerDeviceInstall'));
+    assert.ok(pwaBtn.includes('isInstalled'));
+    assert.ok(!pwaBtn.includes('showGuideModal'));
+    assert.ok(!pwaBtn.includes('createPortal'));
+  });
+
+  test('TC-UI-16: Popup tạo chuyến đi có Sở thích (combo selectbox), Chọn thành viên mời tham gia, gửi lời mời Firestore và đồng bộ AIItineraryModal', () => {
+    const newTripModal = fs.readFileSync(path.join(ROOT_DIR, 'src/components/NewTripModal.tsx'), 'utf8');
+    const interestsCombo = fs.readFileSync(path.join(ROOT_DIR, 'src/components/InterestsComboSelect.tsx'), 'utf8');
+    const interestOptions = fs.readFileSync(path.join(ROOT_DIR, 'src/data/interestOptions.ts'), 'utf8');
+    const aiModal = fs.readFileSync(path.join(ROOT_DIR, 'src/components/AIItineraryModal.tsx'), 'utf8');
+    const appContent = fs.readFileSync(path.join(ROOT_DIR, 'src/App.tsx'), 'utf8');
+    const typesContent = fs.readFileSync(path.join(ROOT_DIR, 'src/types.ts'), 'utf8');
+
+    assert.ok(typesContent.includes('interests?: string[]'));
+    assert.ok(interestOptions.includes('TRIP_INTEREST_OPTIONS'));
+
+    // Combo selectbox semantics for Interests (no external tags strip outside trigger)
+    assert.ok(interestsCombo.includes('role="combobox"'));
+    assert.ok(interestsCombo.includes('role="listbox"'));
+    assert.ok(interestsCombo.includes('role="option"'));
+    assert.ok(interestsCombo.includes('TRIP_INTEREST_OPTIONS'));
+    assert.ok(!interestsCombo.includes('Selected Tags Strip'));
+    assert.ok(!interestsCombo.includes("'Xóa chọn'"));
+
+    // NewTripModal has Interests combo selectbox + direct email/phone invite input with checkable suggestions (no external list outside combobox)
+    assert.ok(newTripModal.includes('<InterestsComboSelect'));
+    assert.ok(newTripModal.includes("isVi ? 'Thành viên' : 'Members'"));
+    assert.ok(!newTripModal.includes('Chọn thành viên mời tham gia'));
+    assert.ok(newTripModal.includes('new-trip-invite-member-input'));
+    assert.ok(newTripModal.includes('Nhập email hoặc số điện thoại để gợi ý tích chọn...'));
+    assert.ok(!newTripModal.includes("'Thêm vào danh sách'"));
+    assert.ok(!newTripModal.includes("isVi ? 'Xong' : 'Done'"));
+    assert.ok(!newTripModal.includes("'Xóa chọn'"));
+    assert.ok(newTripModal.includes('Tài khoản đã tích chọn sẽ nhận lời mời qua app'));
+    assert.ok(newTripModal.includes('isMemberDropdownOpen'));
+    assert.ok(!newTripModal.includes('Selected Leader + Invited Members List'));
+
+    // Inline suggested AI itinerary checkbox (only opens AI itinerary if checked)
+    assert.ok(newTripModal.includes('new-trip-suggest-ai-checkbox'));
+    assert.ok(newTripModal.includes('wantSuggestedItinerary'));
+    assert.ok(newTripModal.includes("isVi ? 'Tạo lịch trình gợi ý' : 'Generate suggested itinerary'"));
+    assert.ok(newTripModal.includes('handleConfirmCreate(wantSuggestedItinerary)'));
+    assert.ok(!newTripModal.includes('isPromptingItinerary'));
+    assert.ok(!newTripModal.includes('Mở Lịch trình AI ngay sau khi tạo'));
+
+    const navbarContent = fs.readFileSync(path.join(ROOT_DIR, 'src/components/Navbar.tsx'), 'utf8');
+    assert.ok(!navbarContent.includes('Khởi tạo hành trình du lịch mới'));
+    assert.ok(newTripModal.includes("collection(db, 'users')"));
+    assert.ok(newTripModal.includes('searchRegisteredUser'));
+    assert.ok(newTripModal.includes("invitationStatus: 'pending'"));
+    assert.ok(newTripModal.includes('memberUids: [userProfile.id]'));
+
+    // AIItineraryModal uses InterestsComboSelect and reads targetTrip?.interests
+    assert.ok(aiModal.includes('<InterestsComboSelect'));
+    assert.ok(aiModal.includes('targetTrip?.interests'));
+
+    // App.tsx creates Firestore invitations docs for pending members on create
+    assert.ok(appContent.includes('pendingInviteMembers'));
+    assert.ok(appContent.includes("doc(db, 'invitations', invId)"));
+
+    // Pending invited user cannot access trip until accepted
+    const invitedMember: Trip = {
+      id: 'trip-new-invite',
+      title: 'Da Nang',
+      destination: 'Đà Nẵng',
+      country: 'Việt Nam',
+      startDate: '2026-08-01',
+      endDate: '2026-08-03',
+      coverImage: '',
+      budgetTotal: 500,
+      currency: 'USD',
+      interests: ['food', 'nature'],
+      creatorId: 'u-perry',
+      memberUids: ['u-perry'],
+      members: [
+        { id: 'm1', uid: 'u-perry', name: 'Perry', avatar: '', invitationStatus: 'accepted' },
+        { id: 'm-1', uid: 'u-linh', email: 'linh@tripmate.app', name: 'Linh', avatar: '', invitationStatus: 'pending', invitationId: 'inv-1' },
+      ],
+      days: [],
+      expenses: [],
+      packingList: [],
+      documents: [],
+    };
+    assert.equal(canUserAccessTrip(invitedMember, { id: 'u-perry', email: 'perry@tripmate.app' }), true);
+    assert.equal(canUserAccessTrip(invitedMember, { id: 'u-linh', email: 'linh@tripmate.app' }), false);
+  });
 });
+
 
 
 

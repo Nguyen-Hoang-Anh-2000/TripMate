@@ -16,6 +16,8 @@ import { AIItineraryPrompt, Trip, PackingItem, SavedPlace, TravelDocument } from
 import { useLanguage } from '../context/LanguageContext';
 import { formatMoney } from '../utils/formatCurrency';
 import { getLocalDateString } from '../utils/dateUtils';
+import { TRIP_INTEREST_OPTIONS, DEFAULT_TRIP_INTERESTS } from '../data/interestOptions';
+import { InterestsComboSelect } from './InterestsComboSelect';
 import {
   rankSavedPlacesForTrip,
   mergeSavedAndGeneratedIntoDays,
@@ -73,23 +75,6 @@ const AVAILABLE_TABS: TabOption[] = [
   },
 ];
 
-interface InterestOption {
-  id: string;
-  labelVi: string;
-  labelEn: string;
-}
-
-const INTEREST_OPTIONS: InterestOption[] = [
-  { id: 'food', labelVi: 'Ẩm thực & Quán ngon', labelEn: 'Food & Dining' },
-  { id: 'temple', labelVi: 'Di tích & Chùa chiền', labelEn: 'Historical Temples' },
-  { id: 'photo', labelVi: 'Chụp ảnh & Check-in', labelEn: 'Photography & Check-in' },
-  { id: 'shopping', labelVi: 'Mua sắm & Chợ đêm', labelEn: 'Shopping & Night Markets' },
-  { id: 'nightlife', labelVi: 'Hoạt động về đêm & Bar chill', labelEn: 'Nightlife & Chill' },
-  { id: 'nature', labelVi: 'Thiên nhiên & Leo núi', labelEn: 'Nature & Hiking' },
-  { id: 'art', labelVi: 'Nghệ thuật & Bảo tàng', labelEn: 'Art & Museums' },
-  { id: 'culture', labelVi: 'Văn hóa & Trải nghiệm', labelEn: 'Culture & Local Life' },
-];
-
 export const getPackingCategoryDisplay = (cat: string, isVietnamese: boolean): string => {
   const c = (cat || '').toLowerCase();
   if (c.includes('essential') || c.includes('thiết yếu')) return isVietnamese ? 'Thiết yếu' : 'Essentials';
@@ -134,9 +119,7 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
   );
 
   // Selected interest IDs
-  const [selectedInterestIds, setSelectedInterestIds] = useState<string[]>([
-    'food', 'temple', 'photo'
-  ]);
+  const [selectedInterestIds, setSelectedInterestIds] = useState<string[]>(DEFAULT_TRIP_INTERESTS);
 
   const rankedMatchingSaved = useMemo(() => {
     const tripCur = targetTrip?.currency || 'USD';
@@ -180,12 +163,16 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
       const dest = targetTrip?.destination || initialDestination || 'Đà Lạt';
       const days = targetTrip?.days?.length || (initialDurationDays && initialDurationDays > 0 ? initialDurationDays : 3);
       const budget = targetTrip?.budgetTotal || (initialBudget && initialBudget > 0 ? initialBudget : 500);
+      const initialInterests =
+        targetTrip?.interests && targetTrip.interests.length > 0
+          ? targetTrip.interests
+          : DEFAULT_TRIP_INTERESTS;
 
       setDestination(dest);
       setDurationDays(days);
       setBudgetAmount(String(budget));
       setSelectedTabs(['itinerary', 'packing', 'places', 'vault']);
-      setSelectedInterestIds(['food', 'temple', 'photo']);
+      setSelectedInterestIds(initialInterests);
       setPreviewResult(null);
       setErrorMsg('');
       setLoading(false);
@@ -197,14 +184,6 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
   }, [isOpen, initialDestination, initialDurationDays, initialBudget, targetTrip]);
 
   if (!isOpen) return null;
-
-  const toggleInterest = (id: string) => {
-    if (selectedInterestIds.includes(id)) {
-      setSelectedInterestIds(selectedInterestIds.filter((item) => item !== id));
-    } else {
-      setSelectedInterestIds([...selectedInterestIds, id]);
-    }
-  };
 
   const toggleTab = (key: TabGenerationKey) => {
     if (selectedTabs.includes(key)) {
@@ -438,7 +417,7 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
     const numBudget = budgetAmount ? parseFloat(budgetAmount) : (targetTrip?.budgetTotal || 500);
 
     const interestsPayload = selectedInterestIds.map((id) => {
-      const opt = INTEREST_OPTIONS.find((o) => o.id === id);
+      const opt = TRIP_INTEREST_OPTIONS.find((o) => o.id === id);
       return opt ? (isVi ? opt.labelVi : opt.labelEn) : id;
     });
 
@@ -909,31 +888,14 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
                 </div>
               </div>
 
-              {/* SỞ THÍCH (Đổi tiêu đề thành 'Sở thích' theo yêu cầu) */}
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                  {isVi ? 'Sở thích' : 'Interests'}
-                </label>
-                <div className="flex flex-wrap gap-1.5">
-                  {INTEREST_OPTIONS.map((interest) => {
-                    const isSelected = selectedInterestIds.includes(interest.id);
-                    return (
-                      <button
-                        key={interest.id}
-                        type="button"
-                        onClick={() => toggleInterest(interest.id)}
-                        className={`px-2.5 py-1 text-xs font-medium rounded-lg border transition-all cursor-pointer ${
-                          isSelected
-                            ? 'bg-teal-600 text-white border-teal-600 shadow-2xs'
-                            : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-                        }`}
-                      >
-                        {isVi ? interest.labelVi : interest.labelEn} {isSelected ? '✓' : ''}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+              {/* SỞ THÍCH - Combo Selectbox */}
+              <InterestsComboSelect
+                selectedIds={selectedInterestIds}
+                onChange={setSelectedInterestIds}
+                isVi={isVi}
+                label={isVi ? 'Sở thích' : 'Interests'}
+                dropdownId="ai-itinerary-interests"
+              />
 
               {errorMsg && (
                 <div className="p-3 bg-red-50 text-red-700 border border-red-200 rounded-xl text-xs font-medium">

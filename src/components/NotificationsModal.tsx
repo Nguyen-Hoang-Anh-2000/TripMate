@@ -389,7 +389,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                           className="flex-1 py-2 px-3 bg-teal-600 hover:bg-teal-700 active:scale-[0.98] text-white rounded-xl font-bold text-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
                         >
                           <Check className="w-3.5 h-3.5" />
-                          <span>{isVi ? 'Đồng ý tham gia' : 'Accept Invitation'}</span>
+                          <span>{isVi ? 'Đồng ý' : 'Accept'}</span>
                         </button>
                         <button
                           type="button"

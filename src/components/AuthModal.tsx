@@ -7,6 +7,7 @@ import {
 import { useAuth, RFC_EMAIL_REGEX } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { ForgotPasswordFlow } from './ForgotPasswordFlow';
+import { PWAInstallButton } from './PWAInstallButton';
 import { compressAvatarImage } from '../utils/imageUtils';
 
 interface AuthModalProps {
@@ -305,17 +306,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                       <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-md text-[10px] font-bold">
                         ✓ {isVi ? 'Tài khoản hoạt động' : 'Active Account'}
                       </span>
-                      <label className="inline-flex items-center gap-1 px-2 py-0.5 bg-white hover:bg-teal-100 text-teal-800 border border-teal-200 rounded-md text-[10px] font-bold cursor-pointer transition-colors">
-                        <Camera className="w-2.5 h-2.5" />
-                        <span>{isUploadingAvatar ? (isVi ? 'Đang lưu...' : 'Saving...') : (isVi ? 'Đổi ảnh đại diện' : 'Change avatar')}</span>
-                        <input
-                          type="file"
-                          accept="image/*"
-                          disabled={isUploadingAvatar}
-                          onChange={(e) => handleAvatarFileChange(e, false)}
-                          className="hidden"
-                        />
-                      </label>
                     </div>
                   </div>
                 </div>
@@ -355,6 +345,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                     </div>
                     <ChevronRight className="w-5 h-5 text-slate-400 group-hover:text-teal-600 transition-colors shrink-0" />
                   </button>
+
+                  {/* Add to Home Screen / Install App (iOS, Android, Windows) */}
+                  <PWAInstallButton variant="modal-card" />
 
                   <div className="flex gap-2 pt-1">
                     <button
@@ -762,7 +755,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                           maxLength={64}
                           value={password}
                           onChange={(e) => setPassword(e.target.value)}
-                          placeholder={isVi ? 'Nhập mật khẩu (Demo: 123456)' : 'Enter password'}
+                          placeholder={isVi ? 'Nhập mật khẩu' : 'Enter password'}
                           className="w-full pl-9 pr-9 py-2 text-xs rounded-xl border border-slate-200 focus:outline-hidden focus:ring-2 focus:ring-teal-500"
                         />
                         <button

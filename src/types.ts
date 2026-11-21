@@ -193,6 +193,7 @@ export interface Trip {
   creatorId?: string; // UID of user who created the trip
   creatorName?: string;
   memberUids?: string[]; // UIDs of members who accepted the invitation
+  interests?: string[];
   vaultPin?: VaultPinSecurity;
   notifications?: TripNotification[];
 }

@@ -138,7 +138,7 @@ export const InvitationsModal: React.FC<InvitationsModalProps> = ({ isOpen, onCl
                     ) : (
                       <Check className="w-3.5 h-3.5" />
                     )}
-                    <span>{isVi ? 'Đồng ý tham gia' : 'Accept Invitation'}</span>
+                    <span>{isVi ? 'Đồng ý' : 'Accept'}</span>
                   </button>
                 </div>
               </div>

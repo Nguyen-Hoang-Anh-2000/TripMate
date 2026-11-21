@@ -1287,6 +1287,43 @@ function AppContent() {
     // Save to Firestore safely (stripped of undefined)
     persistTripToFirestore(tripToSave);
 
+    // Send Firestore invitations for any registered members selected in NewTripModal
+    const pendingInviteMembers = (tripToSave.members || []).filter(
+      (m) => m.invitationStatus === 'pending' && m.invitationId && (m.uid || m.email || m.phone)
+    );
+    if (pendingInviteMembers.length > 0) {
+      pendingInviteMembers.forEach((member) => {
+        const invId = member.invitationId!;
+        const invPayload = stripUndefinedDeep({
+          tripId: tripToSave.id,
+          tripTitle: tripToSave.title,
+          tripDestination: tripToSave.destination,
+          tripDates: `${tripToSave.startDate} - ${tripToSave.endDate}`,
+          inviterId: tripToSave.creatorId || userProfile?.id || 'creator',
+          inviterName:
+            tripToSave.creatorName ||
+            userProfile?.displayName ||
+            (isVi ? 'Trưởng đoàn' : 'Trip Leader'),
+          inviteeEmail: member.email,
+          inviteePhone: member.phone || '',
+          inviteeUid: member.uid,
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+        });
+        setDoc(doc(db, 'invitations', invId), invPayload).catch((err) =>
+          handleFirestoreError(err, OperationType.WRITE, `invitations/${invId}`)
+        );
+      });
+
+      const invitedNames = pendingInviteMembers.map((m) => m.name).join(', ');
+      setAppNotice(
+        isVi
+          ? `✉️ Đã tạo chuyến đi và gửi lời mời tham gia qua app tới: ${invitedNames}.`
+          : `✉️ Created trip and sent in-app invitations to: ${invitedNames}.`
+      );
+      setTimeout(() => setAppNotice(null), 5000);
+    }
+
     setActiveTripId(tripToSave.id);
     setActiveTab('itinerary');
     if (openAiArchitect) {

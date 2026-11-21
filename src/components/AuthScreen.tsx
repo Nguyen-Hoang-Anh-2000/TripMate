@@ -315,7 +315,7 @@ export const AuthScreen: React.FC = () => {
                     <input
                       type={showLoginPassword ? 'text' : 'password'}
                       required
-                      placeholder={isVi ? 'Nhập mật khẩu (Demo: 123456)' : 'Enter password (Demo: 123456)'}
+                      placeholder={isVi ? 'Nhập mật khẩu' : 'Enter password'}
                       value={loginPassword}
                       onChange={(e) => setLoginPassword(e.target.value)}
                       className="w-full text-sm sm:text-xs py-2.5 pl-9 pr-10 rounded-xl bg-white/5 border border-white/10 text-white placeholder-slate-500 focus:outline-hidden focus:border-teal-400 focus:ring-1 focus:ring-teal-400 transition-colors min-h-[42px]"
