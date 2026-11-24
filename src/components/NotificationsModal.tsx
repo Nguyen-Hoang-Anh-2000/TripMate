@@ -7,6 +7,7 @@ import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { Trip, TripInvitation, TripNotification, UserTripNotification } from '../types';
 import { formatMoney } from '../utils/formatCurrency';
+import { formatTripNotificationI18n, formatUserTripNotificationI18n } from '../utils/notificationI18n';
 
 interface NotificationsModalProps {
   isOpen: boolean;
@@ -161,20 +162,21 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
 
   const handleApproveRequest = (trip: Trip, notif: TripNotification) => {
     if (!onUpdateTrip) return;
-    const actor = userProfile?.displayName || 'Trưởng đoàn';
+    const actor = userProfile?.displayName || (isVi ? 'Trưởng đoàn' : 'Trip Leader');
     const updatedNotifs: TripNotification[] = (trip.notifications || []).map((n) =>
       n.id === notif.id ? { ...n, status: 'approved' as const, resolvedAt: new Date().toISOString() } : n
     );
 
     const completionId = `notif_${Date.now()}`;
+    const locale = isVi ? 'vi-VN' : 'en-US';
     if (notif.actionType === 'remove_pin') {
       const completionNotif: TripNotification = {
         id: completionId,
         type: 'pin_removed',
         title: isVi ? 'Mã PIN két giấy tờ đã được gỡ bỏ' : 'Vault PIN Removed',
         message: isVi
-          ? `Mã PIN bảo vệ két vé đã được gỡ bỏ thành công sau khi được ${actor} phê duyệt đồng ý vào lúc ${new Date().toLocaleTimeString('vi-VN')}.`
-          : `Vault PIN was removed after approval by ${actor} at ${new Date().toLocaleTimeString()}.`,
+          ? `Mã PIN bảo vệ két vé đã được gỡ bỏ thành công sau khi được ${actor} phê duyệt đồng ý vào lúc ${new Date().toLocaleTimeString(locale)}.`
+          : `Vault PIN was removed after approval by ${actor} at ${new Date().toLocaleTimeString(locale)}.`,
         actorId: userProfile?.id || 'admin',
         actorName: actor,
         createdAt: new Date().toISOString(),
@@ -207,7 +209,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
 
   const handleRejectRequest = (trip: Trip, notif: TripNotification) => {
     if (!onUpdateTrip) return;
-    const actor = userProfile?.displayName || 'Trưởng đoàn';
+    const actor = userProfile?.displayName || (isVi ? 'Trưởng đoàn' : 'Trip Leader');
     const updatedNotifs: TripNotification[] = (trip.notifications || []).map((n) =>
       n.id === notif.id ? { ...n, status: 'rejected' as const, resolvedAt: new Date().toISOString() } : n
     );
@@ -449,6 +451,8 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
 
               if (item.kind === 'user_notif') {
                 const un = item.userNotif;
+                const formattedUn = formatUserTripNotificationI18n(un, lang);
+                const locale = isVi ? 'vi-VN' : 'en-US';
                 const isSettlement = un.type === 'trip_deleted_settlement';
                 return (
                   <div
@@ -479,7 +483,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                             {un.tripTitle}
                           </div>
                           <h4 className="text-xs sm:text-sm font-bold text-slate-900 leading-tight">
-                            {un.title}
+                            {formattedUn.title}
                           </h4>
                         </div>
                       </div>
@@ -513,7 +517,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                     )}
 
                     <p className="text-xs text-slate-700 mt-2 bg-white/80 p-2.5 rounded-xl border border-slate-200/70 leading-relaxed">
-                      {un.message}
+                      {formattedUn.message}
                     </p>
 
                     <div className="flex items-center justify-between text-[11px] text-slate-400 mt-2 gap-2">
@@ -523,11 +527,11 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                       </span>
                       <div className="flex items-center gap-2 shrink-0">
                         <span>
-                          {new Date(un.createdAt).toLocaleTimeString('vi-VN', {
+                          {new Date(un.createdAt).toLocaleTimeString(locale, {
                             hour: '2-digit',
                             minute: '2-digit',
                           })}{' '}
-                          {new Date(un.createdAt).toLocaleDateString('vi-VN')}
+                          {new Date(un.createdAt).toLocaleDateString(locale)}
                         </span>
                         {!item.isRead && (
                           <button
@@ -545,6 +549,8 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
               }
 
               const { trip, notif } = item;
+              const formattedNotif = formatTripNotificationI18n(notif, lang);
+              const locale = isVi ? 'vi-VN' : 'en-US';
               const isPending = notif.status === 'pending';
               const isRemoved = notif.type === 'pin_removed';
 
@@ -583,7 +589,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                           {trip.title}
                         </div>
                         <h4 className="text-xs sm:text-sm font-bold text-slate-900 leading-tight">
-                          {notif.title}
+                          {formattedNotif.title}
                         </h4>
                       </div>
                     </div>
@@ -612,7 +618,7 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                   </div>
 
                   <p className="text-xs text-slate-700 mt-2 bg-white/70 p-2.5 rounded-xl border border-slate-200/60 leading-relaxed">
-                    {notif.message}
+                    {formattedNotif.message}
                   </p>
 
                   <div className="flex items-center justify-between text-[11px] text-slate-400 mt-2 gap-2">
@@ -622,11 +628,11 @@ export const NotificationsModal: React.FC<NotificationsModalProps> = ({
                     </span>
                     <div className="flex items-center gap-2 shrink-0">
                       <span>
-                        {new Date(notif.createdAt).toLocaleTimeString('vi-VN', {
+                        {new Date(notif.createdAt).toLocaleTimeString(locale, {
                           hour: '2-digit',
                           minute: '2-digit',
                         })}{' '}
-                        {new Date(notif.createdAt).toLocaleDateString('vi-VN')}
+                        {new Date(notif.createdAt).toLocaleDateString(locale)}
                       </span>
                       {!isPending && !item.isRead && (
                         <button

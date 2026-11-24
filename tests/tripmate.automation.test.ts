@@ -13,9 +13,14 @@ import {
 } from '../src/utils/itineraryPlannerUtils';
 import { stripUndefinedDeep } from '../src/utils/firestoreSanitizer';
 import {
+  computeExpenseFundSettlements,
   computeTripDeletionSummary,
   buildTripDeletionNotifications,
 } from '../src/utils/tripSettlementUtils';
+import {
+  formatTripNotificationI18n,
+  formatUserTripNotificationI18n,
+} from '../src/utils/notificationI18n';
 import {
   buildDefaultAvatar,
   isMemberMatchingUser,
@@ -726,21 +731,22 @@ describe('UI Regression & Security Rules Verification', () => {
     assert.ok(!appContent.includes('Đổi tên, ngày, điểm đến, ngân sách hoặc ảnh bìa'));
   });
 
-  test('TC-UI-03: Navbar Avatar sheet hiển thị Tài Khoản TripMate, Đổi mật khẩu, Vietnamese/English & Đăng xuất', () => {
+  test('TC-UI-03: Navbar Avatar sheet hiển thị Tài khoản TripMate, Đổi mật khẩu, Tiếng Việt/English & Đăng xuất', () => {
     const navbar = fs.readFileSync(path.join(ROOT_DIR, 'src/components/Navbar.tsx'), 'utf8');
-    assert.ok(navbar.includes('Tài Khoản TripMate'));
-    assert.ok(navbar.includes('Vietnamese'));
+    assert.ok(navbar.includes('Tài khoản TripMate'));
+    assert.ok(navbar.includes('Tiếng Việt'));
     assert.ok(navbar.includes('English'));
     assert.ok(!navbar.includes('Thoát phiên đăng nhập hiện tại'));
     assert.ok(!navbar.includes('Đăng xuất tài khoản'));
   });
 
-  test('TC-UI-04: TripMate Chat dùng đúng tên, bỏ aiChat.context & placeholder là Hello', () => {
+  test('TC-UI-04: Trợ lý TripMate dùng đúng tên VI/EN, bỏ aiChat.context & placeholder gợi ý rõ ràng', () => {
     const chat = fs.readFileSync(path.join(ROOT_DIR, 'src/components/AIAssistantChat.tsx'), 'utf8');
     const langCtx = fs.readFileSync(path.join(ROOT_DIR, 'src/context/LanguageContext.tsx'), 'utf8');
     assert.ok(!chat.includes("aiChat.context"));
-    assert.ok(langCtx.includes("'aiChat.title': 'TripMate Chat'"));
-    assert.ok(langCtx.includes("'aiChat.inputPlaceholder': 'Hello'"));
+    assert.ok(langCtx.includes("'aiChat.title': 'TripMate Assistant'"));
+    assert.ok(langCtx.includes("'aiChat.title': 'Trợ lý TripMate'"));
+    assert.ok(langCtx.includes("'aiChat.inputPlaceholder': 'Ask about food, routes, tips...'"));
   });
 
   test('TC-UI-05: NotificationsModal đổi tên Thông báo, lọc Chưa đọc/Đã đọc và Đã đọc không đếm số', () => {
@@ -802,8 +808,8 @@ describe('UI Regression & Security Rules Verification', () => {
     assert.ok(navbar.includes('totalUnreadNotificationsCount'));
     assert.ok(navbar.includes('tripmate_notifs_read_updated'));
     assert.ok(notifModal.includes('tripmate_notifs_read_updated'));
-    assert.ok(navbar.includes("isVi ? 'Vietnamese' : 'English'"));
-    assert.ok(authScreen.includes("isVi ? 'Vietnamese' : 'English'"));
+    assert.ok(navbar.includes("isVi ? 'Tiếng Việt' : 'English'"));
+    assert.ok(authScreen.includes("isVi ? 'Tiếng Việt' : 'English'"));
     assert.ok(authCtx.includes('isViLang'));
     assert.ok(chat.includes('navigator.onLine') || chat.includes('isOnline'));
   });
@@ -1294,6 +1300,186 @@ describe('UI Regression & Security Rules Verification', () => {
     };
     assert.equal(canUserAccessTrip(invitedMember, { id: 'u-perry', email: 'perry@tripmate.app' }), true);
     assert.equal(canUserAccessTrip(invitedMember, { id: 'u-linh', email: 'linh@tripmate.app' }), false);
+  });
+
+  test('TC-AUTO-12: computeExpenseFundSettlements tính đúng Quỹ còn lại, số người góp & hoàn quỹ Thủ quỹ ở cả Detailed và Splitwise', () => {
+    // Case A (TC-19): 2 contributors x 1,000,000 = 2,000,000; 1 member 0; spend 800,000 from fund
+    const tripCaseA: Trip = {
+      id: 'trip-fund-a',
+      title: 'Da Lat Fund',
+      destination: 'Đà Lạt',
+      country: 'Việt Nam',
+      startDate: '2026-08-01',
+      endDate: '2026-08-03',
+      budgetTotal: 5000000,
+      currency: 'VND',
+      creatorId: 'm1',
+      fundHolderId: 'm1',
+      members: [
+        { id: 'm1', name: 'QA', avatar: '', contributedAmount: 1000000 },
+        { id: 'm2', name: 'Lan', avatar: '', contributedAmount: 1000000 },
+        { id: 'm3', name: 'Minh', avatar: '', contributedAmount: 0 },
+      ],
+      days: [],
+      expenses: [
+        {
+          id: 'e1',
+          title: 'Hotel Deposit',
+          amount: 800000,
+          category: 'stay',
+          paidBy: 'fund',
+          splitWith: ['m1', 'm2', 'm3'],
+          date: '2026-08-01',
+        },
+      ],
+      packingList: [],
+      documents: [],
+    };
+    const compA = computeExpenseFundSettlements(tripCaseA);
+    assert.equal(compA.totalContributed, 2000000);
+    assert.equal(compA.contributorsCount, 2);
+    assert.equal(compA.paidByFundTotal, 800000);
+    assert.equal(compA.fundRemaining, 1200000);
+
+    // Case B (TC-23): Fund + Treasurer refund + personal extra pay + member owe
+    const tripCaseB: Trip = {
+      ...tripCaseA,
+      id: 'trip-fund-b',
+      expenses: [
+        {
+          id: 'e1',
+          title: 'Hotel Fund',
+          amount: 600000,
+          category: 'stay',
+          paidBy: 'fund',
+          splitWith: ['m1', 'm2', 'm3'],
+          date: '2026-08-01',
+        },
+        {
+          id: 'e2',
+          title: 'Dinner Paid By Lan',
+          amount: 300000,
+          category: 'food',
+          paidBy: 'm2',
+          splitWith: ['m1', 'm2', 'm3'],
+          date: '2026-08-01',
+        },
+      ],
+    };
+    const compB = computeExpenseFundSettlements(tripCaseB);
+    assert.equal(compB.fundRemaining, 1400000);
+
+    const netSum = compB.memberStats.reduce((s, m) => s + m.netSettlementBalance, 0);
+    assert.ok(Math.abs(netSum) < 0.01, `Expected zero-sum net balances, got ${netSum}`);
+
+    const m1Stat = compB.memberStats.find((s) => s.member.id === 'm1')!;
+    const m2Stat = compB.memberStats.find((s) => s.member.id === 'm2')!;
+    const m3Stat = compB.memberStats.find((s) => s.member.id === 'm3')!;
+    assert.equal(m1Stat.netSettlementBalance, -700000);
+    assert.equal(m2Stat.netSettlementBalance, 1000000);
+    assert.equal(m3Stat.netSettlementBalance, -300000);
+
+    // Both Detailed and Splitwise must settle full 1,000,000 owed to Lan including Treasurer m1 refunding 700,000
+    const sumDetailedToM2 = compB.detailedSettlements
+      .filter((t) => t.toId === 'm2')
+      .reduce((s, t) => s + t.amount, 0);
+    const sumSimplifiedToM2 = compB.simplifiedSettlements
+      .filter((t) => t.toId === 'm2')
+      .reduce((s, t) => s + t.amount, 0);
+    assert.equal(sumDetailedToM2, 1000000);
+    assert.equal(sumSimplifiedToM2, 1000000);
+    assert.ok(compB.detailedSettlements.some((t) => t.fromId === 'm1' && t.toId === 'm2' && t.amount === 900000));
+    assert.ok(compB.simplifiedSettlements.some((t) => t.fromId === 'm1' && t.toId === 'm2' && t.amount === 700000));
+  });
+
+  test('TC-AUTO-13: notificationI18n dịch sạch thông báo PIN/Vault & xóa chuyến đi sang tiếng Anh khi lang="en"', () => {
+    const legacyPinNotif: TripNotification = {
+      id: 'n-pin-1',
+      type: 'pin_reset_requested',
+      title: 'Yêu cầu phê duyệt đặt lại mã PIN',
+      message: 'Perry đã xác thực OTP và đề nghị đặt lại mã PIN mới cho Két vé.',
+      actorId: 'u1',
+      actorName: 'Perry',
+      createdAt: '2026-08-01T10:00:00Z',
+      readBy: [],
+      actionType: 'reset_pin',
+    };
+    const enPin = formatTripNotificationI18n(legacyPinNotif, 'en');
+    assert.equal(enPin.title, 'PIN Reset Approval Request');
+    assert.ok(!/[àáảãạăắằẳẵặâấầẩẫậđèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵ]/i.test(enPin.title + enPin.message));
+
+    const legacyRemoveNotif: TripNotification = {
+      ...legacyPinNotif,
+      id: 'n-pin-2',
+      type: 'pin_removed',
+      title: 'Đã duyệt gỡ bỏ mã PIN',
+      message: 'Lan đã duyệt gỡ bỏ mã PIN.',
+      actorName: 'Lan',
+    };
+    const enRemove = formatTripNotificationI18n(legacyRemoveNotif, 'en');
+    assert.equal(enRemove.title, 'PIN Removal Request Approved');
+    assert.ok(enRemove.message.includes('Lan removed the Travel Vault PIN lock.'));
+
+    const userSettlementNotif = formatUserTripNotificationI18n(
+      {
+        id: 'un1',
+        type: 'trip_deleted_settlement',
+        tripId: 't1',
+        tripTitle: 'Tokyo Spring',
+        title: 'Giải quyết tiền',
+        message: 'Legacy VI msg',
+        actorId: 'u1',
+        actorName: 'Perry',
+        targetUid: 'u2',
+        targetMemberName: 'Minh',
+        fromMemberId: 'm3',
+        fromMemberName: 'Minh',
+        toMemberId: 'm2',
+        toMemberName: 'Lan',
+        amount: 300000,
+        currency: 'VND',
+        status: 'unread',
+        createdAt: '2026-08-01T10:00:00Z',
+      },
+      'en'
+    );
+    assert.ok(userSettlementNotif.title.includes('Settlement notice:'));
+    assert.ok(userSettlementNotif.message.includes('You still owe'));
+    assert.ok(userSettlementNotif.message.includes('to Lan.'));
+  });
+
+  test('TC-UI-17: Kiểm tra bảo mật OTP, False-Offline probe, Bottom Nav, Inline Offline Member & % Split / VietQR', () => {
+    const vaultView = fs.readFileSync(path.join(ROOT_DIR, 'src/components/TravelVaultView.tsx'), 'utf8');
+    const forgotFlow = fs.readFileSync(path.join(ROOT_DIR, 'src/components/ForgotPasswordFlow.tsx'), 'utf8');
+    const packingView = fs.readFileSync(path.join(ROOT_DIR, 'src/components/PackingListView.tsx'), 'utf8');
+    const newTripModal = fs.readFileSync(path.join(ROOT_DIR, 'src/components/NewTripModal.tsx'), 'utf8');
+    const appContent = fs.readFileSync(path.join(ROOT_DIR, 'src/App.tsx'), 'utf8');
+    const tabBar = fs.readFileSync(path.join(ROOT_DIR, 'src/components/SwipeableTabBar.tsx'), 'utf8');
+    const expenseView = fs.readFileSync(path.join(ROOT_DIR, 'src/components/ExpenseSplitterView.tsx'), 'utf8');
+
+    // Vault & ForgotPassword: No hardcoded '123456' OTP backdoor & DEV-only simulated banner
+    assert.ok(!vaultView.includes("=== '123456'"));
+    assert.ok(!vaultView.includes("== '123456'"));
+    assert.ok(vaultView.includes('import.meta.env.DEV'));
+    assert.ok(vaultView.includes('animate-vault-shake'));
+    assert.ok(forgotFlow.includes('import.meta.env.DEV'));
+
+    // Packing filter allows unchecking all categories down to []
+    assert.ok(!packingView.includes('if (prev.includes(cat) && prev.length === 1) return prev;'));
+
+    // NewTripModal inline offline member & VND default for VI
+    assert.ok(newTripModal.includes('handleAddOfflineInvitee'));
+    assert.ok(newTripModal.includes('inferCountryFromDestination'));
+    assert.ok(newTripModal.includes("isVi ? 'VND' : 'USD'"));
+
+    // App /api/health probe, Mobile Quick-Add FAB, Bottom Nav, Expense % & VietQR
+    assert.ok(appContent.includes('/api/health'));
+    assert.ok(appContent.includes('RealtimeWeatherBadge'));
+    assert.ok(appContent.includes('isQuickAddFabOpen'));
+    assert.ok(tabBar.includes('fixed bottom-0'));
+    assert.ok(expenseView.includes('computeExpenseFundSettlements'));
+    assert.ok(expenseView.includes("'percent'"));
+    assert.ok(expenseView.includes('img.vietqr.io'));
   });
 });
 

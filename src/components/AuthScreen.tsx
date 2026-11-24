@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { 
   Compass, Mail, Phone, User, ArrowRight, Sparkles, CheckCircle2, 
-  Globe, Lock, AlertCircle, ArrowLeft, Eye, EyeOff, Camera
+  Globe, Lock, AlertCircle, ArrowLeft, Eye, EyeOff, Camera, ChevronDown
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
@@ -9,10 +9,10 @@ import { ForgotPasswordFlow } from './ForgotPasswordFlow';
 import { compressAvatarImage } from '../utils/imageUtils';
 
 const DEMO_ACCOUNTS = [
-  { name: 'Perry Nguyễn', email: 'perrynguyen10@gmail.com', phone: '0901234567', role: 'Trưởng đoàn / Creator', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Perry' },
-  { name: 'Linh Chi', email: 'linhchi@tripmate.app', phone: '0912345678', role: 'Thành viên nhóm', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=LinhChi' },
-  { name: 'Minh Quân', email: 'minhquan@tripmate.app', phone: '0987654321', role: 'Thành viên nhóm', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=MinhQuan' },
-  { name: 'Khánh Vy', email: 'khanhvy@tripmate.app', phone: '0933221100', role: 'Thành viên nhóm', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=KhanhVy' },
+  { name: 'Perry Nguyễn', email: 'perrynguyen10@gmail.com', phone: '0901234567', roleVi: 'Trưởng đoàn', roleEn: 'Trip Leader', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Perry' },
+  { name: 'Linh Chi', email: 'linhchi@tripmate.app', phone: '0912345678', roleVi: 'Thành viên nhóm', roleEn: 'Group Member', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=LinhChi' },
+  { name: 'Minh Quân', email: 'minhquan@tripmate.app', phone: '0987654321', roleVi: 'Thành viên nhóm', roleEn: 'Group Member', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=MinhQuan' },
+  { name: 'Khánh Vy', email: 'khanhvy@tripmate.app', phone: '0933221100', roleVi: 'Thành viên nhóm', roleEn: 'Group Member', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=KhanhVy' },
 ];
 
 export const AuthScreen: React.FC = () => {
@@ -38,6 +38,7 @@ export const AuthScreen: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showDemoAccounts, setShowDemoAccounts] = useState(false);
 
   const toggleLanguage = () => {
     setLang(lang === 'en' ? 'vi' : 'en');
@@ -174,7 +175,7 @@ export const AuthScreen: React.FC = () => {
           title={isVi ? 'Switch to English' : 'Chuyển sang Tiếng Việt'}
         >
           <Globe className="w-3.5 h-3.5 text-teal-400" />
-          <span>{isVi ? 'Vietnamese' : 'English'}</span>
+          <span>{isVi ? 'Tiếng Việt' : 'English'}</span>
         </button>
       </header>
 
@@ -191,9 +192,6 @@ export const AuthScreen: React.FC = () => {
               <h2 className="font-display text-lg sm:text-xl font-extrabold text-white tracking-tight">
                 {isVi ? 'Đăng ký tài khoản mới' : 'Create an Account'}
               </h2>
-              <p className="text-xs text-slate-400 mt-1">
-                {isVi ? 'Nhập thông tin bên dưới để tạo tài khoản' : 'Enter your details below to create an account'}
-              </p>
             </div>
           )}
 
@@ -275,7 +273,7 @@ export const AuthScreen: React.FC = () => {
               <div className="h-px bg-white/10" />
 
               {/* Login Form */}
-              <form onSubmit={handleLoginSubmit} className="space-y-3.5">
+              <form noValidate onSubmit={handleLoginSubmit} className="space-y-3.5">
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-1.5">
                     {isVi ? 'Email hoặc Số điện thoại' : 'Email or Phone Number'}
@@ -340,38 +338,47 @@ export const AuthScreen: React.FC = () => {
                 </button>
               </form>
 
-              {/* Quick 1-Click Demo Account Testing */}
+              {/* Collapsible Quick 1-Click Demo Account Testing */}
               <div className="pt-3.5 mt-3.5 border-t border-white/10">
-                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[11px] text-slate-400 mb-2">
-                  <span className="font-semibold text-slate-300 flex items-center gap-1">
-                    <Sparkles className="w-3 h-3 text-teal-400 shrink-0" />
-                    <span>{isVi ? 'Tài khoản mẫu (1-Click)' : 'Demo Accounts (1-Click)'}</span>
+                <button
+                  type="button"
+                  onClick={() => setShowDemoAccounts((prev) => !prev)}
+                  className="w-full flex items-center justify-between gap-2 text-[11px] text-slate-300 hover:text-white py-1 cursor-pointer transition-colors"
+                >
+                  <span className="font-semibold flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                    <span>{isVi ? 'Dùng thử nhanh (4 tài khoản mẫu)' : 'Quick Demo Accounts'}</span>
                   </span>
-                  <span className="text-[10px] text-slate-500">
-                    {isVi ? 'Mật khẩu: 123456' : 'Password: 123456'}
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  {DEMO_ACCOUNTS.map((demo) => (
-                    <button
-                      key={demo.email}
-                      type="button"
-                      onClick={() => handleDemoLogin(demo)}
-                      disabled={isSubmitting || isLoading}
-                      className="p-2 text-left rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 transition-colors flex items-center gap-2 cursor-pointer disabled:opacity-50 min-w-0"
-                    >
-                      <img
-                        src={demo.avatar}
-                        alt={demo.name}
-                        className="w-7 h-7 rounded-full object-cover border border-teal-500/50 shrink-0"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="text-[11px] font-bold text-white truncate">{demo.name}</div>
-                        <div className="text-[9px] text-teal-300/80 truncate">{demo.role.split('/')[0]}</div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
+                  <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${showDemoAccounts ? 'rotate-180' : ''}`} />
+                </button>
+                {showDemoAccounts && (
+                  <div className="mt-2.5 space-y-2 animate-in fade-in duration-150">
+                    <div className="text-[10px] text-slate-400 flex justify-end">
+                      <span>{isVi ? 'Mật khẩu: 123456' : 'Password: 123456'}</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {DEMO_ACCOUNTS.map((demo) => (
+                        <button
+                          key={demo.email}
+                          type="button"
+                          onClick={() => handleDemoLogin(demo)}
+                          disabled={isSubmitting || isLoading}
+                          className="p-2 text-left rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 transition-colors flex items-center gap-2 cursor-pointer disabled:opacity-50 min-w-0"
+                        >
+                          <img
+                            src={demo.avatar}
+                            alt={demo.name}
+                            className="w-7 h-7 rounded-full object-cover border border-teal-500/50 shrink-0"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="text-[11px] font-bold text-white truncate">{demo.name}</div>
+                            <div className="text-[9px] text-teal-300/80 truncate">{isVi ? demo.roleVi : demo.roleEn}</div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -402,7 +409,7 @@ export const AuthScreen: React.FC = () => {
           {/* 2. REGISTER MODE (DÀNH CHO NGƯỜI CHƯA ĐĂNG KÝ) */}
           {mode === 'register' && (
             <div className="space-y-4 animate-in fade-in duration-200">
-              <form onSubmit={handleRegisterSubmit} className="space-y-3.5">
+              <form noValidate onSubmit={handleRegisterSubmit} className="space-y-3.5">
                 {/* Optional Avatar Upload */}
                 <div className="flex items-center gap-3 p-2.5 rounded-xl bg-white/5 border border-white/10">
                   <label className="relative cursor-pointer group shrink-0" title={isVi ? 'Chọn ảnh đại diện' : 'Choose profile photo'}>

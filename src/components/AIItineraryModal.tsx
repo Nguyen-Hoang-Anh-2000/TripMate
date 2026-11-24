@@ -431,10 +431,13 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
 
       // 1. Generate Itinerary if selected
       if (selectedTabs.includes('itinerary')) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 12000);
         try {
           const res = await fetch('/api/gemini/generate-itinerary', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
             body: JSON.stringify({
               destination: destination.trim(),
               durationDays,
@@ -467,7 +470,9 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
               : generatedDays.reduce((sum: number, d: any) => sum + (d.activities || []).reduce((ds: number, a: any) => ds + (Number(a.estimatedCost) || 0), 0), 0);
           }
         } catch (apiErr) {
-          console.warn('Backend itinerary call fallback:', apiErr);
+          console.warn('Backend itinerary call timeout/fallback:', apiErr);
+        } finally {
+          clearTimeout(timeoutId);
         }
 
         // Offline/Client Resilient Fallback: prioritize Saved Places + fill shortage (only if allowAutoGenerate is true)
@@ -611,7 +616,10 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!destination.trim()) return;
+    if (!destination.trim()) {
+      setErrorMsg(isVi ? 'Vui lòng nhập điểm đến cho chuyến đi.' : 'Please enter a trip destination.');
+      return;
+    }
     if (selectedTabs.length === 0) {
       setErrorMsg(isVi ? 'Vui lòng chọn ít nhất 1 mục để tạo dữ liệu.' : 'Please select at least 1 item to generate data.');
       return;
@@ -754,7 +762,7 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
             </div>
           ) : !previewResult ? (
             /* STEP 1: FORM WITH ITEM CHOOSER */
-            <form onSubmit={handleGenerate} className="space-y-4 sm:space-y-5">
+            <form noValidate onSubmit={handleGenerate} className="space-y-4 sm:space-y-5">
               
               {/* Trip Target Info Card (Destination & Budget already selected) */}
               <div className="p-3 bg-teal-50/70 border border-teal-200/80 rounded-2xl space-y-2 text-xs">
@@ -763,22 +771,22 @@ export const AIItineraryModal: React.FC<AIItineraryModalProps> = ({
                     <MapPin className="w-4 h-4 text-teal-600 shrink-0" />
                     <span className="truncate">{destination}</span>
                     <span className="text-teal-400">•</span>
-                    <span>{durationDays} {isVi ? 'ngày' : 'days'}</span>
+                    <span>{durationDays} {isVi ? 'ngày' : durationDays === 1 ? 'day' : 'days'}</span>
                   </div>
                   <div className="font-bold text-teal-800 shrink-0 bg-white px-2.5 py-1 rounded-xl border border-teal-200/80 shadow-2xs">
                     {formatMoney(parseFloat(budgetAmount) || 500, targetTrip?.currency || 'USD', lang)}
                   </div>
                 </div>
-                <div className="flex items-start gap-1.5 text-[11px] text-teal-800/90 leading-relaxed border-t border-teal-200/60 pt-2">
-                  <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-400 shrink-0 mt-0.5" />
+                <div className="flex items-center gap-1.5 text-[11px] text-teal-800/90 leading-snug border-t border-teal-200/60 pt-2">
+                  <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-400 shrink-0" />
                   <span>
                     {rankedMatchingSaved.length > 0
                       ? isVi
-                        ? `Tìm thấy ${rankedMatchingSaved.length} địa điểm đã lưu tại ${destination}. Lịch trình sẽ ưu tiên các địa điểm này trước, phần còn thiếu tự sinh thêm địa điểm đánh giá sao cao nhất phù hợp ngân sách & sở thích đã chọn.`
-                        : `Found ${rankedMatchingSaved.length} saved places in ${destination}. They will be prioritized first, with missing slots auto-filled by top-rated places matching your budget & interests.`
+                        ? `Ưu tiên ${rankedMatchingSaved.length} điểm đã lưu tại ${destination}, AI sẽ tự bổ sung phần còn thiếu.`
+                        : `Prioritizing ${rankedMatchingSaved.length} saved spots in ${destination}; AI fills the rest.`
                       : isVi
-                      ? `Chưa đủ địa điểm lưu sẵn tại ${destination} — hệ thống sẽ tự sinh các địa điểm đánh giá sao cao và được khen nhiều nhất phù hợp ngân sách & sở thích chuyến đi.`
-                      : `No saved places yet for ${destination} — AI will auto-generate top-rated, most-praised places matching your budget & interests.`}
+                      ? `Chưa có điểm lưu tại ${destination} — AI sẽ tự đề xuất điểm phù hợp.`
+                      : `No saved spots in ${destination} — AI will suggest top picks.`}
                   </span>
                 </div>
               </div>

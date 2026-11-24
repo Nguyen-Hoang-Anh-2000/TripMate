@@ -10,6 +10,7 @@ import {
   Mail,
   Loader2,
   ChevronDown,
+  UserPlus,
 } from 'lucide-react';
 import { collection, getDocs } from 'firebase/firestore';
 import { Trip, ItineraryDay, TripMember, UserProfile } from '../types';
@@ -47,6 +48,45 @@ const COVER_PRESETS = [
   { key: 'preset.paris', defaultLabel: 'Pháp / Paris', url: 'https://images.unsplash.com/photo-1502602898657-3e91760cbb34?auto=format&fit=crop&w=1200&q=80' },
 ];
 
+const inferCountryFromDestination = (dest: string, isVi: boolean): string => {
+  const n = normalizeText(dest);
+  if (!n) return '';
+  if (/(da lat|vung tau|phu quoc|da nang|nha trang|ha noi|sai gon|ho chi minh|tp hcm|hoi an|hue|sapa|sa pa|quy nhon|phan thiet|mui ne|can tho|ha long|ninh binh|ha giang|con dao|cat ba|moc chau|tam dao|binh thuan|khanh hoa|lam dong|kien giang|viet nam|vietnam)/.test(n)) {
+    return isVi ? 'Việt Nam' : 'Vietnam';
+  }
+  if (/(tokyo|kyoto|osaka|sapporo|fukuoka|nagoya|nara|okinawa|nhat ban|japan)/.test(n)) {
+    return isVi ? 'Nhật Bản' : 'Japan';
+  }
+  if (/(seoul|busan|jeju|incheon|han quoc|korea)/.test(n)) {
+    return isVi ? 'Hàn Quốc' : 'South Korea';
+  }
+  if (/(bangkok|phuket|chiang mai|pattaya|krabi|thai lan|thailand)/.test(n)) {
+    return isVi ? 'Thái Lan' : 'Thailand';
+  }
+  if (/singapore/.test(n)) return 'Singapore';
+  if (/(paris|nice|lyon|marseille|phap|france)/.test(n)) {
+    return isVi ? 'Pháp' : 'France';
+  }
+  if (/(london|manchester|edinburgh|anh|united kingdom|uk)/.test(n)) {
+    return isVi ? 'Anh' : 'United Kingdom';
+  }
+  if (/(rome|milan|venice|florence|amalfi|italy|italia)/.test(n)) {
+    return isVi ? 'Ý' : 'Italy';
+  }
+  if (/(taipei|taichung|kaohsiung|dai loan|taiwan)/.test(n)) {
+    return isVi ? 'Đài Loan' : 'Taiwan';
+  }
+  if (/(kuala lumpur|penang|malaysia)/.test(n)) return 'Malaysia';
+  if (/(bali|jakarta|indonesia)/.test(n)) return 'Indonesia';
+  if (/(sydney|melbourne|brisbane|uc|australia)/.test(n)) {
+    return isVi ? 'Úc' : 'Australia';
+  }
+  if (/(new york|los angeles|san francisco|las vegas|usa|america)/.test(n)) {
+    return isVi ? 'Mỹ' : 'United States';
+  }
+  return '';
+};
+
 export const NewTripModal: React.FC<NewTripModalProps> = ({
   isOpen,
   onClose,
@@ -61,10 +101,11 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
   const [country, setCountry] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
-  const [budgetTotal, setBudgetTotal] = useState('500');
-  const [currency, setCurrency] = useState('USD');
+  const [budgetTotal, setBudgetTotal] = useState(isVi ? '5000000' : '500');
+  const [currency, setCurrency] = useState(isVi ? 'VND' : 'USD');
   const [coverImage, setCoverImage] = useState(COVER_PRESETS[0].url);
   const [uploadError, setUploadError] = useState('');
+  const [tripFormError, setTripFormError] = useState<string | null>(null);
 
   // Interests combo selectbox state
   const [selectedInterests, setSelectedInterests] = useState<string[]>([]);
@@ -91,10 +132,11 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
     setCountry('');
     setStartDate('');
     setEndDate('');
-    setBudgetTotal('500');
-    setCurrency('USD');
+    setBudgetTotal(isVi ? '5000000' : '500');
+    setCurrency(isVi ? 'VND' : 'USD');
     setCoverImage(COVER_PRESETS[0].url);
     setUploadError('');
+    setTripFormError(null);
     setSelectedInterests([]);
     setInvitedMembers([]);
     setMemberSearchTerm('');
@@ -274,6 +316,27 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
     setInvitedMembers((prev) => prev.filter((m) => m.key !== draftKey));
   };
 
+  const handleAddOfflineInvitee = (rawInput: string) => {
+    const clean = rawInput.trim();
+    if (!clean) return;
+    const isEmail = clean.includes('@');
+    const isPhone = /^[+0-9\s\-()]{6,}$/.test(clean);
+    const displayName = isEmail ? clean.split('@')[0] : clean;
+    const draftKey = `offline:${Date.now()}:${clean.toLowerCase()}`;
+    setInvitedMembers((prev) => [
+      ...prev,
+      {
+        key: draftKey,
+        name: displayName,
+        ...(isEmail ? { email: clean } : {}),
+        ...(isPhone ? { phone: clean } : {}),
+        avatar: buildDefaultAvatar(displayName),
+        isRegistered: false,
+      },
+    ]);
+    setMemberSearchTerm('');
+  };
+
   // Handle local image file upload from mobile or desktop
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -328,7 +391,19 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
   // Create trip directly: open AI Itinerary only if user checked "Tạo lịch trình gợi ý"
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || !destination.trim()) return;
+    setTripFormError(null);
+    if (!title.trim()) {
+      setTripFormError(isVi ? 'Vui lòng nhập tên chuyến đi.' : 'Please enter a trip title.');
+      return;
+    }
+    if (!destination.trim()) {
+      setTripFormError(isVi ? 'Vui lòng nhập điểm đến.' : 'Please enter a destination.');
+      return;
+    }
+    if (startDate && endDate && endDate < startDate) {
+      setTripFormError(isVi ? 'Ngày kết thúc phải sau hoặc bằng ngày bắt đầu.' : 'End date must be on or after the start date.');
+      return;
+    }
     setIsMemberDropdownOpen(false);
     handleConfirmCreate(wantSuggestedItinerary);
   };
@@ -384,18 +459,19 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
       ? [creatorMember, ...invitedTripMembers]
       : [];
 
+    const inferredCountry = inferCountryFromDestination(destination.trim(), isVi);
     const newTrip: Trip = {
       id: `trip-${nowTs}`,
       title: title.trim(),
       destination: destination.trim(),
-      country: country.trim() || destination.trim(),
+      country: country.trim() || inferredCountry || destination.trim(),
       startDate: effectiveStartDate,
       endDate: effectiveEndDate,
       coverImage: coverImage || COVER_PRESETS[0].url,
       budgetTotal: (() => {
-        if (!budgetTotal) return 500;
+        if (!budgetTotal) return isVi ? 5000000 : 500;
         const parsed = parseFloat(budgetTotal);
-        if (isNaN(parsed) || parsed < 0) return 500;
+        if (isNaN(parsed) || parsed < 0) return isVi ? 5000000 : 500;
         return Math.min(parsed, 100000000000);
       })(),
       currency,
@@ -436,11 +512,11 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
         </div>
 
         {/* Content Area */}
-        <form onSubmit={handleFormSubmit} className="overflow-y-auto flex-1 p-4 sm:p-6 space-y-3.5">
-            {uploadError && (
-              <div className="p-2.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
+        <form noValidate onSubmit={handleFormSubmit} className="overflow-y-auto flex-1 p-4 sm:p-6 space-y-3.5">
+            {(uploadError || tripFormError) && (
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{uploadError}</span>
+                <span>{tripFormError || uploadError}</span>
               </div>
             )}
 
@@ -712,10 +788,24 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
                               </span>
                             </div>
                           ) : filteredRegisteredUsers.length === 0 ? (
-                            <div className="px-3 py-3 text-center text-xs text-slate-500">
-                              {isVi
-                                ? 'Không tìm thấy tài khoản TripMate khớp email / SĐT này.'
-                                : 'No TripMate account matches this email / phone.'}
+                            <div className="p-2.5 space-y-2 text-center">
+                              <div className="text-[11px] text-slate-500">
+                                {isVi
+                                  ? 'Không tìm thấy tài khoản TripMate khớp từ khóa này.'
+                                  : 'No TripMate account matches this search.'}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleAddOfflineInvitee(memberSearchTerm)}
+                                className="w-full py-2 px-3 rounded-xl bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-800 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                              >
+                                <UserPlus className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                                <span className="truncate">
+                                  {isVi
+                                    ? `+ Thêm "${memberSearchTerm.trim()}" làm thành viên ngoại tuyến`
+                                    : `+ Add "${memberSearchTerm.trim()}" as offline member`}
+                                </span>
+                              </button>
                             </div>
                           ) : (
                             filteredRegisteredUsers.map((account) => {

@@ -147,7 +147,7 @@ export const CategorySettingsModal: React.FC<CategorySettingsModalProps> = ({
   const QUICK_ICONS = ['🏖️', '📸', '☕', '🍜', '🏨', '🚗', '🛍️', '🎟️', '🏕️', '🛵', '✈️', '⛵', '🎨', '💆'];
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 overflow-y-auto">
+    <div className="fixed inset-0 z-[70] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 overflow-y-auto">
       <div className="bg-white w-full max-w-lg rounded-2xl sm:rounded-3xl border border-slate-200 shadow-2xl overflow-hidden flex flex-col max-h-[92vh] my-auto animate-in fade-in zoom-in-95 duration-150">
         
         {/* Header */}

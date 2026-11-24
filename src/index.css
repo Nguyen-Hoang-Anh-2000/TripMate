@@ -25,6 +25,18 @@
   }
 }
 
+@keyframes vault-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+
+.animate-vault-shake {
+  animation: vault-shake 0.36s ease-in-out;
+}
+
 /* Custom Leaflet Map Fixes */
 .leaflet-container {
   width: 100%;

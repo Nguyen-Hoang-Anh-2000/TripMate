@@ -4,7 +4,7 @@ import {
   Receipt, ArrowUpRight, ShieldCheck, Wallet, PiggyBank, Edit2, Edit3, Check, X, 
   AlertCircle, UserPlus, Eye, RefreshCw, Calendar, Tag, FileText, ChevronRight, ChevronDown, ChevronUp,
   Search, RotateCcw, Download, Sparkles, Copy, SlidersHorizontal, Image, Camera, FileSpreadsheet, Printer,
-  Mail, Phone, UserCheck, Clock, Send, Loader2
+  Mail, Phone, UserCheck, Clock, Send, Loader2, QrCode, Percent
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { collection, doc, setDoc } from 'firebase/firestore';
@@ -16,6 +16,7 @@ import { formatMoney } from '../utils/formatCurrency';
 import { getLocalDateString } from '../utils/dateUtils';
 import { compressAvatarImage } from '../utils/imageUtils';
 import { buildDefaultAvatar, isMemberMatchingUser, resolveMemberAvatar } from '../utils/avatarSyncUtils';
+import { computeExpenseFundSettlements } from '../utils/tripSettlementUtils';
 import { calculateEvenSplits } from './ItineraryView';
 import { ReceiptScannerModal, ScannedReceiptData } from './ReceiptScannerModal';
 
@@ -44,6 +45,8 @@ interface ExpenseSplitterViewProps {
   onUpdateMember?: (memberId: string, data: Partial<TripMember>) => void;
   onDeleteMember?: (memberId: string) => void;
   onSetFundHolder?: (memberId: string) => void;
+  externalQuickAction?: { type: 'add-expense' | 'scan-receipt'; seq: number } | null;
+  onConsumeQuickAction?: () => void;
 }
 
 export interface UnifiedExpenseItem {
@@ -74,6 +77,8 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   onUpdateMember,
   onDeleteMember,
   onSetFundHolder,
+  externalQuickAction,
+  onConsumeQuickAction,
 }) => {
   const { t, lang } = useLanguage();
   const isVi = lang === 'vi';
@@ -120,9 +125,10 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Quick edit member contribution
+  // Quick edit member contribution + double-submit lock
   const [editingContribMemberId, setEditingContribMemberId] = useState<string | null>(null);
   const [editingContribValue, setEditingContribValue] = useState<string>('');
+  const inlineSaveLockRef = useRef<boolean>(false);
 
   // Auth & Add Member form state with registered user lookup
   const { userProfile, searchRegisteredUser, updateUserAvatar } = useAuth();
@@ -134,6 +140,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   const [isCompressingNewMemberAvatar, setIsCompressingNewMemberAvatar] = useState(false);
   const [uploadingMemberId, setUploadingMemberId] = useState<string | null>(null);
   const [newMemberContributed, setNewMemberContributed] = useState('0');
+  const [addMemberError, setAddMemberError] = useState<string | null>(null);
   const [memberActionToast, setMemberActionToast] = useState<string | null>(null);
 
   // Debounced search for registered users by email or phone
@@ -163,6 +170,23 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     return () => clearTimeout(timer);
   }, [newMemberContact]);
 
+  // Helper to distribute 100% evenly across member IDs
+  const calculateEvenPercents = (memberIds: string[]): { [id: string]: string } => {
+    const res: { [id: string]: string } = {};
+    if (memberIds.length === 0) return res;
+    const base = Math.floor((10000 / memberIds.length)) / 100;
+    let allocated = 0;
+    memberIds.forEach((id, idx) => {
+      if (idx === memberIds.length - 1) {
+        res[id] = String(Math.round((100 - allocated) * 100) / 100);
+      } else {
+        res[id] = String(base);
+        allocated += base;
+      }
+    });
+    return res;
+  };
+
   // Add Expense form state
   const [title, setTitle] = useState('');
   const [amount, setAmount] = useState('');
@@ -172,9 +196,16 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   const [addMemberSplits, setAddMemberSplits] = useState<{ [memberId: string]: string }>(() =>
     calculateEvenSplits(0, trip.members.map((m) => m.id))
   );
+  const [addSplitMode, setAddSplitMode] = useState<'amount' | 'percent'>('amount');
+  const [addMemberPercents, setAddMemberPercents] = useState<{ [memberId: string]: string }>(() =>
+    calculateEvenPercents(trip.members.map((m) => m.id))
+  );
   const [isAddParticipantsExpanded, setIsAddParticipantsExpanded] = useState(true);
   const [addSplitWithSearch, setAddSplitWithSearch] = useState('');
   const [addParticipantsFilter, setAddParticipantsFilter] = useState<'all' | 'selected'>('all');
+
+  const [editSplitMode, setEditSplitMode] = useState<'amount' | 'percent'>('amount');
+  const [editMemberPercents, setEditMemberPercents] = useState<{ [memberId: string]: string }>({});
 
   // AI OCR Receipt Scanner states
   const [isReceiptScannerOpen, setIsReceiptScannerOpen] = useState(false);
@@ -184,12 +215,69 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   const [isSimplifiedDebts, setIsSimplifiedDebts] = useState<boolean>(true);
   const [copiedSettlement, setCopiedSettlement] = useState<boolean>(false);
 
+  // VietQR instant transfer modal states
+  const VIETQR_BANKS = [
+    { bin: '970436', short: 'VCB', name: 'Vietcombank' },
+    { bin: '970407', short: 'TCB', name: 'Techcombank' },
+    { bin: '970422', short: 'MB', name: 'MB Bank' },
+    { bin: '970416', short: 'ACB', name: 'ACB' },
+    { bin: '970418', short: 'BIDV', name: 'BIDV' },
+    { bin: '970423', short: 'TPB', name: 'TPBank' },
+    { bin: '970432', short: 'VPB', name: 'VPBank' },
+    { bin: '970415', short: 'CTG', name: 'VietinBank' },
+  ];
+  const [vietQrTarget, setVietQrTarget] = useState<{ from: string; to: string; amount: number } | null>(null);
+  const [vietQrBankBin, setVietQrBankBin] = useState<string>('970422');
+  const [vietQrAccount, setVietQrAccount] = useState<string>('');
+  const [vietQrCopied, setVietQrCopied] = useState<string | null>(null);
+
   // Validation & Error states
   const [addFormError, setAddFormError] = useState<string | null>(null);
   const [editFormError, setEditFormError] = useState<string | null>(null);
 
   // Receipt image preview modal
   const [viewingReceiptImage, setViewingReceiptImage] = useState<string | null>(null);
+
+  // Consume external FAB quick actions
+  useEffect(() => {
+    if (!externalQuickAction) return;
+    if (externalQuickAction.type === 'scan-receipt') {
+      setIsReceiptScannerOpen(true);
+    } else if (externalQuickAction.type === 'add-expense') {
+      const resetIds = trip.members.map((m) => m.id);
+      setTitle('');
+      setAmount('');
+      setAttachedReceiptUrl(null);
+      setPaidBy('fund');
+      setSplitWith(resetIds);
+      setAddSplitMode('amount');
+      setAddMemberSplits(calculateEvenSplits(0, resetIds));
+      setAddMemberPercents(calculateEvenPercents(resetIds));
+      setAddSplitWithSearch('');
+      setAddParticipantsFilter('all');
+      setIsAddParticipantsExpanded(true);
+      setAddFormError(null);
+      setShowExpenseForm(true);
+    }
+    onConsumeQuickAction?.();
+  }, [externalQuickAction?.seq]);
+
+  const handleOpenVietQRModal = (s: { from: string; to: string; amount: number }) => {
+    try {
+      const savedRaw = localStorage.getItem(`tripmate_vietqr_${s.to}`);
+      if (savedRaw) {
+        const parsed = JSON.parse(savedRaw);
+        if (parsed.bin) setVietQrBankBin(parsed.bin);
+        setVietQrAccount(parsed.account || '');
+      } else {
+        setVietQrAccount('');
+      }
+    } catch {
+      setVietQrAccount('');
+    }
+    setVietQrCopied(null);
+    setVietQrTarget(s);
+  };
 
   const handleApplyReceipt = (data: ScannedReceiptData) => {
     setTitle(data.storeName);
@@ -200,7 +288,9 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
 
     const resetIds = trip.members.map((m) => m.id);
     setSplitWith(resetIds);
+    setAddSplitMode('amount');
     setAddMemberSplits(calculateEvenSplits(data.totalAmount, resetIds));
+    setAddMemberPercents(calculateEvenPercents(resetIds));
     setShowExpenseForm(true);
   };
 
@@ -230,6 +320,17 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
       initialSplits = calculateEvenSplits(item.amount, finalSplitWith);
     }
     setEditMemberSplits(initialSplits);
+    setEditSplitMode('amount');
+    if (item.amount > 0) {
+      const pcts: { [mId: string]: string } = {};
+      finalSplitWith.forEach((id) => {
+        const v = parseFloat(initialSplits[id] || '0') || 0;
+        pcts[id] = String(Math.round((v / item.amount) * 10000) / 100);
+      });
+      setEditMemberPercents(pcts);
+    } else {
+      setEditMemberPercents(calculateEvenPercents(finalSplitWith));
+    }
 
     setEditDate(item.date || '');
     setEditNote(item.note || '');
@@ -249,6 +350,8 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     const num = parseFloat(editAmount) || 0;
     setEditSplitWith(finalSplit);
     setEditMemberSplits(calculateEvenSplits(num, finalSplit));
+    setEditMemberPercents(calculateEvenPercents(finalSplit));
+    setEditFormError(null);
   };
 
   const handleSelectAllEditSplitWith = () => {
@@ -259,6 +362,8 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     const num = parseFloat(editAmount) || 0;
     setEditSplitWith(nextSplitWith);
     setEditMemberSplits(calculateEvenSplits(num, nextSplitWith));
+    setEditMemberPercents(calculateEvenPercents(nextSplitWith));
+    setEditFormError(null);
   };
 
   const handleSaveExpenseDetails = (e: React.FormEvent) => {
@@ -273,6 +378,18 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     if (!editTitle.trim()) {
       setEditFormError(isVi ? 'Vui lòng nhập tên khoản chi.' : 'Please enter title.');
       return;
+    }
+
+    if (editSplitMode === 'percent') {
+      const pctSum = editSplitWith.reduce((sum, mId) => sum + (parseFloat(editMemberPercents[mId] || '0') || 0), 0);
+      if (Math.abs(pctSum - 100) > 0.1) {
+        setEditFormError(
+          isVi
+            ? `Tổng tỷ lệ chia theo % hiện là ${pctSum.toFixed(1)}% (phải bằng 100%).`
+            : `Total percentage split is ${pctSum.toFixed(1)}% (must equal 100%).`
+        );
+        return;
+      }
     }
 
     const formattedMemberSplits: { memberId: string; amount: number }[] = editSplitWith.map((mId) => ({
@@ -430,218 +547,29 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   }, [unifiedExpenses]);
 
   // =========================================================================
-  // 2. TỔNG QUAN TỔNG TIỀN ĐÃ GÓP & TỔNG TIỀN ĐÃ CHI
+  // 2 & 3 & 4. QUỸ NHÓM, SỐ DƯ THÀNH VIÊN & QUYẾT TOÁN (Chuẩn BUG-01, BUG-02, BUG-08)
   // =========================================================================
-  const totalContributed = trip.members.reduce((sum, m) => sum + (Number(m.contributedAmount) || 0), 0);
-  const totalSpent = unifiedExpenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
-  const fundRemaining = totalContributed - totalSpent;
-
-  // =========================================================================
-  // 3. THÀNH VIÊN VÀ QUỸ ĐÓNG GÓP:
-  // + Đã trả thêm: giá trị chi phí người đã chi tiền khi hoàn thành hoạt động / chi tiêu
-  // + Tiền đã dùng: chi phí được chia ra trong thành viên tham gia khi hoàn thành hoạt động / chi tiêu
-  // Số dư còn lại: A góp + A đã trả thêm - A đã dùng = A còn lại
-  // =========================================================================
-  const memberStats = trip.members.map((member) => {
-    const contributed = member.contributedAmount || 0;
-
-    // Tiền thành viên đã trả thêm: giá trị chi phí người đã chi tiền khi hoàn thành hoạt động / thêm chi tiêu
-    const paidExtra = unifiedExpenses
-      .filter((e) => e.paidBy === member.id)
-      .reduce((sum, e) => sum + e.amount, 0);
-
-    // Tiền đã dùng: chi phí được chia ra trong thành viên tham gia khi hoàn thành hoạt động / chi tiêu
-    let used = 0;
-    unifiedExpenses.forEach((exp) => {
-      if (exp.memberSplits && exp.memberSplits.length > 0) {
-        const ms = exp.memberSplits.find((s) => s.memberId === member.id);
-        if (ms) {
-          used += ms.amount;
-        }
-      } else {
-        const beneficiaries = exp.splitWith.length > 0 ? exp.splitWith : trip.members.map((m) => m.id);
-        if (beneficiaries.includes(member.id)) {
-          used += exp.amount / (beneficiaries.length || 1);
-        }
-      }
-    });
-
-    // Công thức: A góp + A đã trả thêm - A đã dùng = A còn lại
-    const remainingBalance = Math.round((contributed + paidExtra - used) * 100) / 100;
-
-    return {
-      member,
-      contributed,
-      paidExtra,
-      used,
-      remainingBalance,
-    };
-  });
-
-  // =========================================================================
-  // 4. QUYẾT TOÁN CÔNG NỢ THÀNH VIÊN
-  // Quy tắc tính toán:
-  // - Nếu thành viên có số dư >= 0 (số dư dương hoặc bằng 0):
-  //   tiền đóng quỹ và tiền đã trả thêm đủ bù chi phí, thành viên KHÔNG NỢ AI.
-  // - Nếu thành viên có số dư âm (remainingBalance < 0):
-  //   thành viên đang nợ người đã trả thêm trong các hoạt động/chi tiêu mà họ tham gia.
-  // =========================================================================
-  const settlements = useMemo(() => {
-    // 1. Phân loại người có số dư âm (debtors) và người có số dư dương (creditors)
-    const debtors = memberStats
-      .filter((s) => s.remainingBalance < -0.01)
-      .map((s) => ({
-        id: s.member.id,
-        debtAmount: Math.abs(s.remainingBalance),
-      }));
-
-    const creditors = memberStats
-      .filter((s) => s.remainingBalance > 0.01)
-      .map((s) => ({
-        id: s.member.id,
-        availableCredit: s.remainingBalance,
-      }));
-
-    // Nếu không có ai âm tiền, không ai nợ ai (mọi người đều có số dư dương/hợp lệ)
-    if (debtors.length === 0 || creditors.length === 0) {
-      return [];
-    }
-
-    // 2. Tính xem mỗi người chi tiền (Payer) đã trả bao nhiêu cho mỗi người bị âm tiền (Debtor)
-    // trong các hoạt động/chi tiêu mà con nợ có tham gia
-    const paidForDebtorByPayer: Record<string, Record<string, number>> = {};
-    debtors.forEach((d) => {
-      paidForDebtorByPayer[d.id] = {};
-    });
-
-    unifiedExpenses.forEach((exp) => {
-      const payerId = exp.paidBy;
-      if (payerId === 'fund') return; // Quỹ chung chi trả, không ai là chủ nợ cá nhân cho khoản chi này
-
-      debtors.forEach((d) => {
-        if (payerId === d.id) return; // Không tính tự trả cho chính mình
-
-        let shareForD = 0;
-        if (exp.memberSplits && exp.memberSplits.length > 0) {
-          const ms = exp.memberSplits.find((s) => s.memberId === d.id);
-          if (ms) shareForD = ms.amount;
-        } else {
-          const beneficiaries = exp.splitWith.length > 0 ? exp.splitWith : trip.members.map((m) => m.id);
-          if (beneficiaries.includes(d.id)) {
-            shareForD = exp.amount / (beneficiaries.length || 1);
-          }
-        }
-
-        if (shareForD > 0) {
-          paidForDebtorByPayer[d.id][payerId] = (paidForDebtorByPayer[d.id][payerId] || 0) + shareForD;
-        }
-      });
-    });
-
-    const result: { from: string; to: string; amount: number }[] = [];
-
-    // Map theo dõi số tiền credit còn lại của các thành viên có số dư dương
-    const credMap = new Map<string, number>();
-    creditors.forEach((c) => credMap.set(c.id, c.availableCredit));
-
-    // 3. Giải quyết công nợ:
-    // Ưu tiên nợ người đã trực tiếp trả thêm cho các hoạt động mà con nợ tham gia
-    debtors.forEach((d) => {
-      let remainingDebt = d.debtAmount;
-
-      // Danh sách người đã chi trả cho d, xếp theo số tiền trả nhiều nhất trước
-      const payersForD = Object.entries(paidForDebtorByPayer[d.id] || {})
-        .sort(([, amtA], [, amtB]) => amtB - amtA);
-
-      for (const [payerId, paidAmt] of payersForD) {
-        if (remainingDebt <= 0.01) break;
-        const credAvailable = credMap.get(payerId) || 0;
-        if (credAvailable <= 0.01) continue;
-
-        const settleAmt = Math.min(remainingDebt, paidAmt, credAvailable);
-        if (settleAmt > 0.01) {
-          result.push({
-            from: d.id,
-            to: payerId,
-            amount: Math.round(settleAmt * 100) / 100,
-          });
-          remainingDebt -= settleAmt;
-          credMap.set(payerId, credAvailable - settleAmt);
-        }
-      }
-
-      // 4. Nếu vẫn còn nợ (ví dụ chi phí dùng chung hoặc người chi đã hết hạn mức credit),
-      // giải quyết với các thành viên còn dư hạn mức dương khác (như người giữ quỹ hoặc thành viên khác)
-      if (remainingDebt > 0.01) {
-        for (const [credId, credAvailable] of credMap.entries()) {
-          if (remainingDebt <= 0.01) break;
-          if (credId === d.id || credAvailable <= 0.01) continue;
-
-          const settleAmt = Math.min(remainingDebt, credAvailable);
-          if (settleAmt > 0.01) {
-            result.push({
-              from: d.id,
-              to: credId,
-              amount: Math.round(settleAmt * 100) / 100,
-            });
-            remainingDebt -= settleAmt;
-            credMap.set(credId, credAvailable - settleAmt);
-          }
-        }
-      }
-    });
-
-    return result;
-  }, [memberStats, unifiedExpenses, trip.members]);
-
-  // 4. Splitwise-style greedy minimization of transactions
-  const simplifiedSettlements = useMemo(() => {
-    const debtors: { id: string; amount: number }[] = [];
-    const creditors: { id: string; amount: number }[] = [];
-
-    memberStats.forEach((s) => {
-      const bal = Math.round(s.remainingBalance * 100) / 100;
-      if (bal < -0.01) {
-        debtors.push({ id: s.member.id, amount: Math.abs(bal) });
-      } else if (bal > 0.01) {
-        creditors.push({ id: s.member.id, amount: bal });
-      }
-    });
-
-    const result: { from: string; to: string; amount: number }[] = [];
-    let i = 0;
-    let j = 0;
-
-    const dList = debtors.map((d) => ({ ...d }));
-    const cList = creditors.map((c) => ({ ...c }));
-
-    while (i < dList.length && j < cList.length) {
-      dList.sort((a, b) => b.amount - a.amount);
-      cList.sort((a, b) => b.amount - a.amount);
-
-      const debtor = dList[i];
-      const creditor = cList[j];
-      const settleAmt = Math.min(debtor.amount, creditor.amount);
-
-      if (settleAmt > 0.01) {
-        result.push({
-          from: debtor.id,
-          to: creditor.id,
-          amount: Math.round(settleAmt * 100) / 100,
-        });
-        debtor.amount = Math.round((debtor.amount - settleAmt) * 100) / 100;
-        creditor.amount = Math.round((creditor.amount - settleAmt) * 100) / 100;
-      }
-
-      if (debtor.amount <= 0.01) i++;
-      if (creditor.amount <= 0.01) j++;
-    }
-
-    return result;
-  }, [memberStats]);
+  const settlementComputation = useMemo(() => computeExpenseFundSettlements(trip), [trip]);
+  const {
+    totalContributed,
+    totalSpent,
+    fundRemaining,
+    contributorsCount,
+    memberStats,
+    detailedSettlements,
+    simplifiedSettlements,
+  } = settlementComputation;
+  const settlements = useMemo(
+    () => detailedSettlements.map((s) => ({ from: s.fromId, to: s.toId, amount: s.amount })),
+    [detailedSettlements]
+  );
+  const simplifiedTransferList = useMemo(
+    () => simplifiedSettlements.map((s) => ({ from: s.fromId, to: s.toId, amount: s.amount })),
+    [simplifiedSettlements]
+  );
 
   // Active settlements based on user toggle
-  const activeSettlements = isSimplifiedDebts ? simplifiedSettlements : settlements;
+  const activeSettlements = isSimplifiedDebts ? simplifiedTransferList : settlements;
 
   // Normalized title for file exports
   const safeTitle = trip.title.replace(/[^a-zA-Z0-9\u00C0-\u024F\u1EA0-\u1EF9]/g, '_').trim() || 'ChuyenDi';
@@ -698,14 +626,14 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     rawOverviewData.push(['BẢNG TỔNG KẾT TÀI CHÍNH TỪNG THÀNH VIÊN']);
     rawOverviewData.push(['STT', 'Tên thành viên', 'Tiền đã đóng quỹ', 'Tiền tự chi riêng', 'Tổng tiền đã bỏ ra', 'Phần chi phí phải chịu', 'Số dư ròng (Chênh lệch)']);
     memberStats.forEach((s, idx) => {
-      const totalOut = s.contributed + s.paidDirectly;
+      const totalOut = s.contributed + s.paidExtra;
       rawOverviewData.push([
         idx + 1,
         s.member.name,
         s.contributed,
-        s.paidDirectly,
+        s.paidExtra,
         totalOut,
-        s.consumedTotal,
+        s.used,
         s.remainingBalance,
       ]);
     });
@@ -827,14 +755,14 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     ].join(','));
 
     memberStats.forEach((s, idx) => {
-      const totalOut = s.contributed + s.paidDirectly;
+      const totalOut = s.contributed + s.paidExtra;
       lines.push([
         escapeCsv(idx + 1),
         escapeCsv(s.member.name),
         escapeCsv(s.contributed),
-        escapeCsv(s.paidDirectly),
+        escapeCsv(s.paidExtra),
         escapeCsv(totalOut),
-        escapeCsv(s.consumedTotal),
+        escapeCsv(s.used),
         escapeCsv(s.remainingBalance),
       ].join(','));
     });
@@ -955,31 +883,52 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     }
   };
 
-  // Copy settlement summary for chat apps
+  // Copy settlement summary for chat apps (bilingual VI / EN)
   const handleCopySettlement = () => {
     const lines: string[] = [];
-    lines.push(`📊 TỔNG KẾT CHI TIÊU & QUYẾT TOÁN - ${trip.title.toUpperCase()}`);
-    lines.push(`📍 Điểm đến: ${trip.destination}, ${trip.country}`);
-    lines.push(`💰 Tổng chi tiêu: ${formatMoney(totalSpent, trip.currency, lang)}`);
-    lines.push(`👥 Thành viên: ${trip.members.length} người`);
-    lines.push('');
+    if (isVi) {
+      lines.push(`📊 TỔNG KẾT CHI TIÊU & QUYẾT TOÁN - ${trip.title.toUpperCase()}`);
+      lines.push(`📍 Điểm đến: ${trip.destination}${trip.country && trip.country.toLowerCase() !== trip.destination.toLowerCase() ? `, ${trip.country}` : ''}`);
+      lines.push(`💰 Tổng chi tiêu: ${formatMoney(totalSpent, trip.currency, lang)}`);
+      lines.push(`👥 Thành viên: ${trip.members.length} người`);
+      lines.push('');
 
-    if (activeSettlements.length === 0) {
-      lines.push('✅ Tất cả thành viên đều có số dư hợp lệ, không ai nợ ai!');
-      if (fundRemaining > 0) {
-        lines.push(`💵 Quỹ chung còn dư: ${formatMoney(fundRemaining, trip.currency, lang)}.`);
+      if (activeSettlements.length === 0) {
+        lines.push('✅ Tất cả thành viên đều có số dư hợp lệ, không ai nợ ai!');
+        if (fundRemaining > 0) {
+          lines.push(`💵 Quỹ chung còn dư: ${formatMoney(fundRemaining, trip.currency, lang)}.`);
+        }
+      } else {
+        lines.push(`📌 Phương án chuyển tiền ${isSimplifiedDebts ? '(Đã tối ưu hóa số lần chuyển)' : ''}:`);
+        activeSettlements.forEach((s, idx) => {
+          lines.push(`${idx + 1}. ${getMemberName(s.from)} 👉 chuyển cho ${getMemberName(s.to)}: ${formatMoney(s.amount, trip.currency, lang)}`);
+        });
       }
-    } else {
-      lines.push(`📌 Phương án chuyển tiền ${isSimplifiedDebts ? '(Đã tối ưu hóa số lần chuyển)' : ''}:`);
-      activeSettlements.forEach((s, idx) => {
-        const fromName = getMemberName(s.from);
-        const toName = getMemberName(s.to);
-        lines.push(`${idx + 1}. ${fromName} 👉 chuyển cho ${toName}: ${formatMoney(s.amount, trip.currency, lang)}`);
-      });
-    }
 
-    lines.push('');
-    lines.push('🎉 Chúc cả nhóm có chuyến đi trọn vẹn và an toàn!');
+      lines.push('');
+      lines.push('🎉 Chúc cả nhóm có chuyến đi trọn vẹn và an toàn!');
+    } else {
+      lines.push(`📊 EXPENSE & SETTLEMENT SUMMARY - ${trip.title.toUpperCase()}`);
+      lines.push(`📍 Destination: ${trip.destination}${trip.country && trip.country.toLowerCase() !== trip.destination.toLowerCase() ? `, ${trip.country}` : ''}`);
+      lines.push(`💰 Total spent: ${formatMoney(totalSpent, trip.currency, lang)}`);
+      lines.push(`👥 Members: ${trip.members.length}`);
+      lines.push('');
+
+      if (activeSettlements.length === 0) {
+        lines.push('✅ All member balances are settled — no pending debts!');
+        if (fundRemaining > 0) {
+          lines.push(`💵 Remaining group fund: ${formatMoney(fundRemaining, trip.currency, lang)}.`);
+        }
+      } else {
+        lines.push(`📌 Transfer plan ${isSimplifiedDebts ? '(Splitwise Simplified)' : ''}:`);
+        activeSettlements.forEach((s, idx) => {
+          lines.push(`${idx + 1}. ${getMemberName(s.from)} 👉 pays ${getMemberName(s.to)}: ${formatMoney(s.amount, trip.currency, lang)}`);
+        });
+      }
+
+      lines.push('');
+      lines.push('🎉 Wishing everyone a safe and memorable trip!');
+    }
 
     navigator.clipboard.writeText(lines.join('\n'));
     setCopiedSettlement(true);
@@ -997,6 +946,8 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     const num = parseFloat(amount) || 0;
     setSplitWith(finalSplit);
     setAddMemberSplits(calculateEvenSplits(num, finalSplit));
+    setAddMemberPercents(calculateEvenPercents(finalSplit));
+    setAddFormError(null);
   };
 
   const handleSelectAllAddSplitWith = () => {
@@ -1007,6 +958,8 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     const num = parseFloat(amount) || 0;
     setSplitWith(nextSplitWith);
     setAddMemberSplits(calculateEvenSplits(num, nextSplitWith));
+    setAddMemberPercents(calculateEvenPercents(nextSplitWith));
+    setAddFormError(null);
   };
 
   const handleFormSubmit = (e: React.FormEvent) => {
@@ -1033,6 +986,18 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     if (finalSplitWith.length === 0) {
       setAddFormError(isVi ? 'Vui lòng chọn ít nhất 1 thành viên chịu chi phí.' : 'Please select at least 1 participant.');
       return;
+    }
+
+    if (addSplitMode === 'percent') {
+      const pctSum = finalSplitWith.reduce((sum, mId) => sum + (parseFloat(addMemberPercents[mId] || '0') || 0), 0);
+      if (Math.abs(pctSum - 100) > 0.1) {
+        setAddFormError(
+          isVi
+            ? `Tổng tỷ lệ chia theo % hiện là ${pctSum.toFixed(1)}% (phải bằng 100%).`
+            : `Total percentage split is ${pctSum.toFixed(1)}% (must equal 100%).`
+        );
+        return;
+      }
     }
 
     const formattedMemberSplits: { memberId: string; amount: number }[] = finalSplitWith.map((mId) => ({
@@ -1068,7 +1033,9 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     setAmount('');
     setAttachedReceiptUrl(null);
     setSplitWith(resetIds);
+    setAddSplitMode('amount');
     setAddMemberSplits(calculateEvenSplits(0, resetIds));
+    setAddMemberPercents(calculateEvenPercents(resetIds));
     setAddSplitWithSearch('');
     setAddParticipantsFilter('all');
     setIsAddParticipantsExpanded(true);
@@ -1078,8 +1045,12 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
 
   const handleSaveAddMember = async (e: React.FormEvent) => {
     e.preventDefault();
+    setAddMemberError(null);
     const finalName = newMemberName.trim() || matchedUser?.displayName || '';
-    if (!finalName) return;
+    if (!finalName) {
+      setAddMemberError(isVi ? 'Vui lòng nhập tên thành viên hiển thị.' : 'Please enter member display name.');
+      return;
+    }
 
     const contributed = parseFloat(newMemberContributed) || 0;
     const defaultAvatar = newMemberAvatar || matchedUser?.avatar || buildDefaultAvatar(finalName);
@@ -1199,11 +1170,17 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   };
 
   const handleSaveInlineContribution = (memberId: string) => {
-    const num = parseFloat(editingContribValue) || 0;
+    if (inlineSaveLockRef.current) return;
+    inlineSaveLockRef.current = true;
+    const rawNum = parseFloat(editingContribValue);
+    const safeNum = !isNaN(rawNum) && rawNum >= 0 ? rawNum : 0;
     if (onUpdateMember) {
-      onUpdateMember(memberId, { contributedAmount: num });
+      onUpdateMember(memberId, { contributedAmount: safeNum });
     }
     setEditingContribMemberId(null);
+    setTimeout(() => {
+      inlineSaveLockRef.current = false;
+    }, 250);
   };
 
   const handleConfirmDeleteMember = () => {
@@ -1226,13 +1203,14 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
 
   const formatDisplayDate = (dStr?: string) => {
     if (!dStr) return '';
-    if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(dStr)) return dStr;
-    const match = dStr.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    const cleaned = dStr.replace(/^(?:ngày|day)\s*\d+\s*[-–—:·]*\s*/i, '').trim();
+    if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(cleaned)) return cleaned;
+    const match = cleaned.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
     if (match) {
       const [, y, m, d] = match;
       return `${d.padStart(2, '0')}/${m.padStart(2, '0')}/${y}`;
     }
-    return dStr;
+    return cleaned;
   };
 
   return (
@@ -1380,7 +1358,12 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
               {formatMoney(totalContributed, trip.currency, lang)}
             </span>
             <span className="text-[10px] sm:text-[11px] text-teal-700 font-semibold mt-0.5 block truncate">
-              {trip.members.length} {isVi ? 'người đóng quỹ' : 'contributors'}
+              {contributorsCount}{' '}
+              {isVi
+                ? 'người đóng quỹ'
+                : contributorsCount === 1
+                ? 'contributor'
+                : 'contributors'}
             </span>
           </div>
         </div>
@@ -1696,15 +1679,26 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                           value={editingContribValue}
                           onChange={(e) => setEditingContribValue(e.target.value)}
                           onKeyDown={(e) => {
-                            if (e.key === 'Enter') handleSaveInlineContribution(member.id);
-                            if (e.key === 'Escape') setEditingContribMemberId(null);
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              handleSaveInlineContribution(member.id);
+                            }
+                            if (e.key === 'Escape') {
+                              e.preventDefault();
+                              setEditingContribMemberId(null);
+                            }
                           }}
                           className="w-24 text-right text-xs font-bold px-2 py-0.5 bg-white border border-teal-400 rounded-md focus:ring-1 focus:ring-teal-500 focus:outline-hidden"
                           autoFocus
                         />
                         <button
                           type="button"
-                          onClick={() => handleSaveInlineContribution(member.id)}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleSaveInlineContribution(member.id);
+                          }}
                           className="p-1 text-teal-700 hover:bg-teal-100 rounded cursor-pointer"
                           title={isVi ? 'Lưu' : 'Save'}
                         >
@@ -1897,7 +1891,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
             ) : (
               activeSettlements.map((s, idx) => (
                 <div key={idx} className="p-3 bg-slate-50/80 hover:bg-slate-50 rounded-xl border border-slate-200/70 flex items-center justify-between gap-2 transition-colors">
-                  <div className="flex items-center gap-1.5 min-w-0 pr-2">
+                  <div className="flex items-center gap-1.5 min-w-0 pr-1">
                     <img
                       src={getMemberAvatar(s.from)}
                       alt={getMemberName(s.from)}
@@ -1914,9 +1908,20 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                       className="w-5 h-5 rounded-full object-cover border border-white shadow-2xs shrink-0"
                     />
                   </div>
-                  <span className="text-xs font-semibold text-rose-700 bg-rose-50 px-2.5 py-1 rounded-lg border border-rose-100 shrink-0">
-                    {formatMoney(s.amount, trip.currency, lang)}
-                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-xs font-semibold text-rose-700 bg-rose-50 px-2.5 py-1 rounded-lg border border-rose-100 shrink-0">
+                      {formatMoney(s.amount, trip.currency, lang)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenVietQRModal(s)}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-[11px] font-bold transition-colors cursor-pointer shrink-0"
+                      title={isVi ? 'Tạo mã VietQR chuyển khoản nhanh' : 'Generate VietQR transfer code'}
+                    >
+                      <QrCode className="w-3.5 h-3.5" />
+                      <span>QR</span>
+                    </button>
+                  </div>
                 </div>
               ))
             )}
@@ -1931,7 +1936,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
               <span className="text-xs text-slate-500">
                 {isVi 
                   ? `Ghi nhận ${unifiedExpenses.length} khoản (${manualExpensesCount} chi tiêu, ${completedActivitiesCount} hoạt động hoàn tất)`
-                  : `Tracking ${unifiedExpenses.length} records (${manualExpensesCount} expenses, ${completedActivitiesCount} completed)`}
+                  : `Tracking ${unifiedExpenses.length} ${unifiedExpenses.length === 1 ? 'item' : 'items'} (${manualExpensesCount} ${manualExpensesCount === 1 ? 'expense' : 'expenses'}, ${completedActivitiesCount} ${completedActivitiesCount === 1 ? 'activity' : 'activities'})`}
               </span>
             </div>
 
@@ -1949,7 +1954,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                   const rawDate = linkedDay?.date || item.date;
                   const dateStr = formatDisplayDate(rawDate);
                   const dateLabel = item.dayNumber 
-                    ? `${isVi ? `Ngày ${item.dayNumber}` : `Day ${item.dayNumber}`}${dateStr ? ` (${dateStr})` : ''}`
+                    ? `${isVi ? `Ngày ${item.dayNumber}` : `Day ${item.dayNumber}`}${dateStr ? ` · ${dateStr}` : ''}`
                     : (dateStr || (isVi ? 'Chi tiêu thêm' : 'Manual'));
 
                   return (
@@ -2010,7 +2015,12 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                               </span>
                             )}
                             <span className="shrink-0 text-slate-500">
-                              ({item.splitWith.length} {isVi ? 'người tham gia' : 'participants'})
+                              ({item.splitWith.length}{' '}
+                              {isVi
+                                ? 'người tham gia'
+                                : item.splitWith.length === 1
+                                ? 'participant'
+                                : 'participants'})
                             </span>
                           </p>
                         </div>
@@ -2074,7 +2084,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
             <div className="flex items-center justify-between px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-100 shrink-0 bg-white">
               <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
                 <span>🧾</span>
-                <span>{isVi ? 'Thêm Chi Tiêu' : 'Add Expense'}</span>
+                <span>{isVi ? 'Thêm chi tiêu' : 'Add Expense'}</span>
               </h3>
               <button
                 type="button"
@@ -2086,7 +2096,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
             </div>
 
             {/* Modal Form */}
-            <form onSubmit={handleFormSubmit} className="flex flex-col flex-1 overflow-hidden min-h-0">
+            <form noValidate onSubmit={handleFormSubmit} className="flex flex-col flex-1 overflow-hidden min-h-0">
               <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 overscroll-contain">
                 {/* Form Error Alert */}
                 {addFormError && (
@@ -2184,7 +2194,17 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                       onChange={(e) => {
                         setAmount(e.target.value);
                         const num = parseFloat(e.target.value) || 0;
-                        setAddMemberSplits(calculateEvenSplits(num, splitWith));
+                        if (addSplitMode === 'percent') {
+                          const nextSplits: { [id: string]: string } = {};
+                          splitWith.forEach((id) => {
+                            const pct = parseFloat(addMemberPercents[id] || '0') || 0;
+                            nextSplits[id] = String(Math.round(((num * pct) / 100) * 100) / 100);
+                          });
+                          setAddMemberSplits(nextSplits);
+                        } else {
+                          setAddMemberSplits(calculateEvenSplits(num, splitWith));
+                        }
+                        setAddFormError(null);
                       }}
                       className="w-full text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 bg-white focus:outline-hidden font-bold text-slate-900"
                     />
@@ -2230,19 +2250,60 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
 
                 {/* Người tham gia */}
                 <div className="space-y-2">
-                  <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center justify-between mb-1.5 gap-2">
                     <label
                       onClick={() => setIsAddParticipantsExpanded(!isAddParticipantsExpanded)}
-                      className="text-xs font-bold text-slate-800 flex items-center gap-1.5 cursor-pointer select-none"
+                      className="text-xs font-bold text-slate-800 flex items-center gap-1.5 cursor-pointer select-none min-w-0"
                     >
-                      <Users className="w-3.5 h-3.5 text-teal-600" />
-                      <span>{isVi ? 'Người tham gia' : 'Participants'}</span>
-                      <span className="text-[11px] font-semibold text-teal-700 bg-teal-100/70 px-1.5 py-0.5 rounded-full">
-                        {splitWith.length}/{trip.members.length} {isVi ? 'người' : 'members'}
+                      <Users className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                      <span className="truncate">{isVi ? 'Người tham gia' : 'Participants'}</span>
+                      <span className="text-[11px] font-semibold text-teal-700 bg-teal-100/70 px-1.5 py-0.5 rounded-full shrink-0">
+                        {splitWith.length}/{trip.members.length}{' '}
+                        {isVi ? 'người' : trip.members.length === 1 ? 'member' : 'members'}
                       </span>
                     </label>
 
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {isAddParticipantsExpanded && (
+                        <div className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-0.5 text-[10px] font-bold">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAddSplitMode('amount');
+                              setAddFormError(null);
+                            }}
+                            className={`px-1.5 py-0.5 rounded-md cursor-pointer transition-colors ${
+                              addSplitMode === 'amount' ? 'bg-white text-teal-800 shadow-2xs' : 'text-slate-500'
+                            }`}
+                          >
+                            {trip.currency || 'VND'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const totalNum = parseFloat(amount) || 0;
+                              if (totalNum > 0) {
+                                const pcts: { [id: string]: string } = {};
+                                splitWith.forEach((id) => {
+                                  const v = parseFloat(addMemberSplits[id] || '0') || 0;
+                                  pcts[id] = String(Math.round((v / totalNum) * 10000) / 100);
+                                });
+                                setAddMemberPercents(pcts);
+                              } else {
+                                setAddMemberPercents(calculateEvenPercents(splitWith));
+                              }
+                              setAddSplitMode('percent');
+                              setAddFormError(null);
+                            }}
+                            className={`px-1.5 py-0.5 rounded-md cursor-pointer transition-colors flex items-center gap-0.5 ${
+                              addSplitMode === 'percent' ? 'bg-white text-teal-800 shadow-2xs' : 'text-slate-500'
+                            }`}
+                          >
+                            <Percent className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
+                      )}
+
                       {isAddParticipantsExpanded && (
                         <button
                           type="button"
@@ -2295,7 +2356,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                         <span className="text-xs text-slate-700 font-medium truncate">
                           {splitWith.length === trip.members.length
                             ? (isVi ? 'Tất cả thành viên đang tham gia' : 'All members participating')
-                            : `${splitWith.length} ${isVi ? 'thành viên tham gia' : 'members participating'}`}
+                            : `${splitWith.length} ${isVi ? 'thành viên tham gia' : splitWith.length === 1 ? 'member participating' : 'members participating'}`}
                         </span>
                       </div>
                       <ChevronDown className="w-4 h-4 text-teal-700 shrink-0 ml-2 group-hover:translate-y-0.5 transition-transform" />
@@ -2386,22 +2447,59 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
 
                                 {isSelected && (
                                   <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
-                                    <input
-                                      type="number"
-                                      min="0"
-                                      step="any"
-                                      value={addMemberSplits[member.id] ?? ''}
-                                      onChange={(e) => {
-                                        e.stopPropagation();
-                                        const val = e.target.value;
-                                        setAddMemberSplits((prev) => ({
-                                          ...prev,
-                                          [member.id]: val,
-                                        }));
-                                      }}
-                                      placeholder="0"
-                                      className="w-24 text-right text-xs font-bold px-2 py-1 bg-white border border-teal-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-teal-500 text-slate-800"
-                                    />
+                                    {addSplitMode === 'percent' ? (
+                                      <div className="flex items-center gap-1">
+                                        <span className="text-[10px] text-slate-500 font-normal">
+                                          {formatMoney(parseFloat(addMemberSplits[member.id] || '0') || 0, trip.currency, lang)}
+                                        </span>
+                                        <div className="relative flex items-center">
+                                          <input
+                                            type="number"
+                                            min="0"
+                                            max="100"
+                                            step="any"
+                                            value={addMemberPercents[member.id] ?? ''}
+                                            onChange={(e) => {
+                                              e.stopPropagation();
+                                              const pctStr = e.target.value;
+                                              const pctNum = parseFloat(pctStr) || 0;
+                                              const totalCost = parseFloat(amount) || 0;
+                                              setAddMemberPercents((prev) => ({ ...prev, [member.id]: pctStr }));
+                                              setAddMemberSplits((prev) => ({
+                                                ...prev,
+                                                [member.id]: String(Math.round(((totalCost * pctNum) / 100) * 100) / 100),
+                                              }));
+                                              setAddFormError(null);
+                                            }}
+                                            placeholder="0"
+                                            className="w-16 text-right text-xs font-bold pl-1.5 pr-4 py-1 bg-white border border-teal-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-teal-500 text-slate-800"
+                                          />
+                                          <span className="absolute right-1.5 text-[10px] font-bold text-slate-400 pointer-events-none">%</span>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        step="any"
+                                        value={addMemberSplits[member.id] ?? ''}
+                                        onChange={(e) => {
+                                          e.stopPropagation();
+                                          const val = e.target.value;
+                                          setAddMemberSplits((prev) => {
+                                            const next = { ...prev, [member.id]: val };
+                                            const totalCostNum = parseFloat(amount) || 0;
+                                            const nextSum = splitWith.reduce((acc, mId) => acc + (parseFloat(next[mId] || '0') || 0), 0);
+                                            if (Math.abs(nextSum - totalCostNum) < 0.05) {
+                                              setAddFormError(null);
+                                            }
+                                            return next;
+                                          });
+                                        }}
+                                        placeholder="0"
+                                        className="w-24 text-right text-xs font-bold px-2 py-1 bg-white border border-teal-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-teal-500 text-slate-800"
+                                      />
+                                    )}
                                   </div>
                                 )}
                               </div>
@@ -2420,9 +2518,12 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                           const val = parseFloat(addMemberSplits[mId] || '0');
                           return acc + (isNaN(val) ? 0 : val);
                         }, 0);
+                        const pctTotal = splitWith.reduce((acc, mId) => acc + (parseFloat(addMemberPercents[mId] || '0') || 0), 0);
                         const totalCostNum = parseFloat(amount) || 0;
                         const diff = Math.round((memberSplitsTotal - totalCostNum) * 100) / 100;
-                        const isBalanced = Math.abs(diff) < 0.01;
+                        const isBalanced = addSplitMode === 'percent'
+                          ? Math.abs(pctTotal - 100) < 0.1
+                          : Math.abs(diff) < 0.01;
 
                         return (
                           <div className={`p-3 rounded-xl border transition-colors text-xs ${
@@ -2438,13 +2539,19 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                                   <span className="w-2.5 h-2.5 rounded-full bg-amber-500 shrink-0" />
                                 )}
                                 <span className="text-slate-600 font-semibold">{isVi ? 'Tổng:' : 'Total:'}</span>
-                                <span className="font-extrabold text-slate-900">{formatMoney(memberSplitsTotal, trip.currency, lang)}</span>
+                                <span className="font-extrabold text-slate-900">
+                                  {addSplitMode === 'percent'
+                                    ? `${Math.round(pctTotal * 100) / 100}% (${formatMoney(memberSplitsTotal, trip.currency, lang)})`
+                                    : formatMoney(memberSplitsTotal, trip.currency, lang)}
+                                </span>
                               </div>
                             </div>
 
                             {!isBalanced && (
                               <div className="mt-1 pl-4 text-xs font-semibold text-amber-700">
-                                {diff > 0
+                                {addSplitMode === 'percent'
+                                  ? (isVi ? `Cần tổng bằng 100% (hiện chênh ${(pctTotal - 100).toFixed(1)}%)` : `Must equal 100% (diff ${(pctTotal - 100).toFixed(1)}%)`)
+                                  : diff > 0
                                   ? (isVi ? `Dư: +${formatMoney(diff, trip.currency, lang)}` : `Over: +${formatMoney(diff, trip.currency, lang)}`)
                                   : (isVi ? `Thiếu: -${formatMoney(Math.abs(diff), trip.currency, lang)}` : `Short: -${formatMoney(Math.abs(diff), trip.currency, lang)}`)}
                               </div>
@@ -2452,22 +2559,29 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
 
                             {!isBalanced && (
                               <div className="grid grid-cols-2 gap-2 mt-2.5 pt-2.5 border-t border-amber-200/70">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setAmount(String(memberSplitsTotal));
-                                  }}
-                                  className="flex items-center justify-center gap-1.5 py-1.5 px-2 bg-amber-600 hover:bg-amber-700 active:scale-[0.98] text-white rounded-lg font-bold text-xs transition-all cursor-pointer shadow-2xs text-center"
-                                >
-                                  <RefreshCw className="w-3.5 h-3.5 shrink-0" />
-                                  <span className="truncate">{isVi ? 'Cập nhật' : 'Update'}</span>
-                                </button>
+                                {addSplitMode === 'amount' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setAmount(String(memberSplitsTotal));
+                                      setAddFormError(null);
+                                    }}
+                                    className="flex items-center justify-center gap-1.5 py-1.5 px-2 bg-amber-600 hover:bg-amber-700 active:scale-[0.98] text-white rounded-lg font-bold text-xs transition-all cursor-pointer shadow-2xs text-center"
+                                  >
+                                    <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                                    <span className="truncate">{isVi ? 'Cập nhật' : 'Update'}</span>
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() => {
                                     setAddMemberSplits(calculateEvenSplits(totalCostNum, splitWith));
+                                    setAddMemberPercents(calculateEvenPercents(splitWith));
+                                    setAddFormError(null);
                                   }}
-                                  className="flex items-center justify-center gap-1.5 py-1.5 px-2 bg-white hover:bg-slate-100 active:scale-[0.98] text-slate-700 border border-slate-300 rounded-lg font-bold text-xs transition-all cursor-pointer shadow-2xs text-center"
+                                  className={`flex items-center justify-center gap-1.5 py-1.5 px-2 bg-white hover:bg-slate-100 active:scale-[0.98] text-slate-700 border border-slate-300 rounded-lg font-bold text-xs transition-all cursor-pointer shadow-2xs text-center ${
+                                    addSplitMode === 'percent' ? 'col-span-2' : ''
+                                  }`}
                                 >
                                   <RotateCcw className="w-3.5 h-3.5 shrink-0 text-slate-500" />
                                   <span className="truncate">{isVi ? 'Chia đều lại' : 'Split equally'}</span>
@@ -2534,7 +2648,13 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleSaveAddMember} className="space-y-4">
+            <form noValidate onSubmit={handleSaveAddMember} className="space-y-4">
+              {addMemberError && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{addMemberError}</span>
+                </div>
+              )}
               {/* Input: Email hoặc Số điện thoại */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
@@ -2837,7 +2957,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
             </div>
 
             {/* Modal Body */}
-            <form onSubmit={handleSaveExpenseDetails} className="p-4 sm:p-6 space-y-4 overflow-y-auto">
+            <form noValidate onSubmit={handleSaveExpenseDetails} className="p-4 sm:p-6 space-y-4 overflow-y-auto">
               
               {/* Day / Source info badge */}
               {selectedExpense.activityId ? (() => {
@@ -2895,9 +3015,20 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                     required
                     value={editAmount}
                     onChange={(e) => {
-                      setEditAmount(e.target.value);
-                      const num = parseFloat(e.target.value) || 0;
-                      setEditMemberSplits(calculateEvenSplits(num, editSplitWith));
+                      const val = e.target.value;
+                      setEditAmount(val);
+                      const num = parseFloat(val) || 0;
+                      if (editSplitMode === 'percent') {
+                        const nextSplits: { [id: string]: string } = {};
+                        editSplitWith.forEach((id) => {
+                          const pct = parseFloat(editMemberPercents[id] || '0') || 0;
+                          nextSplits[id] = String(Math.round(((num * pct) / 100) * 100) / 100);
+                        });
+                        setEditMemberSplits(nextSplits);
+                      } else {
+                        setEditMemberSplits(calculateEvenSplits(num, editSplitWith));
+                      }
+                      setEditFormError(null);
                     }}
                     className="w-full text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 bg-white focus:outline-hidden font-bold text-slate-900"
                     placeholder="100000"
@@ -3048,75 +3179,116 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
               {/* Người tham gia - Khung người tham gia có icon ẩn / hiện mũi nhọn lên / xuống & sắp xếp tích lên đầu & thanh đối chiếu */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between mb-1.5">
-                  <label 
-                    onClick={() => setIsEditParticipantsExpanded(!isEditParticipantsExpanded)}
-                    className="text-xs font-bold text-slate-800 flex items-center gap-1.5 cursor-pointer select-none"
-                  >
-                    <Users className="w-3.5 h-3.5 text-teal-600" />
-                    <span>{isVi ? 'Người tham gia' : 'Participants'}</span>
-                    <span className="text-[11px] font-semibold text-teal-700 bg-teal-100/70 px-1.5 py-0.5 rounded-full">
-                      {editSplitWith.length}/{trip.members.length} {isVi ? 'người' : 'members'}
-                    </span>
-                  </label>
+                    <label 
+                      onClick={() => setIsEditParticipantsExpanded(!isEditParticipantsExpanded)}
+                      className="text-xs font-bold text-slate-800 flex items-center gap-1.5 cursor-pointer select-none min-w-0"
+                    >
+                      <Users className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                      <span className="truncate">{isVi ? 'Người tham gia' : 'Participants'}</span>
+                      <span className="text-[11px] font-semibold text-teal-700 bg-teal-100/70 px-1.5 py-0.5 rounded-full shrink-0">
+                        {editSplitWith.length}/{trip.members.length}{' '}
+                        {isVi ? 'người' : trip.members.length === 1 ? 'member' : 'members'}
+                      </span>
+                    </label>
 
-                  <div className="flex items-center gap-1.5">
-                    {/* Nút Chọn tất cả / Bỏ chọn */}
-                    {isEditParticipantsExpanded && (
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {isEditParticipantsExpanded && (
+                        <div className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-0.5 text-[10px] font-bold">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditSplitMode('amount');
+                              setEditFormError(null);
+                            }}
+                            className={`px-1.5 py-0.5 rounded-md cursor-pointer transition-colors ${
+                              editSplitMode === 'amount' ? 'bg-white text-teal-800 shadow-2xs' : 'text-slate-500'
+                            }`}
+                          >
+                            {trip.currency || 'VND'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const totalNum = parseFloat(editAmount) || 0;
+                              if (totalNum > 0) {
+                                const pcts: { [id: string]: string } = {};
+                                editSplitWith.forEach((id) => {
+                                  const v = parseFloat(editMemberSplits[id] || '0') || 0;
+                                  pcts[id] = String(Math.round((v / totalNum) * 10000) / 100);
+                                });
+                                setEditMemberPercents(pcts);
+                              } else {
+                                setEditMemberPercents(calculateEvenPercents(editSplitWith));
+                              }
+                              setEditSplitMode('percent');
+                              setEditFormError(null);
+                            }}
+                            className={`px-1.5 py-0.5 rounded-md cursor-pointer transition-colors flex items-center gap-0.5 ${
+                              editSplitMode === 'percent' ? 'bg-white text-teal-800 shadow-2xs' : 'text-slate-500'
+                            }`}
+                          >
+                            <Percent className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Nút Chọn tất cả / Bỏ chọn */}
+                      {isEditParticipantsExpanded && (
+                        <button
+                          type="button"
+                          onClick={handleSelectAllEditSplitWith}
+                          className="text-[11px] text-teal-700 hover:text-teal-900 font-semibold px-2 py-0.5 rounded-md hover:bg-teal-100/60 cursor-pointer transition-colors"
+                        >
+                          {editSplitWith.length === trip.members.length
+                            ? (isVi ? 'Bỏ chọn' : 'Deselect all')
+                            : (isVi ? 'Chọn tất cả' : 'Select all')}
+                        </button>
+                      )}
+
+                      {/* Ẩn / hiện chỉ bằng icon mũi nhọn xuống / mũi nhọn lên */}
                       <button
                         type="button"
-                        onClick={handleSelectAllEditSplitWith}
-                        className="text-[11px] text-teal-700 hover:text-teal-900 font-semibold px-2 py-0.5 rounded-md hover:bg-teal-100/60 cursor-pointer transition-colors"
+                        onClick={() => setIsEditParticipantsExpanded(!isEditParticipantsExpanded)}
+                        className="p-1 rounded-lg text-teal-800 hover:bg-teal-100/80 cursor-pointer transition-colors border border-teal-300/80 bg-white shadow-2xs flex items-center justify-center"
+                        title={isEditParticipantsExpanded ? (isVi ? 'Thu gọn' : 'Collapse') : (isEditParticipantsExpanded ? 'Collapse' : (isVi ? 'Mở rộng' : 'Expand'))}
+                        aria-label={isEditParticipantsExpanded ? 'Collapse' : 'Expand'}
                       >
-                        {editSplitWith.length === trip.members.length
-                          ? (isVi ? 'Bỏ chọn' : 'Deselect all')
-                          : (isVi ? 'Chọn tất cả' : 'Select all')}
+                        {isEditParticipantsExpanded ? (
+                          <ChevronUp className="w-4 h-4 text-teal-700" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4 text-teal-700" />
+                        )}
                       </button>
-                    )}
-
-                    {/* Ẩn / hiện chỉ bằng icon mũi nhọn xuống / mũi nhọn lên */}
-                    <button
-                      type="button"
-                      onClick={() => setIsEditParticipantsExpanded(!isEditParticipantsExpanded)}
-                      className="p-1 rounded-lg text-teal-800 hover:bg-teal-100/80 cursor-pointer transition-colors border border-teal-300/80 bg-white shadow-2xs flex items-center justify-center"
-                      title={isEditParticipantsExpanded ? (isVi ? 'Thu gọn' : 'Collapse') : (isVi ? 'Mở rộng' : 'Expand')}
-                      aria-label={isEditParticipantsExpanded ? 'Collapse' : 'Expand'}
-                    >
-                      {isEditParticipantsExpanded ? (
-                        <ChevronUp className="w-4 h-4 text-teal-700" />
-                      ) : (
-                        <ChevronDown className="w-4 h-4 text-teal-700" />
-                      )}
-                    </button>
+                    </div>
                   </div>
-                </div>
 
-                {!isEditParticipantsExpanded ? (
-                  /* Khi Thu gọn: Hiển thị avatar stack các thành viên tham gia */
-                  <div
-                    onClick={() => setIsEditParticipantsExpanded(true)}
-                    className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between cursor-pointer hover:bg-slate-100/70 transition-colors shadow-2xs group"
-                  >
-                    <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0">
-                      <div className="flex -space-x-1.5 overflow-hidden shrink-0">
-                        {editSplitWith.slice(0, 6).map((id) => {
-                          const m = trip.members.find((mb) => mb.id === id);
-                          if (!m) return null;
-                          return (
-                            <img
-                              key={id}
-                              src={resolveMemberAvatar(m, userProfile, trip.creatorId)}
-                              alt={m.name}
-                              title={m.name}
-                              className="w-5 h-5 rounded-full object-cover border-2 border-white ring-1 ring-teal-300"
-                            />
-                          );
-                        })}
-                      </div>
-                      <span className="text-xs text-slate-700 font-medium truncate">
-                        {editSplitWith.length === trip.members.length
-                          ? (isVi ? 'Tất cả thành viên đang tham gia' : 'All members participating')
-                          : `${editSplitWith.length} ${isVi ? 'thành viên tham gia' : 'members participating'}`}
-                      </span>
+                  {!isEditParticipantsExpanded ? (
+                    /* Khi Thu gọn: Hiển thị avatar stack các thành viên tham gia */
+                    <div
+                      onClick={() => setIsEditParticipantsExpanded(true)}
+                      className="p-2.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between cursor-pointer hover:bg-slate-100/70 transition-colors shadow-2xs group"
+                    >
+                      <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0">
+                        <div className="flex -space-x-1.5 overflow-hidden shrink-0">
+                          {editSplitWith.slice(0, 6).map((id) => {
+                            const m = trip.members.find((mb) => mb.id === id);
+                            if (!m) return null;
+                            return (
+                              <img
+                                key={id}
+                                src={resolveMemberAvatar(m, userProfile, trip.creatorId)}
+                                alt={m.name}
+                                title={m.name}
+                                className="w-5 h-5 rounded-full object-cover border-2 border-white ring-1 ring-teal-300"
+                              />
+                            );
+                          })}
+                        </div>
+                        <span className="text-xs text-slate-700 font-medium truncate">
+                          {editSplitWith.length === trip.members.length
+                            ? (isVi ? 'Tất cả thành viên đang tham gia' : 'All members participating')
+                            : `${editSplitWith.length} ${isVi ? 'thành viên tham gia' : editSplitWith.length === 1 ? 'member participating' : 'members participating'}`}
+                        </span>
                     </div>
                     <ChevronDown className="w-4 h-4 text-teal-700 shrink-0 ml-2 group-hover:translate-y-0.5 transition-transform" />
                   </div>
@@ -3207,28 +3379,65 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                                 <span className="text-xs truncate">{member.name}</span>
                               </div>
 
-                              {/* Nhập số tiền của từng thành viên tham gia */}
+                              {/* Nhập số tiền hoặc % của từng thành viên tham gia */}
                               {isSelected && (
                                 <div 
                                   className="shrink-0 ml-2"
                                   onClick={(e) => e.stopPropagation()}
                                 >
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    step="any"
-                                    value={editMemberSplits[member.id] ?? ''}
-                                    onChange={(e) => {
-                                      e.stopPropagation();
-                                      const val = e.target.value;
-                                      setEditMemberSplits((prev) => ({
-                                        ...prev,
-                                        [member.id]: val,
-                                      }));
-                                    }}
-                                    placeholder="0"
-                                    className="w-24 text-right text-xs font-bold px-2 py-1 bg-white border border-teal-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-teal-500 text-slate-800"
-                                  />
+                                  {editSplitMode === 'percent' ? (
+                                    <div className="flex items-center gap-1">
+                                      <span className="text-[10px] text-slate-500 font-normal">
+                                        {formatMoney(parseFloat(editMemberSplits[member.id] || '0') || 0, trip.currency, lang)}
+                                      </span>
+                                      <div className="relative flex items-center">
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          max="100"
+                                          step="any"
+                                          value={editMemberPercents[member.id] ?? ''}
+                                          onChange={(e) => {
+                                            e.stopPropagation();
+                                            const pctStr = e.target.value;
+                                            const pctNum = parseFloat(pctStr) || 0;
+                                            const totalCost = parseFloat(editAmount) || 0;
+                                            setEditMemberPercents((prev) => ({ ...prev, [member.id]: pctStr }));
+                                            setEditMemberSplits((prev) => ({
+                                              ...prev,
+                                              [member.id]: String(Math.round(((totalCost * pctNum) / 100) * 100) / 100),
+                                            }));
+                                            setEditFormError(null);
+                                          }}
+                                          placeholder="0"
+                                          className="w-16 text-right text-xs font-bold pl-1.5 pr-4 py-1 bg-white border border-teal-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-teal-500 text-slate-800"
+                                        />
+                                        <span className="absolute right-1.5 text-[10px] font-bold text-slate-400 pointer-events-none">%</span>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      step="any"
+                                      value={editMemberSplits[member.id] ?? ''}
+                                      onChange={(e) => {
+                                        e.stopPropagation();
+                                        const val = e.target.value;
+                                        setEditMemberSplits((prev) => {
+                                          const next = { ...prev, [member.id]: val };
+                                          const totalCostNum = parseFloat(editAmount) || 0;
+                                          const nextSum = editSplitWith.reduce((acc, mId) => acc + (parseFloat(next[mId] || '0') || 0), 0);
+                                          if (Math.abs(nextSum - totalCostNum) < 0.05) {
+                                            setEditFormError(null);
+                                          }
+                                          return next;
+                                        });
+                                      }}
+                                      placeholder="0"
+                                      className="w-24 text-right text-xs font-bold px-2 py-1 bg-white border border-teal-300 rounded-lg focus:outline-hidden focus:ring-1 focus:ring-teal-500 text-slate-800"
+                                    />
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -3247,9 +3456,12 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                         const val = parseFloat(editMemberSplits[mId] || '0');
                         return acc + (isNaN(val) ? 0 : val);
                       }, 0);
+                      const pctTotal = editSplitWith.reduce((acc, mId) => acc + (parseFloat(editMemberPercents[mId] || '0') || 0), 0);
                       const totalCostNum = parseFloat(editAmount) || 0;
                       const diff = Math.round((memberSplitsTotal - totalCostNum) * 100) / 100;
-                      const isBalanced = Math.abs(diff) < 0.01;
+                      const isBalanced = editSplitMode === 'percent'
+                        ? Math.abs(pctTotal - 100) < 0.1
+                        : Math.abs(diff) < 0.01;
 
                       return (
                         <div className={`p-3 rounded-xl border transition-colors text-xs ${
@@ -3265,14 +3477,20 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                                 <span className="w-2.5 h-2.5 rounded-full bg-amber-500 shrink-0" />
                               )}
                               <span className="text-slate-600 font-semibold">{isVi ? 'Tổng:' : 'Total:'}</span>
-                              <span className="font-extrabold text-slate-900">{formatMoney(memberSplitsTotal, trip.currency, lang)}</span>
+                              <span className="font-extrabold text-slate-900">
+                                {editSplitMode === 'percent'
+                                  ? `${Math.round(pctTotal * 100) / 100}% (${formatMoney(memberSplitsTotal, trip.currency, lang)})`
+                                  : formatMoney(memberSplitsTotal, trip.currency, lang)}
+                              </span>
                             </div>
                           </div>
 
                           {/* Dư / thiếu số tiền xuống hàng dưới tổng */}
                           {!isBalanced && (
                             <div className="mt-1 pl-4 text-xs font-semibold text-amber-700">
-                              {diff > 0 
+                              {editSplitMode === 'percent'
+                                ? (isVi ? `Cần tổng bằng 100% (hiện chênh ${(pctTotal - 100).toFixed(1)}%)` : `Must equal 100% (diff ${(pctTotal - 100).toFixed(1)}%)`)
+                                : diff > 0 
                                 ? (isVi ? `Dư: +${formatMoney(diff, trip.currency, lang)}` : `Over: +${formatMoney(diff, trip.currency, lang)}`) 
                                 : (isVi ? `Thiếu: -${formatMoney(Math.abs(diff), trip.currency, lang)}` : `Short: -${formatMoney(Math.abs(diff), trip.currency, lang)}`)}
                             </div>
@@ -3280,22 +3498,29 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
 
                           {!isBalanced && (
                             <div className="grid grid-cols-2 gap-2 mt-2.5 pt-2.5 border-t border-amber-200/70">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setEditAmount(String(memberSplitsTotal));
-                                }}
-                                className="flex items-center justify-center gap-1.5 py-1.5 px-2 bg-amber-600 hover:bg-amber-700 active:scale-[0.98] text-white rounded-lg font-bold text-xs transition-all cursor-pointer shadow-2xs text-center"
-                              >
-                                <RefreshCw className="w-3.5 h-3.5 shrink-0" />
-                                <span className="truncate">{isVi ? 'Cập nhật' : 'Update'}</span>
-                              </button>
+                              {editSplitMode === 'amount' && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditAmount(String(memberSplitsTotal));
+                                    setEditFormError(null);
+                                  }}
+                                  className="flex items-center justify-center gap-1.5 py-1.5 px-2 bg-amber-600 hover:bg-amber-700 active:scale-[0.98] text-white rounded-lg font-bold text-xs transition-all cursor-pointer shadow-2xs text-center"
+                                >
+                                  <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                                  <span className="truncate">{isVi ? 'Cập nhật' : 'Update'}</span>
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => {
                                   setEditMemberSplits(calculateEvenSplits(totalCostNum, editSplitWith));
+                                  setEditMemberPercents(calculateEvenPercents(editSplitWith));
+                                  setEditFormError(null);
                                 }}
-                                className="flex items-center justify-center gap-1.5 py-1.5 px-2 bg-white hover:bg-slate-100 active:scale-[0.98] text-slate-700 border border-slate-300 rounded-lg font-bold text-xs transition-all cursor-pointer shadow-2xs text-center"
+                                className={`flex items-center justify-center gap-1.5 py-1.5 px-2 bg-white hover:bg-slate-100 active:scale-[0.98] text-slate-700 border border-slate-300 rounded-lg font-bold text-xs transition-all cursor-pointer shadow-2xs text-center ${
+                                  editSplitMode === 'percent' ? 'col-span-2' : ''
+                                }`}
                               >
                                 <RotateCcw className="w-3.5 h-3.5 shrink-0 text-slate-500" />
                                 <span className="truncate">{isVi ? 'Chia đều lại' : 'Split equally'}</span>
@@ -3654,7 +3879,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                       </thead>
                       <tbody className="divide-y divide-slate-100">
                         {memberStats.map((s, idx) => {
-                          const totalOut = s.contributed + s.paidDirectly;
+                          const totalOut = s.contributed + s.paidExtra;
                           const isSurplus = s.remainingBalance > 0.01;
                           const isDeficit = s.remainingBalance < -0.01;
                           return (
@@ -3669,9 +3894,9 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                                 )}
                               </td>
                               <td className="py-2 px-3 text-right text-slate-600 font-mono">{formatMoney(s.contributed, trip.currency, lang)}</td>
-                              <td className="py-2 px-3 text-right text-slate-600 font-mono">{formatMoney(s.paidDirectly, trip.currency, lang)}</td>
+                              <td className="py-2 px-3 text-right text-slate-600 font-mono">{formatMoney(s.paidExtra, trip.currency, lang)}</td>
                               <td className="py-2 px-3 text-right font-bold text-slate-900 font-mono">{formatMoney(totalOut, trip.currency, lang)}</td>
-                              <td className="py-2 px-3 text-right text-slate-600 font-mono">{formatMoney(s.consumedTotal, trip.currency, lang)}</td>
+                              <td className="py-2 px-3 text-right text-slate-600 font-mono">{formatMoney(s.used, trip.currency, lang)}</td>
                               <td className={`py-2 px-3 text-right font-black font-mono ${
                                 isSurplus ? 'text-emerald-700' : isDeficit ? 'text-rose-600' : 'text-slate-500'
                               }`}>
@@ -3797,6 +4022,154 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
             >
               ✕
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* VietQR Quick Settlement Modal */}
+      {vietQrTarget && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/65 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"
+          onClick={() => setVietQrTarget(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white w-full max-w-sm rounded-3xl border border-slate-200 shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150"
+          >
+            <div className="px-5 py-3.5 bg-gradient-to-r from-blue-700 to-teal-700 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <QrCode className="w-4 h-4 text-blue-200" />
+                <h3 className="font-display font-bold text-sm">
+                  {isVi ? 'Chuyển khoản nhanh VietQR' : 'VietQR Instant Transfer'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setVietQrTarget(null)}
+                className="p-1 rounded-lg hover:bg-white/15 text-white/80 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-3.5 text-xs">
+              <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200/80 flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[11px] text-slate-500">
+                    {getMemberName(vietQrTarget.from)} → <strong className="text-slate-900">{getMemberName(vietQrTarget.to)}</strong>
+                  </div>
+                  <div className="text-base font-extrabold text-rose-600 mt-0.5">
+                    {formatMoney(vietQrTarget.amount, trip.currency, lang)}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(String(Math.round(vietQrTarget.amount)));
+                    setVietQrCopied('amount');
+                    setTimeout(() => setVietQrCopied(null), 1500);
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-[11px] font-semibold text-slate-700 cursor-pointer shrink-0"
+                >
+                  {vietQrCopied === 'amount' ? '✓' : (isVi ? 'Chép tiền' : 'Copy')}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                    {isVi ? 'Ngân hàng nhận' : 'Recipient Bank'}
+                  </label>
+                  <select
+                    value={vietQrBankBin}
+                    onChange={(e) => {
+                      const nextBin = e.target.value;
+                      setVietQrBankBin(nextBin);
+                      try {
+                        localStorage.setItem(
+                          `tripmate_vietqr_${vietQrTarget.to}`,
+                          JSON.stringify({ bin: nextBin, account: vietQrAccount })
+                        );
+                      } catch {}
+                    }}
+                    className="w-full text-xs p-2 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-blue-500 focus:outline-hidden font-semibold"
+                  >
+                    {VIETQR_BANKS.map((b) => (
+                      <option key={b.bin} value={b.bin}>
+                        {b.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                    {isVi ? 'Số tài khoản' : 'Account No.'}
+                  </label>
+                  <input
+                    type="text"
+                    value={vietQrAccount}
+                    onChange={(e) => {
+                      const nextAcc = e.target.value.replace(/\s+/g, '');
+                      setVietQrAccount(nextAcc);
+                      try {
+                        localStorage.setItem(
+                          `tripmate_vietqr_${vietQrTarget.to}`,
+                          JSON.stringify({ bin: vietQrBankBin, account: nextAcc })
+                        );
+                      } catch {}
+                    }}
+                    placeholder={isVi ? 'Nhập STK nhận...' : 'Account number...'}
+                    className="w-full text-xs p-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 focus:outline-hidden font-mono font-bold"
+                  />
+                </div>
+              </div>
+
+              {(() => {
+                const transferMemo = `Quyet toan ${trip.title}`.slice(0, 50);
+                const toName = getMemberName(vietQrTarget.to);
+                const roundedAmt = Math.round(vietQrTarget.amount);
+                const cleanAcc = vietQrAccount.trim();
+                const qrUrl = cleanAcc
+                  ? `https://img.vietqr.io/image/${vietQrBankBin}-${encodeURIComponent(cleanAcc)}-compact2.png?amount=${roundedAmt}&addInfo=${encodeURIComponent(transferMemo)}&accountName=${encodeURIComponent(toName)}`
+                  : null;
+
+                return qrUrl ? (
+                  <div className="flex flex-col items-center p-3 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
+                    <img
+                      src={qrUrl}
+                      alt={`VietQR ${toName}`}
+                      className="w-48 h-48 object-contain rounded-xl bg-white p-1 border border-slate-200"
+                    />
+                    <div className="w-full flex items-center justify-between gap-2 text-[11px] text-slate-600 bg-white px-2.5 py-1.5 rounded-xl border border-slate-200/80">
+                      <span className="truncate">
+                        {isVi ? 'Nội dung:' : 'Memo:'} <strong className="text-slate-900">{transferMemo}</strong>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(transferMemo);
+                          setVietQrCopied('memo');
+                          setTimeout(() => setVietQrCopied(null), 1500);
+                        }}
+                        className="text-blue-600 font-bold shrink-0 cursor-pointer hover:underline"
+                      >
+                        {vietQrCopied === 'memo' ? '✓' : (isVi ? 'Chép' : 'Copy')}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-4 bg-blue-50/70 rounded-2xl border border-blue-200/80 text-center space-y-1.5">
+                    <QrCode className="w-8 h-8 text-blue-500 mx-auto" />
+                    <p className="text-xs font-semibold text-blue-900">
+                      {isVi
+                        ? `Nhập số tài khoản của ${toName} để tạo mã VietQR tự động điền tiền & nội dung.`
+                        : `Enter ${toName}'s bank account number to generate an instant VietQR code.`}
+                    </p>
+                  </div>
+                );
+              })()}
+            </div>
           </div>
         </div>
       )}

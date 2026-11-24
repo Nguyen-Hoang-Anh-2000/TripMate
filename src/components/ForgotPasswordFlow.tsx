@@ -347,7 +347,7 @@ export const ForgotPasswordFlow: React.FC<ForgotPasswordFlowProps> = ({
               {isVi ? 'Đang kiểm tra tài khoản trong hệ thống...' : 'Verifying account...'}
             </div>
           ) : !verifiedAccount ? (
-            <form onSubmit={handleFindAccount} className="space-y-3">
+            <form noValidate onSubmit={handleFindAccount} className="space-y-3">
               <div>
                 <label className={labelClass}>
                   {isVi ? 'Email hoặc Số điện thoại đã đăng ký' : 'Registered Email or Phone Number'}
@@ -498,8 +498,8 @@ export const ForgotPasswordFlow: React.FC<ForgotPasswordFlowProps> = ({
 
       {/* STEP 2: Enter & Verify OTP */}
       {step === 2 && verifiedAccount && (
-        <form onSubmit={handleVerifyOtp} className="space-y-3.5">
-          {/* Simulated OTP Banner */}
+        <form noValidate onSubmit={handleVerifyOtp} className="space-y-3.5">
+          {/* OTP Notification Banner (simulated code only shown in DEV mode) */}
           <div
             className={`p-3 rounded-2xl border text-xs space-y-1.5 ${
               isDark
@@ -509,7 +509,9 @@ export const ForgotPasswordFlow: React.FC<ForgotPasswordFlowProps> = ({
           >
             <div className="flex items-center justify-between gap-2">
               <span className="font-semibold">
-                {isVi ? 'Mã OTP mô phỏng gửi đến:' : 'Simulated OTP sent to:'}{' '}
+                {import.meta.env.DEV
+                  ? (isVi ? 'Mã OTP mô phỏng gửi đến:' : 'Simulated OTP sent to:')
+                  : (isVi ? 'Mã xác thực OTP 6 chữ số đã gửi tới:' : '6-digit verification OTP sent to:')}{' '}
                 <strong className="font-mono">
                   {otpChannel === 'email'
                     ? maskEmail(verifiedAccount.email)
@@ -517,10 +519,10 @@ export const ForgotPasswordFlow: React.FC<ForgotPasswordFlowProps> = ({
                 </strong>
               </span>
             </div>
-            {generatedOtp && !otpLocked && (
+            {import.meta.env.DEV && generatedOtp && !otpLocked && (
               <div className="flex items-center justify-between pt-1">
                 <span className={`text-[11px] ${isDark ? 'text-teal-300/80' : 'text-teal-700'}`}>
-                  {isVi ? 'Mã xác thực của bạn:' : 'Your verification code:'}
+                  {isVi ? 'Mã xác thực (DEV):' : 'Verification code (DEV):'}
                 </span>
                 <span className="font-mono text-sm font-black tracking-[0.25em] px-2.5 py-1 rounded-lg bg-teal-600 text-white">
                   {generatedOtp}
@@ -606,7 +608,7 @@ export const ForgotPasswordFlow: React.FC<ForgotPasswordFlowProps> = ({
 
       {/* STEP 3: Set New Password */}
       {step === 3 && verifiedAccount && (
-        <form onSubmit={handleSaveNewPassword} className="space-y-3.5">
+        <form noValidate onSubmit={handleSaveNewPassword} className="space-y-3.5">
           <div
             className={`p-2.5 rounded-xl text-xs flex items-center gap-2 ${
               isDark

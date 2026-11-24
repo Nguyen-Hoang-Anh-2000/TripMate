@@ -97,88 +97,121 @@ export const SwipeableTabBar: React.FC<SwipeableTabBarProps> = ({
   };
 
   return (
-    <div className="relative group/tabs flex items-center border-b border-slate-200 py-1 select-none">
-      
-      {/* Scroll Left Button if overflowed */}
-      {canScrollLeft && (
-        <button
-          type="button"
-          onClick={() => handleScrollClick('left')}
-          className="absolute left-0 z-10 p-1.5 bg-white/95 backdrop-blur-xs border border-slate-200 shadow-md rounded-full text-slate-600 hover:text-slate-900 transition-all cursor-pointer -ml-2 sm:-ml-3"
-          title="Lướt sang trái"
-          aria-label="Scroll left"
-        >
-          <ChevronLeft className="w-4 h-4" />
-        </button>
-      )}
+    <>
+      <div className="hidden sm:flex relative group/tabs items-center border-b border-slate-200 py-1 select-none">
+        
+        {/* Scroll Left Button if overflowed */}
+        {canScrollLeft && (
+          <button
+            type="button"
+            onClick={() => handleScrollClick('left')}
+            className="absolute left-0 z-10 p-1.5 bg-white/95 backdrop-blur-xs border border-slate-200 shadow-md rounded-full text-slate-600 hover:text-slate-900 transition-all cursor-pointer -ml-2 sm:-ml-3"
+            title="Lướt sang trái"
+            aria-label="Scroll left"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+        )}
 
-      {/* Swipeable / Draggable Scroll Container */}
-      <div
-        ref={containerRef}
-        onScroll={updateScrollButtons}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-        className={`flex items-center gap-2 overflow-x-auto no-scrollbar scroll-smooth w-full px-1 py-1 cursor-grab ${
-          isDragging ? 'cursor-grabbing active:cursor-grabbing' : ''
-        }`}
-        style={{
-          WebkitOverflowScrolling: 'touch',
-          scrollbarWidth: 'none',
-        }}
-      >
-        {tabs.map((tab) => {
-          const isActive = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              data-tab-id={tab.id}
-              type="button"
-              onClick={() => {
-                if (!hasMoved) {
-                  onSelectTab(tab.id);
-                }
-              }}
-              className={`flex items-center gap-1.5 px-3.5 sm:px-4 py-2 rounded-xl font-bold text-xs transition-all whitespace-nowrap shrink-0 cursor-pointer min-h-[38px] ${
-                isActive
-                  ? 'bg-slate-900 text-white shadow-xs scale-100 ring-2 ring-slate-900/10'
-                  : 'bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900 border border-slate-200/90'
-              }`}
-            >
-              <span className={isActive ? 'text-teal-400' : 'text-slate-500'}>
-                {tab.icon}
-              </span>
-              <span>{tab.label}</span>
-              {tab.badge && (
-                <span
-                  className={`px-1.5 py-0.2 rounded-md text-[10px] font-semibold ${
-                    isActive
-                      ? 'bg-teal-500 text-slate-950 font-bold'
-                      : 'bg-slate-100 text-slate-600'
-                  }`}
-                >
-                  {tab.badge}
+        {/* Swipeable / Draggable Scroll Container */}
+        <div
+          ref={containerRef}
+          onScroll={updateScrollButtons}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
+          className={`flex items-center gap-2 overflow-x-auto no-scrollbar scroll-smooth w-full px-1 py-1 cursor-grab ${
+            isDragging ? 'cursor-grabbing active:cursor-grabbing' : ''
+          }`}
+          style={{
+            WebkitOverflowScrolling: 'touch',
+            scrollbarWidth: 'none',
+          }}
+        >
+          {tabs.map((tab) => {
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                data-tab-id={tab.id}
+                type="button"
+                onClick={() => {
+                  if (!hasMoved) {
+                    onSelectTab(tab.id);
+                  }
+                }}
+                className={`flex items-center gap-1.5 px-3.5 sm:px-4 py-2 rounded-xl font-bold text-xs transition-all whitespace-nowrap shrink-0 cursor-pointer min-h-[38px] ${
+                  isActive
+                    ? 'bg-slate-900 text-white shadow-xs scale-100 ring-2 ring-slate-900/10'
+                    : 'bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900 border border-slate-200/90'
+                }`}
+              >
+                <span className={isActive ? 'text-teal-400' : 'text-slate-500'}>
+                  {tab.icon}
                 </span>
-              )}
-            </button>
-          );
-        })}
+                <span>{tab.label}</span>
+                {tab.badge && (
+                  <span
+                    className={`px-1.5 py-0.2 rounded-md text-[10px] font-semibold ${
+                      isActive
+                        ? 'bg-teal-500 text-slate-950 font-bold'
+                        : 'bg-slate-100 text-slate-600'
+                    }`}
+                  >
+                    {tab.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Scroll Right Button if overflowed */}
+        {canScrollRight && (
+          <button
+            type="button"
+            onClick={() => handleScrollClick('right')}
+            className="absolute right-0 z-10 p-1.5 bg-white/95 backdrop-blur-xs border border-slate-200 shadow-md rounded-full text-slate-600 hover:text-slate-900 transition-all cursor-pointer -mr-2 sm:-mr-3"
+            title="Lướt sang phải"
+            aria-label="Scroll right"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        )}
       </div>
 
-      {/* Scroll Right Button if overflowed */}
-      {canScrollRight && (
-        <button
-          type="button"
-          onClick={() => handleScrollClick('right')}
-          className="absolute right-0 z-10 p-1.5 bg-white/95 backdrop-blur-xs border border-slate-200 shadow-md rounded-full text-slate-600 hover:text-slate-900 transition-all cursor-pointer -mr-2 sm:-mr-3"
-          title="Lướt sang phải"
-          aria-label="Scroll right"
-        >
-          <ChevronRight className="w-4 h-4" />
-        </button>
-      )}
-
-    </div>
+      {/* Fixed Thumb-Friendly Mobile Bottom Navigation Bar */}
+      <nav
+        aria-label="Mobile navigation"
+        className="sm:hidden fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur-md border-t border-slate-200/90 shadow-[0_-4px_20px_rgba(15,23,42,0.08)] pb-[env(safe-area-inset-bottom)] select-none"
+      >
+        <div className="grid grid-cols-6 items-stretch h-16 px-1">
+          {tabs.map((tab) => {
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => onSelectTab(tab.id)}
+                className={`relative flex flex-col items-center justify-center gap-0.5 px-1 py-1.5 transition-colors cursor-pointer min-w-0 ${
+                  isActive ? 'text-teal-700 font-bold' : 'text-slate-500 hover:text-slate-800 font-medium'
+                }`}
+              >
+                {isActive && (
+                  <span className="absolute top-0 inset-x-2.5 h-0.5 rounded-full bg-teal-600" />
+                )}
+                <span className={`transition-transform ${isActive ? 'text-teal-600 scale-110' : 'text-slate-400'}`}>
+                  {tab.icon}
+                </span>
+                <span className="text-[10px] leading-tight truncate max-w-full">
+                  {tab.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </nav>
+    </>
   );
 };

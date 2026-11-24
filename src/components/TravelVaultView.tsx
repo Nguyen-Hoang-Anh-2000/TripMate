@@ -42,6 +42,7 @@ import { Trip, TravelDocument, VaultPinSecurity, TripNotification } from '../typ
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { hashStringSHA256 } from '../utils/cryptoUtils';
+import { formatTripNotificationI18n } from '../utils/notificationI18n';
 
 interface TravelVaultViewProps {
   trip: Trip;
@@ -101,6 +102,8 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
   });
   const [enteredPin, setEnteredPin] = useState<string>('');
   const [pinError, setPinError] = useState<string | null>(null);
+  const [pinShake, setPinShake] = useState<boolean>(false);
+  const [docFormError, setDocFormError] = useState<string | null>(null);
   const [isPinModalOpen, setIsPinModalOpen] = useState<boolean>(false);
   const [currentPinInput, setCurrentPinInput] = useState<string>('');
   const [newPin, setNewPin] = useState<string>('');
@@ -258,6 +261,8 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
       } else {
         const nextFailed = failedAttempts + 1;
         setFailedAttempts(nextFailed);
+        setPinShake(true);
+        setTimeout(() => setPinShake(false), 450);
         if (nextFailed >= 5) {
           setLockoutRemaining(30);
           setPinError(isVi ? 'Nhập sai quá 5 lần. Két bị tạm khóa 30 giây!' : '5 failed attempts. Vault locked for 30s!');
@@ -265,10 +270,10 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
           setPinError(
             isVi
               ? `Mã PIN không đúng (còn ${5 - nextFailed} lần thử)`
-              : `Incorrect PIN (${5 - nextFailed} attempts remaining)`
+              : `Incorrect PIN (${5 - nextFailed} ${5 - nextFailed === 1 ? 'attempt' : 'attempts'} remaining)`
           );
         }
-        setTimeout(() => setEnteredPin(''), 500);
+        setTimeout(() => setEnteredPin(''), 450);
       }
     }
   };
@@ -311,9 +316,10 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
       createdAt: new Date().toISOString(),
     };
 
+    const locale = isVi ? 'vi-VN' : 'en-US';
     const notifMessage = isVi
-      ? `${currentUserName} đã ${savedPin ? 'đổi' : 'thiết lập'} mã PIN bảo vệ két vé & giấy tờ vào lúc ${new Date().toLocaleTimeString('vi-VN')} ngày ${new Date().toLocaleDateString('vi-VN')}.`
-      : `${currentUserName} ${savedPin ? 'updated' : 'set'} the Vault security PIN at ${new Date().toLocaleTimeString()}.`;
+      ? `${currentUserName} đã ${savedPin ? 'đổi' : 'thiết lập'} mã PIN bảo vệ két vé & giấy tờ vào lúc ${new Date().toLocaleTimeString(locale)} ngày ${new Date().toLocaleDateString(locale)}.`
+      : `${currentUserName} ${savedPin ? 'updated' : 'set'} the Vault security PIN at ${new Date().toLocaleTimeString(locale)}.`;
 
     const updatedNotifs: TripNotification[] = [
       {
@@ -373,7 +379,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
       setForgotError(isVi ? 'Vui lòng nhập đủ 6 chữ số mã OTP' : 'Please enter 6-digit OTP');
       return;
     }
-    if (enteredUserOtp.trim() !== generatedUserOtp && enteredUserOtp.trim() !== '123456') {
+    if (!generatedUserOtp || enteredUserOtp.trim() !== generatedUserOtp) {
       setForgotError(isVi ? 'Mã OTP không chính xác. Vui lòng thử lại.' : 'Invalid OTP. Please try again.');
       return;
     }
@@ -435,9 +441,10 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
       createdAt: new Date().toISOString(),
     };
 
+    const locale = isVi ? 'vi-VN' : 'en-US';
     const notifMsg = isVi
-      ? `Mã PIN két giấy tờ đã được ${currentUserName} đặt lại thành công${!isCurrentUserCreator ? ` (đã được ${pinCreator.name} phê duyệt)` : ''} vào lúc ${new Date().toLocaleTimeString('vi-VN')} ngày ${new Date().toLocaleDateString('vi-VN')}. Tất cả thành viên vui lòng sử dụng mã PIN mới.`
-      : `Vault PIN was reset by ${currentUserName} at ${new Date().toLocaleTimeString()}. All members please use the new PIN.`;
+      ? `Mã PIN két giấy tờ đã được ${currentUserName} đặt lại thành công${!isCurrentUserCreator ? ` (đã được ${pinCreator.name} phê duyệt)` : ''} vào lúc ${new Date().toLocaleTimeString(locale)} ngày ${new Date().toLocaleDateString(locale)}. Tất cả thành viên vui lòng sử dụng mã PIN mới.`
+      : `Vault PIN was reset by ${currentUserName} at ${new Date().toLocaleTimeString(locale)}. All members please use the new PIN.`;
 
     const updatedNotifs: TripNotification[] = [
       {
@@ -481,7 +488,6 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
     setRemoveError(null);
     setRemoveOtpStep(1);
     setRemoveEnteredOtp('');
-    setIsRemoveCreatorApproved(false);
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     setRemoveGeneratedOtp(code);
     setRemoveOtpCountdown(60);
@@ -503,9 +509,10 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
     localStorage.removeItem(pinStorageKey);
     setSavedPin(null);
 
+    const locale = isVi ? 'vi-VN' : 'en-US';
     const notifMsg = isVi
-      ? `Mã PIN bảo vệ két vé & giấy tờ đã được gỡ bỏ bởi ${currentUserName} bằng mã PIN hiện tại vào lúc ${new Date().toLocaleTimeString('vi-VN')} ngày ${new Date().toLocaleDateString('vi-VN')}.`
-      : `Vault PIN protection was removed by ${currentUserName} using current PIN at ${new Date().toLocaleTimeString()}.`;
+      ? `Mã PIN bảo vệ két vé & giấy tờ đã được gỡ bỏ bởi ${currentUserName} bằng mã PIN hiện tại vào lúc ${new Date().toLocaleTimeString(locale)} ngày ${new Date().toLocaleDateString(locale)}.`
+      : `Vault PIN protection was removed by ${currentUserName} using current PIN at ${new Date().toLocaleTimeString(locale)}.`;
 
     const updatedNotifs: TripNotification[] = [
       {
@@ -547,7 +554,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
       setRemoveError(isVi ? 'Vui lòng nhập đủ 6 chữ số mã OTP' : 'Please enter 6-digit OTP');
       return;
     }
-    if (removeEnteredOtp.trim() !== removeGeneratedOtp && removeEnteredOtp.trim() !== '123456') {
+    if (!removeGeneratedOtp || removeEnteredOtp.trim() !== removeGeneratedOtp) {
       setRemoveError(isVi ? 'Mã OTP không chính xác. Vui lòng thử lại.' : 'Invalid OTP. Please try again.');
       return;
     }
@@ -559,9 +566,10 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
       localStorage.removeItem(pinStorageKey);
       setSavedPin(null);
 
+      const locale = isVi ? 'vi-VN' : 'en-US';
       const notifMsg = isVi
-        ? `Người tạo PIN (${pinCreator.name}) đã xác thực OTP và gỡ bỏ mã PIN bảo vệ két vé vào lúc ${new Date().toLocaleTimeString('vi-VN')} ngày ${new Date().toLocaleDateString('vi-VN')}.`
-        : `PIN creator (${pinCreator.name}) verified OTP and removed Vault PIN at ${new Date().toLocaleTimeString()}.`;
+        ? `Người tạo PIN (${pinCreator.name}) đã xác thực OTP và gỡ bỏ mã PIN bảo vệ két vé vào lúc ${new Date().toLocaleTimeString(locale)} ngày ${new Date().toLocaleDateString(locale)}.`
+        : `PIN creator (${pinCreator.name}) verified OTP and removed Vault PIN at ${new Date().toLocaleTimeString(locale)}.`;
 
       const updatedNotifs: TripNotification[] = [
         {
@@ -613,9 +621,10 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
     localStorage.removeItem(pinStorageKey);
     setSavedPin(null);
 
+    const locale = isVi ? 'vi-VN' : 'en-US';
     const notifMsg = isVi
-      ? `Mã PIN bảo vệ két vé & giấy tờ đã được gỡ bỏ bởi ${currentUserName} sau khi được Người tạo PIN (${pinCreator.name}) phê duyệt đồng ý vào lúc ${new Date().toLocaleTimeString('vi-VN')}.`
-      : `Vault PIN was removed by ${currentUserName} after approval by PIN creator (${pinCreator.name}) at ${new Date().toLocaleTimeString()}.`;
+      ? `Mã PIN bảo vệ két vé & giấy tờ đã được gỡ bỏ bởi ${currentUserName} sau khi được Người tạo PIN (${pinCreator.name}) phê duyệt đồng ý vào lúc ${new Date().toLocaleTimeString(locale)}.`
+      : `Vault PIN was removed by ${currentUserName} after approval by PIN creator (${pinCreator.name}) at ${new Date().toLocaleTimeString(locale)}.`;
 
     const updatedNotifs: TripNotification[] = [
       {
@@ -654,9 +663,10 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
       localStorage.removeItem(pinStorageKey);
       setSavedPin(null);
 
+      const locale = isVi ? 'vi-VN' : 'en-US';
       const notifMsg = isVi
-        ? `Mã PIN bảo vệ két vé đã được gỡ bỏ sau khi được ${currentUserName} phê duyệt đồng ý vào lúc ${new Date().toLocaleTimeString('vi-VN')}.`
-        : `Vault PIN was removed after approval by ${currentUserName} at ${new Date().toLocaleTimeString()}.`;
+        ? `Mã PIN bảo vệ két vé đã được gỡ bỏ sau khi được ${currentUserName} phê duyệt đồng ý vào lúc ${new Date().toLocaleTimeString(locale)}.`
+        : `Vault PIN was removed after approval by ${currentUserName} at ${new Date().toLocaleTimeString(locale)}.`;
 
       const updatedNotifs: TripNotification[] = [
         {
@@ -785,6 +795,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
     setIsPaidByDropdownOpen(false);
     setPaidBySearch('');
     setEditingDocId(null);
+    setDocFormError(null);
     setModalMode('add');
   };
 
@@ -803,6 +814,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
     setIsPaidByDropdownOpen(false);
     setPaidBySearch('');
     setEditingDocId(doc.id);
+    setDocFormError(null);
     setModalMode('edit');
   };
 
@@ -826,7 +838,11 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) return;
+    if (!title.trim()) {
+      setDocFormError(isVi ? 'Vui lòng nhập tiêu đề vé hoặc giấy tờ.' : 'Please enter a document title.');
+      return;
+    }
+    setDocFormError(null);
 
     const parsedCost = cost ? parseFloat(cost) : undefined;
     const finalPaidBy = parsedCost && parsedCost > 0 ? paidBy : undefined;
@@ -982,23 +998,26 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
       )}
 
       {/* Latest PIN Announcement Banner */}
-      {recentPinNotification && !pendingSecurityRequest && (
-        <div className="p-2.5 sm:p-3 bg-teal-50/70 border border-teal-200 rounded-2xl flex items-center justify-between gap-2 text-xs">
-          <div className="flex items-center gap-2 min-w-0">
-            <ShieldCheck className="w-4 h-4 text-teal-600 shrink-0" />
-            <span className="text-teal-950 font-medium truncate">
-              <strong>{isVi ? 'Thông báo:' : 'Notice:'}</strong> {recentPinNotification.message}
-            </span>
+      {recentPinNotification && !pendingSecurityRequest && (() => {
+        const formattedRecent = formatTripNotificationI18n(recentPinNotification, lang);
+        return (
+          <div className="p-2.5 sm:p-3 bg-teal-50/70 border border-teal-200 rounded-2xl flex items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 min-w-0">
+              <ShieldCheck className="w-4 h-4 text-teal-600 shrink-0" />
+              <span className="text-teal-950 font-medium truncate">
+                <strong>{isVi ? 'Thông báo:' : 'Notice:'}</strong> {formattedRecent.message}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsHistoryModalOpen(true)}
+              className="text-[11px] font-bold text-teal-700 hover:text-teal-900 underline shrink-0 cursor-pointer"
+            >
+              {isVi ? 'Lịch sử bảo mật' : 'Security History'}
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => setIsHistoryModalOpen(true)}
-            className="text-[11px] font-bold text-teal-700 hover:text-teal-900 underline shrink-0 cursor-pointer"
-          >
-            {isVi ? 'Lịch sử bảo mật' : 'Security History'}
-          </button>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Top Header & Security Status Row */}
       <div className="flex flex-wrap items-center justify-between gap-2.5">
@@ -1009,15 +1028,17 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
                 <span>{isVi ? 'Đã bảo vệ bằng PIN' : 'PIN Protected'}</span>
               </span>
-              <button
-                type="button"
-                onClick={handleLockVault}
-                className="px-2.5 py-1 text-xs font-medium text-slate-600 hover:text-slate-800 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl transition-colors flex items-center gap-1 cursor-pointer"
-                title={isVi ? 'Khóa két ngay' : 'Lock Vault now'}
-              >
-                <Lock className="w-3.5 h-3.5 text-slate-500" />
-                <span>{isVi ? 'Khóa ngay' : 'Lock'}</span>
-              </button>
+              {isUnlocked && (
+                <button
+                  type="button"
+                  onClick={handleLockVault}
+                  className="px-2.5 py-1 text-xs font-medium text-slate-600 hover:text-slate-800 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl transition-colors flex items-center gap-1 cursor-pointer"
+                  title={isVi ? 'Khóa két ngay' : 'Lock Vault now'}
+                >
+                  <Lock className="w-3.5 h-3.5 text-slate-500" />
+                  <span>{isVi ? 'Khóa ngay' : 'Lock'}</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setIsPinModalOpen(true)}
@@ -1072,9 +1093,9 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
 
       {/* When Vault is Locked by PIN: Show Security Unlock Screen */}
       {savedPin && !isUnlocked ? (
-        <div className="bg-white p-6 sm:p-10 rounded-2xl sm:rounded-3xl border border-slate-200/80 shadow-xs max-w-sm mx-auto text-center space-y-6 my-4">
-          <div className="w-16 h-16 rounded-2xl bg-teal-50 text-teal-600 flex items-center justify-center mx-auto shadow-2xs border border-teal-100">
-            <Lock className="w-8 h-8" />
+        <div className="bg-white p-5 sm:p-8 rounded-2xl sm:rounded-3xl border border-slate-200/80 shadow-xs max-w-sm mx-auto text-center space-y-4 sm:space-y-5 my-2 sm:my-4">
+          <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl bg-teal-50 text-teal-600 flex items-center justify-center mx-auto shadow-2xs border border-teal-100">
+            <Lock className="w-6 h-6 sm:w-7 sm:h-7" />
           </div>
 
           <div>
@@ -1089,14 +1110,19 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
           </div>
 
           {/* 4 PIN Indicator Dots */}
-          <div className="flex items-center justify-center gap-3">
+          <div className={`flex items-center justify-center gap-3 ${pinShake ? 'animate-vault-shake' : ''}`}>
             {[0, 1, 2, 3].map((idx) => {
               const isFilled = idx < enteredPin.length;
+              const isErrorState = Boolean(pinError);
               return (
                 <div
                   key={idx}
                   className={`w-3.5 h-3.5 rounded-full transition-all duration-200 ${
-                    isFilled
+                    isErrorState
+                      ? isFilled
+                        ? 'bg-rose-500 border-2 border-rose-600 scale-110 shadow-xs'
+                        : 'border-2 border-rose-400 bg-rose-50'
+                      : isFilled
                       ? 'bg-teal-600 scale-110 shadow-xs'
                       : 'border-2 border-slate-300 bg-slate-100'
                   }`}
@@ -1105,20 +1131,23 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
             })}
           </div>
 
-          {lockoutRemaining > 0 ? (
-            <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs font-semibold text-red-700">
-              {isVi 
-                ? `Két tạm thời bị khóa do nhập sai nhiều lần. Vui lòng thử lại sau ${lockoutRemaining} giây.`
-                : `Vault temporarily locked due to multiple failed attempts. Try again in ${lockoutRemaining}s.`}
-            </div>
-          ) : pinError ? (
-            <p className="text-xs font-semibold text-red-600 animate-pulse">
-              {pinError}
-            </p>
-          ) : null}
+          {/* Fixed-height slot prevents layout shift of the keypad */}
+          <div className="min-h-[38px] flex items-center justify-center px-2">
+            {lockoutRemaining > 0 ? (
+              <div className="p-2.5 bg-red-50 border border-red-200 rounded-xl text-xs font-semibold text-red-700 w-full">
+                {isVi 
+                  ? `Két tạm khóa do nhập sai nhiều lần. Thử lại sau ${lockoutRemaining}s.`
+                  : `Vault temporarily locked. Try again in ${lockoutRemaining}s.`}
+              </div>
+            ) : pinError ? (
+              <p className="text-xs font-semibold text-rose-600">
+                {pinError}
+              </p>
+            ) : null}
+          </div>
 
           {/* Numeric Keypad */}
-          <div className="grid grid-cols-3 gap-2.5 max-w-[220px] mx-auto pt-1">
+          <div className="grid grid-cols-3 gap-2.5 max-w-[220px] mx-auto">
             {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((digit) => (
               <button
                 key={digit}
@@ -1153,7 +1182,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
             </button>
           </div>
 
-          <div className="pt-2 text-center">
+          <div className="pt-1 text-center">
             <button
               type="button"
               onClick={handleOpenForgotPinModal}
@@ -1363,15 +1392,14 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
             </div>
 
             {/* Modal Form */}
-            <form onSubmit={handleFormSubmit} className="p-5 space-y-4 overflow-y-auto flex-1">
-              {/* Tiêu đề (rút gọn 2 chữ theo yêu cầu) */}
+            <form noValidate onSubmit={handleFormSubmit} className="p-5 space-y-4 overflow-y-auto flex-1">
+              {/* Tiêu đề */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   {isVi ? 'Tiêu đề' : 'Title'} <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
-                  required
                   autoFocus
                   placeholder={
                     isVi
@@ -1379,9 +1407,17 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                       : 'e.g. Flight VN123, Hotel Colline, Limousine bus...'
                   }
                   value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  className="w-full text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                  onChange={(e) => {
+                    setTitle(e.target.value);
+                    if (docFormError) setDocFormError(null);
+                  }}
+                  className={`w-full text-xs p-2.5 rounded-xl border focus:ring-2 focus:ring-teal-500 focus:outline-hidden ${
+                    docFormError ? 'border-rose-400 bg-rose-50/40' : 'border-slate-200'
+                  }`}
                 />
+                {docFormError && (
+                  <p className="text-[11px] font-medium text-rose-600 mt-1">{docFormError}</p>
+                )}
               </div>
 
               {/* Doc Type (Thêm Vé xe) & Mã xác nhận */}
@@ -1855,7 +1891,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleSaveNewPin} className="space-y-3.5">
+            <form noValidate onSubmit={handleSaveNewPin} className="space-y-3.5">
               <p className="text-xs text-slate-500 leading-relaxed">
                 {isVi
                   ? 'Mã PIN giúp bảo vệ số hộ chiếu, mã vé máy bay và giấy tờ đặt phòng của bạn khỏi người khác nhìn trộm.'
@@ -2001,19 +2037,23 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
             </div>
 
             {/* Stepper progress */}
-            <div className="flex items-center justify-between px-2 py-1.5 bg-slate-50 rounded-xl border border-slate-200 text-[11px] font-semibold text-slate-500">
+            <div className="flex items-center justify-between px-2.5 py-1.5 bg-slate-50 rounded-xl border border-slate-200 text-[11px] font-semibold text-slate-500">
               <span className={`flex items-center gap-1 ${forgotStep === 1 ? 'text-teal-700 font-bold' : forgotStep > 1 ? 'text-emerald-600' : ''}`}>
-                <span>1. {isVi ? 'OTP login' : 'Login OTP'}</span>
+                <span>1. {isVi ? 'Xác thực OTP' : 'Verify OTP'}</span>
                 {forgotStep > 1 && <Check className="w-3 h-3 text-emerald-600 inline" />}
               </span>
-              <span>→</span>
-              <span className={`flex items-center gap-1 ${forgotStep === 2 ? 'text-amber-700 font-bold' : forgotStep > 2 ? 'text-emerald-600' : ''}`}>
-                <span>2. {isVi ? 'Người tạo duyệt' : 'Creator Approval'}</span>
-                {forgotStep > 2 && <Check className="w-3 h-3 text-emerald-600 inline" />}
-              </span>
+              {!isCurrentUserCreator && (
+                <>
+                  <span>→</span>
+                  <span className={`flex items-center gap-1 ${forgotStep === 2 ? 'text-amber-700 font-bold' : forgotStep > 2 ? 'text-emerald-600' : ''}`}>
+                    <span>2. {isVi ? 'Người tạo duyệt' : 'Creator Approval'}</span>
+                    {forgotStep > 2 && <Check className="w-3 h-3 text-emerald-600 inline" />}
+                  </span>
+                </>
+              )}
               <span>→</span>
               <span className={forgotStep === 3 ? 'text-teal-700 font-bold' : ''}>
-                <span>3. {isVi ? 'PIN 4 số mới' : 'New PIN'}</span>
+                <span>{isCurrentUserCreator ? '2' : '3'}. {isVi ? 'PIN 4 số mới' : 'New PIN'}</span>
               </span>
             </div>
 
@@ -2029,12 +2069,16 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                     {isVi ? 'Người dùng:' : 'User:'} <strong>{currentUserName}</strong>
                   </div>
                   <div className="font-mono text-[11px] text-slate-600">
-                    Email: <strong>{currentUserEmail}</strong> {currentUserPhone ? `• SĐT: ${currentUserPhone}` : ''}
+                    Email: <strong>{currentUserEmail}</strong> {currentUserPhone ? `• ${isVi ? 'SĐT' : 'Phone'}: ${currentUserPhone}` : ''}
                   </div>
                   <p className="text-[11px] text-slate-500 pt-1 border-t border-teal-100">
-                    {isVi
-                      ? 'Hệ thống gửi mã OTP xác thực tới tài khoản của bạn để xác nhận danh tính trước khi xin phép người tạo PIN.'
-                      : 'An OTP will be sent to your account to verify identity before requesting creator approval.'}
+                    {isCurrentUserCreator
+                      ? isVi
+                        ? 'Xác thực OTP để đặt lại PIN ngay lập tức.'
+                        : 'Verify OTP to reset your PIN immediately.'
+                      : isVi
+                      ? 'Xác thực OTP để gửi yêu cầu đổi PIN tới người tạo.'
+                      : 'Verify OTP before sending reset request to the creator.'}
                   </p>
                 </div>
 
@@ -2066,39 +2110,59 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                   </button>
                 </div>
 
-                {/* Simulated OTP Notification Box for Easy Testing & Delightful Mobile UX */}
-                <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl space-y-1.5 text-xs text-amber-950">
-                  <div className="flex items-center justify-between text-[11px] font-bold text-amber-800">
-                    <span className="flex items-center gap-1">
-                      <Send className="w-3 h-3 text-amber-600" />
-                      <span>{isVi ? 'Mô phỏng tin nhắn OTP gửi đến:' : 'Simulated OTP Message to:'} {forgotOtpChannel === 'email' ? currentUserEmail : (currentUserPhone || '090***')}</span>
+                {import.meta.env.DEV && generatedUserOtp ? (
+                  <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl space-y-1.5 text-xs text-amber-950">
+                    <div className="flex items-center justify-between text-[11px] font-bold text-amber-800">
+                      <span className="flex items-center gap-1">
+                        <Send className="w-3 h-3 text-amber-600" />
+                        <span>{isVi ? 'OTP gửi tới:' : 'Dev OTP to:'} {forgotOtpChannel === 'email' ? currentUserEmail : (currentUserPhone || '090***')}</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setEnteredUserOtp(generatedUserOtp)}
+                        className="text-amber-900 hover:text-amber-950 underline font-bold cursor-pointer"
+                      >
+                        {isVi ? 'Điền nhanh' : 'Auto-fill'}
+                      </button>
+                    </div>
+                    <div className="p-2 bg-white rounded-lg border border-amber-200 text-center font-mono text-base font-extrabold tracking-widest text-slate-900 shadow-2xs">
+                      {generatedUserOtp}
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] text-amber-700">
+                      <span>{isVi ? 'Hiệu lực trong 5 phút' : 'Valid for 5 mins'}</span>
+                      {otpCountdown > 0 ? (
+                        <span>{isVi ? `Gửi lại sau ${otpCountdown}s` : `Resend in ${otpCountdown}s`}</span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleSendForgotOtp(forgotOtpChannel)}
+                          className="underline font-bold text-amber-800 cursor-pointer"
+                        >
+                          {isVi ? 'Gửi lại mã OTP' : 'Resend OTP'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-[11px] text-slate-600">
+                    <span>
+                      {isVi
+                        ? `Mã OTP đã gửi đến ${forgotOtpChannel === 'email' ? currentUserEmail : (currentUserPhone || 'SĐT đã đăng ký')}`
+                        : `OTP sent to ${forgotOtpChannel === 'email' ? currentUserEmail : (currentUserPhone || 'registered phone')}`}
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => setEnteredUserOtp(generatedUserOtp || '123456')}
-                      className="text-amber-900 hover:text-amber-950 underline font-bold cursor-pointer"
-                    >
-                      {isVi ? '⚡ Điền nhanh' : '⚡ Auto-fill'}
-                    </button>
-                  </div>
-                  <div className="p-2 bg-white rounded-lg border border-amber-200 text-center font-mono text-base font-extrabold tracking-widest text-slate-900 shadow-2xs">
-                    {generatedUserOtp || '123456'}
-                  </div>
-                  <div className="flex items-center justify-between text-[10px] text-amber-700">
-                    <span>{isVi ? 'Hiệu lực trong 5 phút' : 'Valid for 5 mins'}</span>
                     {otpCountdown > 0 ? (
-                      <span>{isVi ? `Gửi lại sau ${otpCountdown}s` : `Resend in ${otpCountdown}s`}</span>
+                      <span className="font-semibold text-slate-500 shrink-0 ml-2">{otpCountdown}s</span>
                     ) : (
                       <button
                         type="button"
                         onClick={() => handleSendForgotOtp(forgotOtpChannel)}
-                        className="underline font-bold text-amber-800 cursor-pointer"
+                        className="underline font-bold text-teal-700 cursor-pointer shrink-0 ml-2"
                       >
-                        {isVi ? 'Gửi lại mã OTP' : 'Resend OTP'}
+                        {isVi ? 'Gửi lại' : 'Resend'}
                       </button>
                     )}
                   </div>
-                </div>
+                )}
 
                 {/* OTP Input */}
                 <div>
@@ -2207,7 +2271,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
 
             {/* STEP 3: Enter new 4-digit PIN */}
             {forgotStep === 3 && (
-              <form onSubmit={handleCompleteForgotReset} className="space-y-3.5">
+              <form noValidate onSubmit={handleCompleteForgotReset} className="space-y-3.5">
                 <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
                   <span>
@@ -2349,7 +2413,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
 
             {/* TAB 1: Enter Current PIN */}
             {removeTab === 'pin' && (
-              <form onSubmit={handleConfirmRemoveWithPin} className="space-y-3.5">
+              <form noValidate onSubmit={handleConfirmRemoveWithPin} className="space-y-3.5">
                 <p className="text-xs text-slate-600 leading-relaxed">
                   {isVi
                     ? 'Nhập đúng mã PIN 4 số hiện tại để gỡ bỏ bảo vệ két giấy tờ ngay lập tức.'
@@ -2446,36 +2510,56 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                       </button>
                     </div>
 
-                    {/* Simulated OTP Box */}
-                    <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl space-y-1.5 text-xs text-amber-950">
-                      <div className="flex items-center justify-between text-[11px] font-bold text-amber-800">
-                        <span>{isVi ? 'Mã OTP xác thực gửi tới bạn:' : 'Simulated OTP to your account:'}</span>
-                        <button
-                          type="button"
-                          onClick={() => setRemoveEnteredOtp(removeGeneratedOtp || '123456')}
-                          className="text-amber-900 hover:text-amber-950 underline font-bold cursor-pointer"
-                        >
-                          {isVi ? '⚡ Điền nhanh' : '⚡ Auto-fill'}
-                        </button>
+                    {import.meta.env.DEV && removeGeneratedOtp ? (
+                      <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl space-y-1.5 text-xs text-amber-950">
+                        <div className="flex items-center justify-between text-[11px] font-bold text-amber-800">
+                          <span>{isVi ? 'OTP gửi tới bạn:' : 'Dev OTP sent to you:'}</span>
+                          <button
+                            type="button"
+                            onClick={() => setRemoveEnteredOtp(removeGeneratedOtp)}
+                            className="text-amber-900 hover:text-amber-950 underline font-bold cursor-pointer"
+                          >
+                            {isVi ? 'Điền nhanh' : 'Auto-fill'}
+                          </button>
+                        </div>
+                        <div className="p-2 bg-white rounded-lg border border-amber-200 text-center font-mono text-base font-extrabold tracking-widest text-slate-900 shadow-2xs">
+                          {removeGeneratedOtp}
+                        </div>
+                        <div className="flex items-center justify-between text-[10px] text-amber-700">
+                          <span>{isVi ? 'Hiệu lực trong 5 phút' : 'Valid for 5 mins'}</span>
+                          {removeOtpCountdown > 0 ? (
+                            <span>{isVi ? `Gửi lại sau ${removeOtpCountdown}s` : `Resend in ${removeOtpCountdown}s`}</span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleSendRemoveOtp(removeOtpChannel)}
+                              className="underline font-bold text-amber-800 cursor-pointer"
+                            >
+                              {isVi ? 'Gửi lại mã OTP' : 'Resend OTP'}
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      <div className="p-2 bg-white rounded-lg border border-amber-200 text-center font-mono text-base font-extrabold tracking-widest text-slate-900 shadow-2xs">
-                        {removeGeneratedOtp || '123456'}
-                      </div>
-                      <div className="flex items-center justify-between text-[10px] text-amber-700">
-                        <span>{isVi ? 'Hiệu lực trong 5 phút' : 'Valid for 5 mins'}</span>
+                    ) : (
+                      <div className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-[11px] text-slate-600">
+                        <span>
+                          {isVi
+                            ? `Mã OTP đã gửi đến ${removeOtpChannel === 'email' ? currentUserEmail : (currentUserPhone || 'SĐT đã đăng ký')}`
+                            : `OTP sent to ${removeOtpChannel === 'email' ? currentUserEmail : (currentUserPhone || 'registered phone')}`}
+                        </span>
                         {removeOtpCountdown > 0 ? (
-                          <span>{isVi ? `Gửi lại sau ${removeOtpCountdown}s` : `Resend in ${removeOtpCountdown}s`}</span>
+                          <span className="font-semibold text-slate-500 shrink-0 ml-2">{removeOtpCountdown}s</span>
                         ) : (
                           <button
                             type="button"
                             onClick={() => handleSendRemoveOtp(removeOtpChannel)}
-                            className="underline font-bold text-amber-800 cursor-pointer"
+                            className="underline font-bold text-teal-700 cursor-pointer shrink-0 ml-2"
                           >
-                            {isVi ? 'Gửi lại mã OTP' : 'Resend OTP'}
+                            {isVi ? 'Gửi lại' : 'Resend'}
                           </button>
                         )}
                       </div>
-                    </div>
+                    )}
 
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 mb-1">
@@ -2619,53 +2703,57 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                   </p>
                 </div>
               ) : (
-                trip.notifications.map((n) => (
-                  <div
-                    key={n.id}
-                    className={`p-3 rounded-2xl border text-xs space-y-1.5 ${
-                      n.status === 'pending'
-                        ? 'bg-amber-50/80 border-amber-300'
-                        : n.type === 'pin_removed'
-                        ? 'bg-slate-50 border-slate-200'
-                        : 'bg-teal-50/50 border-teal-200'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-bold text-slate-900 flex items-center gap-1.5">
-                        {n.type === 'pin_removed' ? (
-                          <KeyRound className="w-3.5 h-3.5 text-slate-600" />
-                        ) : n.status === 'pending' ? (
-                          <Clock className="w-3.5 h-3.5 text-amber-600" />
-                        ) : (
-                          <ShieldCheck className="w-3.5 h-3.5 text-teal-600" />
-                        )}
-                        <span>{n.title}</span>
-                      </span>
-                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                trip.notifications.map((n) => {
+                  const formatted = formatTripNotificationI18n(n, lang);
+                  const locale = isVi ? 'vi-VN' : 'en-US';
+                  return (
+                    <div
+                      key={n.id}
+                      className={`p-3 rounded-2xl border text-xs space-y-1.5 ${
                         n.status === 'pending'
-                          ? 'bg-amber-100 text-amber-800'
-                          : n.status === 'rejected'
-                          ? 'bg-red-100 text-red-800'
-                          : 'bg-emerald-100 text-emerald-800'
-                      }`}>
-                        {n.status === 'pending'
-                          ? (isVi ? 'Chờ duyệt' : 'Pending')
-                          : n.status === 'rejected'
-                          ? (isVi ? 'Từ chối' : 'Rejected')
-                          : (isVi ? 'Đã duyệt' : 'Approved')}
-                      </span>
-                    </div>
+                          ? 'bg-amber-50/80 border-amber-300'
+                          : n.type === 'pin_removed'
+                          ? 'bg-slate-50 border-slate-200'
+                          : 'bg-teal-50/50 border-teal-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                          {n.type === 'pin_removed' ? (
+                            <KeyRound className="w-3.5 h-3.5 text-slate-600" />
+                          ) : n.status === 'pending' ? (
+                            <Clock className="w-3.5 h-3.5 text-amber-600" />
+                          ) : (
+                            <ShieldCheck className="w-3.5 h-3.5 text-teal-600" />
+                          )}
+                          <span>{formatted.title}</span>
+                        </span>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                          n.status === 'pending'
+                            ? 'bg-amber-100 text-amber-800'
+                            : n.status === 'rejected'
+                            ? 'bg-red-100 text-red-800'
+                            : 'bg-emerald-100 text-emerald-800'
+                        }`}>
+                          {n.status === 'pending'
+                            ? (isVi ? 'Chờ duyệt' : 'Pending')
+                            : n.status === 'rejected'
+                            ? (isVi ? 'Từ chối' : 'Rejected')
+                            : (isVi ? 'Đã duyệt' : 'Approved')}
+                        </span>
+                      </div>
 
-                    <p className="text-slate-700 leading-relaxed bg-white/70 p-2 rounded-xl border border-slate-200/50">
-                      {n.message}
-                    </p>
+                      <p className="text-slate-700 leading-relaxed bg-white/70 p-2 rounded-xl border border-slate-200/50">
+                        {formatted.message}
+                      </p>
 
-                    <div className="flex items-center justify-between text-[11px] text-slate-400 pt-0.5">
-                      <span>{isVi ? 'Bởi:' : 'By:'} <strong className="text-slate-600">{n.actorName}</strong></span>
-                      <span>{new Date(n.createdAt).toLocaleTimeString('vi-VN')} {new Date(n.createdAt).toLocaleDateString('vi-VN')}</span>
+                      <div className="flex items-center justify-between text-[11px] text-slate-400 pt-0.5">
+                        <span>{isVi ? 'Bởi:' : 'By:'} <strong className="text-slate-600">{n.actorName}</strong></span>
+                        <span>{new Date(n.createdAt).toLocaleTimeString(locale)} {new Date(n.createdAt).toLocaleDateString(locale)}</span>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
 

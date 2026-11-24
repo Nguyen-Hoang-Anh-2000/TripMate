@@ -39,6 +39,7 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
   const [coverImage, setCoverImage] = useState(trip?.coverImage || COVER_PRESETS[0].url);
   const [rearrangeAllDays, setRearrangeAllDays] = useState(false);
   const [uploadError, setUploadError] = useState('');
+  const [formError, setFormError] = useState<string | null>(null);
 
   // Always reset fields when trip or modal open state changes
   useEffect(() => {
@@ -53,6 +54,7 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
       setCoverImage(trip.coverImage || COVER_PRESETS[0].url);
       setRearrangeAllDays(false);
       setUploadError('');
+      setFormError(null);
     }
   }, [trip, isOpen]);
 
@@ -103,7 +105,19 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || !destination.trim()) return;
+    setFormError(null);
+    if (!title.trim()) {
+      setFormError(isVi ? 'Vui lòng nhập tên chuyến đi.' : 'Please enter a trip title.');
+      return;
+    }
+    if (!destination.trim()) {
+      setFormError(isVi ? 'Vui lòng nhập thành phố / điểm đến.' : 'Please enter a city / destination.');
+      return;
+    }
+    if (startDate && endDate && endDate < startDate) {
+      setFormError(isVi ? 'Ngày kết thúc phải sau hoặc bằng ngày bắt đầu.' : 'End date must be on or after start date.');
+      return;
+    }
 
     const safeBudget = (() => {
       if (!budgetTotal) return trip.budgetTotal;
@@ -134,7 +148,7 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
         <div className="px-4 py-3 sm:px-6 sm:py-3.5 bg-slate-900 text-white flex items-center justify-between shrink-0">
           <div>
             <h3 className="font-display font-bold text-sm sm:text-base">
-              {isVi ? 'Sửa Chuyến Đi' : 'Edit Trip'}
+              {isVi ? 'Sửa chuyến đi' : 'Edit Trip'}
             </h3>
             <p className="text-[11px] text-slate-400 mt-0.5">
               {trip.title}
@@ -150,12 +164,18 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
         </div>
 
         {/* Scrollable Form Body */}
-        <form onSubmit={handleSubmit} className="overflow-y-auto flex-1 p-4 sm:p-6 space-y-3.5">
+        <form noValidate onSubmit={handleSubmit} className="overflow-y-auto flex-1 p-4 sm:p-6 space-y-3.5">
+          {formError && (
+            <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{formError}</span>
+            </div>
+          )}
           
           {/* Trip Title */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
-              {isVi ? 'Tên Chuyến Đi *' : 'Trip Title *'}
+              {isVi ? 'Tên chuyến đi *' : 'Trip Title *'}
             </label>
             <input
               type="text"
@@ -200,7 +220,7 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
             {/* Start Date */}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                {isVi ? 'Ngày Bắt đầu' : 'Start Date'}
+                {isVi ? 'Ngày bắt đầu' : 'Start Date'}
               </label>
               <input
                 type="date"
@@ -214,7 +234,7 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
             {/* End Date */}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                {isVi ? 'Ngày Kết thúc' : 'End Date'}
+                {isVi ? 'Ngày kết thúc' : 'End Date'}
               </label>
               <input
                 type="date"

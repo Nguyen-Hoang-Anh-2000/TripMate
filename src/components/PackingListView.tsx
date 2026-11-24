@@ -116,8 +116,8 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
   useEffect(() => {
     const existingIds = categories.map((c) => c.id);
     setSelectedCategoryIds((prev) => {
-      const valid = prev.filter((id) => existingIds.includes(id));
-      return valid.length > 0 ? valid : existingIds;
+      if (prev.length === 0) return prev;
+      return prev.filter((id) => existingIds.includes(id));
     });
   }, [categories]);
 
@@ -132,10 +132,9 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
     return found?.icon || '📦';
   };
 
-  // Toggle category checkbox in combobox
+  // Toggle category checkbox in combobox (allows unchecking down to 0)
   const handleToggleCategoryCheckbox = (catId: string) => {
     if (selectedCategoryIds.includes(catId)) {
-      if (selectedCategoryIds.length === 1) return; // Keep at least one
       setSelectedCategoryIds(selectedCategoryIds.filter((id) => id !== catId));
     } else {
       setSelectedCategoryIds([...selectedCategoryIds, catId]);
@@ -144,23 +143,30 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
 
   const handleSelectAllCategories = () => {
     if (selectedCategoryIds.length === categories.length) {
-      setSelectedCategoryIds([categories[0]?.id || 'Essentials']);
+      setSelectedCategoryIds([]);
     } else {
       setSelectedCategoryIds(categories.map((c) => c.id));
     }
   };
+
+  const [addItemError, setAddItemError] = useState<string | null>(null);
+  const [editItemError, setEditItemError] = useState<string | null>(null);
 
   // Add Item Submit
   const handleOpenAddModal = () => {
     setNewItemName('');
     setNewItemCategory(categories[0]?.id || 'Essentials');
     setNewItemQty(1);
+    setAddItemError(null);
     setIsAddModalOpen(true);
   };
 
   const handleSaveNewItem = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newItemName.trim()) return;
+    if (!newItemName.trim()) {
+      setAddItemError(isVi ? 'Vui lòng nhập tên món đồ.' : 'Please enter an item name.');
+      return;
+    }
 
     const validQty = Math.max(1, Math.min(999, parseInt(String(newItemQty), 10) || 1));
     onAddItem({
@@ -174,6 +180,7 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
       prev.includes(newItemCategory) ? prev : [...prev, newItemCategory]
     );
 
+    setAddItemError(null);
     setIsAddModalOpen(false);
     setNewItemName('');
     setNewItemQty(1);
@@ -186,11 +193,16 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
     setEditCategory(item.category);
     setEditQty(item.quantity || 1);
     setEditPacked(!!item.isPacked);
+    setEditItemError(null);
   };
 
   const handleSaveEditItem = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingItem || !editName.trim()) return;
+    if (!editingItem) return;
+    if (!editName.trim()) {
+      setEditItemError(isVi ? 'Vui lòng nhập tên món đồ.' : 'Please enter an item name.');
+      return;
+    }
 
     const validQty = Math.max(1, Math.min(999, parseInt(String(editQty), 10) || 1));
     onEditItem(editingItem.id, {
@@ -200,6 +212,7 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
       isPacked: editPacked,
     });
 
+    setEditItemError(null);
     setEditingItem(null);
   };
 
@@ -269,7 +282,7 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
                 <span className="truncate">
                   {selectedCategoryIds.length === categories.length
                     ? (isVi ? 'Tất cả phân loại' : 'All Categories')
-                    : (isVi ? `${selectedCategoryIds.length} phân loại đã chọn` : `${selectedCategoryIds.length} categories`)}
+                    : (isVi ? `${selectedCategoryIds.length} phân loại đã chọn` : `${selectedCategoryIds.length} ${selectedCategoryIds.length === 1 ? 'category' : 'categories'}`)}
                 </span>
               </div>
               <ChevronDown
@@ -561,14 +574,13 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
             </div>
 
             {/* Form */}
-            <form onSubmit={handleSaveNewItem} className="space-y-3.5">
+            <form noValidate onSubmit={handleSaveNewItem} className="space-y-3.5">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   {isVi ? 'Tên món đồ' : 'Item Name'} <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
-                  required
                   autoFocus
                   placeholder={
                     isVi
@@ -576,9 +588,17 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
                       : 'e.g. Power bank, Warm jacket, Passport, Sunscreen...'
                   }
                   value={newItemName}
-                  onChange={(e) => setNewItemName(e.target.value)}
-                  className="w-full text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                  onChange={(e) => {
+                    setNewItemName(e.target.value);
+                    if (addItemError) setAddItemError(null);
+                  }}
+                  className={`w-full text-xs p-2.5 rounded-xl border focus:ring-2 focus:ring-teal-500 focus:outline-hidden ${
+                    addItemError ? 'border-rose-400 bg-rose-50/40' : 'border-slate-200'
+                  }`}
                 />
+                {addItemError && (
+                  <p className="text-[11px] font-medium text-rose-600 mt-1">{addItemError}</p>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -657,19 +677,26 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
             </div>
 
             {/* Form */}
-            <form onSubmit={handleSaveEditItem} className="space-y-3.5">
+            <form noValidate onSubmit={handleSaveEditItem} className="space-y-3.5">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   {isVi ? 'Tên món đồ' : 'Item Name'} <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
-                  required
                   autoFocus
                   value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  className="w-full text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                  onChange={(e) => {
+                    setEditName(e.target.value);
+                    if (editItemError) setEditItemError(null);
+                  }}
+                  className={`w-full text-xs p-2.5 rounded-xl border focus:ring-2 focus:ring-teal-500 focus:outline-hidden ${
+                    editItemError ? 'border-rose-400 bg-rose-50/40' : 'border-slate-200'
+                  }`}
                 />
+                {editItemError && (
+                  <p className="text-[11px] font-medium text-rose-600 mt-1">{editItemError}</p>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">

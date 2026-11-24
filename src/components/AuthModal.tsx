@@ -216,17 +216,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                 {userProfile
                   ? authModalView === 'change-password'
                     ? isVi
-                      ? 'Đổi Mật Khẩu Tài Khoản'
+                      ? 'Đổi mật khẩu tài khoản'
                       : 'Change Account Password'
                     : authModalView === 'forgot-password'
                     ? isVi
-                      ? 'Khôi Phục Mật Khẩu'
+                      ? 'Khôi phục mật khẩu'
                       : 'Reset Password'
                     : isVi
-                    ? 'Tài Khoản TripMate'
+                    ? 'Tài khoản TripMate'
                     : 'TripMate Account'
                   : isVi
-                  ? 'Đăng Ký & Đăng Nhập'
+                  ? 'Đăng nhập & Đăng ký'
                   : 'Sign In & Register'}
               </h3>
               <p className="text-[11px] text-teal-100/90">
@@ -314,7 +314,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
               {/* VIEW 1: PROFILE OVERVIEW */}
               {authModalView === 'profile' && (
                 <div className="space-y-3">
-                  {/* Change Password Entry Button */}
+                  {/* Add to Home Screen / Install App (iOS, Android, Windows) */}
+                  <PWAInstallButton variant="modal-card" />
+
+                  {/* Change Password Entry Button (directly above Sign Out) */}
                   <button
                     type="button"
                     onClick={() => {
@@ -346,9 +349,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                     <ChevronRight className="w-5 h-5 text-slate-400 group-hover:text-teal-600 transition-colors shrink-0" />
                   </button>
 
-                  {/* Add to Home Screen / Install App (iOS, Android, Windows) */}
-                  <PWAInstallButton variant="modal-card" />
-
                   <div className="flex gap-2 pt-1">
                     <button
                       type="button"
@@ -373,7 +373,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
 
               {/* VIEW 2: CHANGE PASSWORD FORM + FORGOT PASSWORD LINK */}
               {authModalView === 'change-password' && (
-                <form onSubmit={handleChangePasswordSubmit} className="space-y-3.5 animate-in fade-in duration-150">
+                <form noValidate onSubmit={handleChangePasswordSubmit} className="space-y-3.5 animate-in fade-in duration-150">
                   {userProfile.passwordHash ? (
                     <div>
                       <div className="flex items-center justify-between mb-1.5">
@@ -623,7 +623,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                   )}
 
                   {/* Form */}
-                  <form onSubmit={handleGuestSubmit} className="space-y-3">
+                  <form noValidate onSubmit={handleGuestSubmit} className="space-y-3">
                     {guestMode === 'register' && (
                       <>
                         <div className="flex items-center gap-3 p-2.5 rounded-xl bg-slate-50 border border-slate-200">

@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Camera, Upload, Sparkles, X, Check, AlertCircle, RefreshCw, Receipt, FileText, ChevronRight } from 'lucide-react';
+import { Camera, Upload, Sparkles, X, Check, AlertCircle, RefreshCw, Receipt, FileText, ChevronRight, Image as ImageIcon } from 'lucide-react';
 import { CategoryType } from '../types';
 import { useLanguage } from '../context/LanguageContext';
 import { formatMoney } from '../utils/formatCurrency';
@@ -216,7 +216,7 @@ export const ReceiptScannerModal: React.FC<ReceiptScannerModalProps> = ({
                   onClick={() => fileInputRef.current?.click()}
                   className="p-3.5 bg-slate-50 hover:bg-slate-100 border border-slate-200/90 rounded-xl text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition-all cursor-pointer shadow-2xs hover:border-slate-300"
                 >
-                  <Receipt className="w-4 h-4 text-teal-600" />
+                  <ImageIcon className="w-4 h-4 text-teal-600" />
                   <span>{isVi ? 'Chọn từ thư viện' : 'Photo Library'}</span>
                 </button>
               </div>

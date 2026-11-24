@@ -282,7 +282,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 title={isVi ? 'Switch to English' : 'Chuyển sang Tiếng Việt'}
               >
                 <Globe className="w-3.5 h-3.5 text-teal-600" />
-                <span>{isVi ? 'Vietnamese' : 'English'}</span>
+                <span>{isVi ? 'Tiếng Việt' : 'English'}</span>
               </button>
             </div>
 
@@ -382,14 +382,14 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <h3 className="text-sm font-extrabold text-slate-900">
                   {mobileSheetView === 'change-password'
                     ? isVi
-                      ? 'Đổi Mật Khẩu Tài Khoản'
+                      ? 'Đổi mật khẩu tài khoản'
                       : 'Change Password'
                     : mobileSheetView === 'forgot-password'
                     ? isVi
-                      ? 'Khôi Phục Mật Khẩu'
+                      ? 'Khôi phục mật khẩu'
                       : 'Reset Password'
                     : isVi
-                    ? 'Tài Khoản TripMate'
+                    ? 'Tài khoản TripMate'
                     : 'TripMate Account'}
                 </h3>
               </div>
@@ -561,7 +561,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                           : 'text-slate-600 hover:text-slate-900'
                       }`}
                     >
-                      Vietnamese
+                      Tiếng Việt
                     </button>
                     <button
                       type="button"
@@ -636,7 +636,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
             {/* VIEW 2: INLINE CHANGE PASSWORD FORM + FORGOT PASSWORD LINK */}
             {mobileSheetView === 'change-password' && userProfile && (
-              <form onSubmit={handleMobileChangePassword} className="space-y-3.5 animate-in fade-in duration-150">
+              <form noValidate onSubmit={handleMobileChangePassword} className="space-y-3.5 animate-in fade-in duration-150">
                 {userProfile.passwordHash ? (
                   <div>
                     <div className="flex items-center justify-between mb-1.5">

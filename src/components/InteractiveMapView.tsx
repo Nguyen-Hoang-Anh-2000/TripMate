@@ -273,11 +273,13 @@ export const InteractiveMapView: React.FC<InteractiveMapViewProps> = ({ trip }) 
 
     const newLayer = L.tileLayer(getTileUrl(mapMode), {
       attribution: '&copy; Google Maps',
-      maxZoom: 20,
+      maxNativeZoom: mapMode === 'google-terrain' ? 15 : 19,
+      maxZoom: 19,
       subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
     }).addTo(map);
 
     tileLayerRef.current = newLayer;
+    setTimeout(() => map.invalidateSize(), 120);
   }, [mapMode]);
 
   // Initialize and update markers & route lines on map
@@ -288,12 +290,14 @@ export const InteractiveMapView: React.FC<InteractiveMapViewProps> = ({ trip }) 
       const map = L.map(mapContainerRef.current, {
         center: [baseLat, baseLng],
         zoom: 13,
+        maxZoom: 19,
         scrollWheelZoom: true,
       });
 
       const initialLayer = L.tileLayer(getTileUrl(mapMode), {
         attribution: '&copy; Google Maps',
-        maxZoom: 20,
+        maxNativeZoom: mapMode === 'google-terrain' ? 15 : 19,
+        maxZoom: 19,
         subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
       }).addTo(map);
 
@@ -302,6 +306,7 @@ export const InteractiveMapView: React.FC<InteractiveMapViewProps> = ({ trip }) 
     }
 
     const map = mapInstanceRef.current;
+    setTimeout(() => map.invalidateSize(), 80);
 
     map.off('click');
     map.on('click', (e: L.LeafletMouseEvent) => {
@@ -398,7 +403,7 @@ export const InteractiveMapView: React.FC<InteractiveMapViewProps> = ({ trip }) 
         sortMode === 'nearest' && rankNearest
           ? `#${rankNearest}`
           : selectedDayFilter === 'all'
-          ? `N${dayNumber}.${wp.orderInDay}`
+          ? `${isVi ? 'N' : 'D'}${dayNumber}.${wp.orderInDay}`
           : `${idx + 1}`;
 
       const distSuffix =
@@ -420,13 +425,16 @@ export const InteractiveMapView: React.FC<InteractiveMapViewProps> = ({ trip }) 
             display: flex;
             align-items: center;
             gap: 4px;
+            max-width: 158px;
+            overflow: hidden;
           ">
-            <span style="background: rgba(255,255,255,0.24); padding: 0.5px 4.5px; border-radius: 6px; font-weight: 800; font-size: 10px;">${badgePrefix}</span>
-            <span>${act.title.length > 13 ? act.title.substring(0, 11) + '...' : act.title}${distSuffix}</span>
+            <span style="background: rgba(255,255,255,0.24); padding: 0.5px 4.5px; border-radius: 6px; font-weight: 800; font-size: 10px; flex-shrink: 0;">${badgePrefix}</span>
+            <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1;">${act.title}</span>
+            ${distSuffix ? `<span style="flex-shrink: 0; font-size: 10px; opacity: 0.92;">${distSuffix}</span>` : ''}
           </div>
         `,
-        iconSize: [145, 26],
-        iconAnchor: [72, 13],
+        iconSize: [158, 26],
+        iconAnchor: [79, 13],
       });
 
       const marker = L.marker([lat, lng], { icon: customIcon }).addTo(map);
@@ -615,7 +623,7 @@ export const InteractiveMapView: React.FC<InteractiveMapViewProps> = ({ trip }) 
             <p className="text-[11px] font-semibold text-slate-500 flex items-center gap-1 mt-0.5 truncate">
               <MapPin className="w-3 h-3 text-teal-600 shrink-0" />
               <span>
-                {filteredWaypoints.length} {isVi ? 'địa điểm' : 'stops'}
+                {filteredWaypoints.length} {isVi ? 'địa điểm' : filteredWaypoints.length === 1 ? 'stop' : 'stops'}
               </span>
             </p>
           </div>
@@ -888,7 +896,7 @@ export const InteractiveMapView: React.FC<InteractiveMapViewProps> = ({ trip }) 
 
                           <div className="flex items-center gap-1.5 shrink-0">
                             <span className="text-[10px] font-bold text-slate-500">
-                              {group.items.length} {isVi ? 'điểm' : 'stops'}
+                              {group.items.length} {isVi ? 'điểm' : group.items.length === 1 ? 'stop' : 'stops'}
                             </span>
                             <button
                               type="button"

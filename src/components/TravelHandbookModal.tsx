@@ -175,7 +175,7 @@ export const TravelHandbookModal: React.FC<TravelHandbookModalProps> = ({
         </div>
 
         {/* Print Configuration Controls - Hidden when printing */}
-        <div className="px-4 sm:px-6 py-2.5 bg-teal-50/50 border-b border-teal-100 flex flex-wrap items-center gap-4 text-xs font-medium text-slate-700 shrink-0 print:hidden">
+        <div className="px-4 sm:px-6 py-2.5 bg-teal-50/50 border-b border-teal-100 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs font-medium text-slate-700 shrink-0 print:hidden">
           <span className="text-teal-900 font-semibold">{isVi ? 'Tùy chọn in:' : 'Print options:'}</span>
           
           <label className="flex items-center gap-1.5 cursor-pointer select-none">
@@ -225,12 +225,13 @@ export const TravelHandbookModal: React.FC<TravelHandbookModalProps> = ({
                 <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600 mt-2">
                   <span className="flex items-center gap-1 font-semibold text-slate-800">
                     <MapPin className="w-3.5 h-3.5 text-teal-600" />
-                    {trip.destination}{trip.country ? `, ${trip.country}` : ''}
+                    {trip.destination}
+                    {trip.country && trip.country.trim().toLowerCase() !== trip.destination.trim().toLowerCase() ? `, ${trip.country}` : ''}
                   </span>
                   <span>•</span>
                   <span className="flex items-center gap-1">
                     <Calendar className="w-3.5 h-3.5 text-slate-400" />
-                    {trip.startDate} - {trip.endDate} ({trip.days.length} {isVi ? 'ngày' : 'days'})
+                    {trip.startDate} - {trip.endDate} ({trip.days.length} {isVi ? 'ngày' : trip.days.length === 1 ? 'day' : 'days'})
                   </span>
                 </div>
               </div>
@@ -298,16 +299,16 @@ export const TravelHandbookModal: React.FC<TravelHandbookModalProps> = ({
                   className="border border-slate-200 rounded-xl p-3.5 bg-white break-inside-avoid shadow-2xs"
                 >
                   <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-2 mb-2.5">
-                    <div className="flex items-center gap-2">
-                      <span className="px-2 py-0.5 bg-teal-600 text-white rounded text-xs font-semibold">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="px-2 py-0.5 bg-teal-600 text-white rounded text-xs font-semibold shrink-0">
                         {isVi ? `Ngày ${day.dayNumber}` : `Day ${day.dayNumber}`}
                       </span>
-                      <span className="text-xs font-semibold text-slate-800">
-                        {day.title || (isVi ? 'Lịch trình trong ngày' : 'Daily Schedule')}
+                      <span className="text-xs font-semibold text-slate-800 truncate">
+                        {(day.title || '').replace(/^(ngày|day)\s*\d+[\s:–\-·]*/i, '').trim() || (isVi ? 'Lịch trình trong ngày' : 'Daily Schedule')}
                       </span>
                     </div>
                     {day.date && (
-                      <span className="text-[11px] text-slate-500 font-medium">
+                      <span className="text-[11px] text-slate-500 font-medium shrink-0">
                         {day.date}
                       </span>
                     )}
@@ -329,11 +330,19 @@ export const TravelHandbookModal: React.FC<TravelHandbookModalProps> = ({
                           </span>
 
                           <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className={`font-semibold text-slate-800 ${act.isCompleted ? 'line-through text-slate-400' : ''}`}>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {act.isCompleted && (
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              )}
+                              <span className="font-semibold text-slate-800">
                                 {act.title}
                               </span>
-                              {act.locationName && (
+                              {act.isCompleted && (
+                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded">
+                                  {isVi ? 'Hoàn thành' : 'Done'}
+                                </span>
+                              )}
+                              {act.locationName && act.locationName.trim().toLowerCase() !== act.title.trim().toLowerCase() && (
                                 <span className="text-[11px] text-slate-500 flex items-center gap-0.5">
                                   <MapPin className="w-3 h-3 text-slate-400" />
                                   {act.locationName}
@@ -360,7 +369,7 @@ export const TravelHandbookModal: React.FC<TravelHandbookModalProps> = ({
           </div>
 
           {/* Travel Vault / Important Documents & Tickets */}
-          {includeVault && trip.documents && trip.documents.length > 0 && (
+          {includeVault && (
             <div className="space-y-3 pt-2 break-inside-avoid">
               <div className="flex items-center justify-between border-b border-slate-200 pb-2">
                 <h2 className="text-sm sm:text-base font-bold text-slate-900 uppercase tracking-wide flex items-center gap-2">
@@ -368,33 +377,41 @@ export const TravelHandbookModal: React.FC<TravelHandbookModalProps> = ({
                   <span>{isVi ? 'Mã đặt chỗ, Vé máy bay & Khách sạn' : 'Booking Codes & Tickets'}</span>
                 </h2>
                 <span className="text-xs text-slate-500 font-medium">
-                  {trip.documents.length} {isVi ? 'chứng từ' : 'records'}
+                  {trip.documents?.length || 0} {isVi ? 'chứng từ' : (trip.documents?.length || 0) === 1 ? 'record' : 'records'}
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                {trip.documents.map((doc) => (
-                  <div key={doc.id} className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold text-slate-800">{doc.title}</span>
-                      <span className="text-[10px] bg-white border border-slate-200 px-1.5 py-0.5 rounded text-slate-600 font-medium">
-                        {doc.docType}
-                      </span>
-                    </div>
-                    {doc.codeOrNumber && (
-                      <div className="text-[11px] text-slate-600">
-                        {isVi ? 'Mã code:' : 'Code/Ref:'}{' '}
-                        <span className="font-mono font-bold text-slate-900 bg-white px-1.5 py-0.5 rounded border border-slate-200 select-all">
-                          {doc.codeOrNumber}
+              {trip.documents && trip.documents.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                  {trip.documents.map((doc) => (
+                    <div key={doc.id} className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-slate-800">{doc.title}</span>
+                        <span className="text-[10px] bg-white border border-slate-200 px-1.5 py-0.5 rounded text-slate-600 font-medium">
+                          {doc.docType}
                         </span>
                       </div>
-                    )}
-                    {doc.notes && (
-                      <p className="text-[11px] text-slate-500">{doc.notes}</p>
-                    )}
-                  </div>
-                ))}
-              </div>
+                      {doc.codeOrNumber && (
+                        <div className="text-[11px] text-slate-600">
+                          {isVi ? 'Mã code:' : 'Code/Ref:'}{' '}
+                          <span className="font-mono font-bold text-slate-900 bg-white px-1.5 py-0.5 rounded border border-slate-200 select-all">
+                            {doc.codeOrNumber}
+                          </span>
+                        </div>
+                      )}
+                      {doc.notes && (
+                        <p className="text-[11px] text-slate-500">{doc.notes}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="p-3.5 bg-slate-50 rounded-xl border border-dashed border-slate-200 text-xs text-slate-500 italic">
+                  {isVi
+                    ? 'Chưa có vé máy bay, khách sạn hay giấy tờ nào được thêm trong mục Vé & Ví.'
+                    : 'No tickets, vouchers, or documents have been added to Travel Vault yet.'}
+                </div>
+              )}
             </div>
           )}
 
@@ -411,18 +428,20 @@ export const TravelHandbookModal: React.FC<TravelHandbookModalProps> = ({
                 </span>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
                 {trip.packingList.map((item) => (
                   <div
                     key={item.id}
-                    className="p-2 bg-slate-50 rounded-lg border border-slate-200/80 flex items-center gap-2"
+                    className={`p-2 rounded-lg border flex items-center gap-2 ${
+                      item.isPacked ? 'bg-emerald-50/50 border-emerald-200/80' : 'bg-slate-50 border-slate-200/80'
+                    }`}
                   >
-                    <div className={`w-3.5 h-3.5 rounded border flex items-center justify-center text-[10px] shrink-0 ${
-                      item.isPacked ? 'bg-teal-600 border-teal-600 text-white' : 'border-slate-300 bg-white'
+                    <div className={`w-4 h-4 rounded border flex items-center justify-center text-[10px] shrink-0 ${
+                      item.isPacked ? 'bg-emerald-600 border-emerald-600 text-white' : 'border-slate-300 bg-white'
                     }`}>
                       {item.isPacked ? '✓' : ''}
                     </div>
-                    <span className={`truncate font-normal ${item.isPacked ? 'line-through text-slate-400' : 'text-slate-700'}`}>
+                    <span className={`truncate font-medium ${item.isPacked ? 'text-emerald-900' : 'text-slate-700'}`}>
                       {item.name} {item.quantity > 1 ? `(x${item.quantity})` : ''}
                     </span>
                   </div>

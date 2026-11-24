@@ -4,7 +4,7 @@ import { useLanguage } from '../context/LanguageContext';
 import {
   MapPin, Plus, Search, Edit3, Trash2, CalendarPlus, ExternalLink,
   Star, Tag, Building2, Coffee, Camera, Utensils, Hotel, Car, ShoppingBag,
-  Sparkles, Filter, X, Check, ChevronDown, Clock
+  Sparkles, Filter, X, Check, ChevronDown, Clock, AlertCircle
 } from 'lucide-react';
 import { formatMoney } from '../utils/formatCurrency';
 
@@ -30,11 +30,25 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
   const { lang, t } = useLanguage();
   const isVi = lang === 'vi';
 
-  // Filters
-  const [selectedCity, setSelectedCity] = useState<string>('all');
+  // Filters (auto-sync with activeTrip destination)
+  const matchingTripCity = useMemo(() => {
+    const dest = (activeTrip?.destination || '').trim().toLowerCase();
+    if (!dest) return 'all';
+    const match = savedPlaces.find((p) => {
+      const c = (p.cityName || '').trim().toLowerCase();
+      return c === dest || c.includes(dest) || dest.includes(c);
+    });
+    return match ? match.cityName : 'all';
+  }, [activeTrip?.destination, savedPlaces]);
+
+  const [selectedCity, setSelectedCity] = useState<string>(() => matchingTripCity);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [selectedRating, setSelectedRating] = useState<number | 'all'>('all');
+
+  useEffect(() => {
+    setSelectedCity(matchingTripCity);
+  }, [activeTrip?.id]);
 
   // City Searchable Droplist state
   const [isCityDropdownOpen, setIsCityDropdownOpen] = useState(false);
@@ -57,6 +71,7 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
   const [editingPlace, setEditingPlace] = useState<SavedPlace | null>(null);
   const [schedulingPlace, setSchedulingPlace] = useState<SavedPlace | null>(null);
   const [placeToDelete, setPlaceToDelete] = useState<SavedPlace | null>(null);
+  const [placeFormError, setPlaceFormError] = useState<string | null>(null);
 
   // Form state for Add/Edit
   const [formName, setFormName] = useState('');
@@ -138,6 +153,7 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
 
   // Open add modal
   const handleOpenAdd = () => {
+    setPlaceFormError(null);
     setEditingPlace(null);
     setFormName('');
     setFormCity(selectedCity !== 'all' ? selectedCity : (activeTrip.destination || 'Đà Lạt'));
@@ -156,6 +172,7 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
 
   // Open edit modal
   const handleOpenEdit = (place: SavedPlace) => {
+    setPlaceFormError(null);
     setEditingPlace(place);
     setFormName(place.name);
     setFormCity(place.cityName);
@@ -175,9 +192,17 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
   // Save place (Create or Update)
   const handleSavePlace = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formName.trim()) return;
+    setPlaceFormError(null);
+    if (!formName.trim()) {
+      setPlaceFormError(isVi ? 'Vui lòng nhập tên địa điểm.' : 'Please enter a place name.');
+      return;
+    }
 
-    const finalCity = formNewCity.trim() ? formNewCity.trim() : formCity.trim();
+    const finalCity = formCity === '__new__' ? formNewCity.trim() : formCity.trim();
+    if (!finalCity) {
+      setPlaceFormError(isVi ? 'Vui lòng nhập tên thành phố.' : 'Please enter a city name.');
+      return;
+    }
 
     if (editingPlace) {
       onEditPlace(editingPlace.id, {
@@ -246,7 +271,7 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
       <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-2xs space-y-3">
         <div className="flex items-center justify-between gap-2.5 flex-wrap">
           <span className="text-xs font-bold px-3 py-1.5 rounded-full bg-teal-50 text-teal-700 border border-teal-200">
-            {filteredPlaces.length} {isVi ? 'địa điểm' : 'places'}
+            {filteredPlaces.length} {isVi ? 'địa điểm' : (filteredPlaces.length === 1 ? 'place' : 'places')}
           </span>
 
           <button
@@ -363,7 +388,7 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
                         >
                           <span className="truncate">{city}</span>
                           <span className="text-[11px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 ml-1 shrink-0">
-                            {count} {isVi ? 'địa điểm' : 'places'}
+                            {count} {isVi ? 'địa điểm' : (count === 1 ? 'place' : 'places')}
                           </span>
                         </button>
                       );
@@ -462,6 +487,11 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
                           {getCategoryIcon(place.category)}
                           <span>{t(`cat.${place.category}`)}</span>
                         </span>
+                        {/^sp-\d+$/i.test(place.id) && (
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-amber-50 text-amber-700 border border-amber-200/80">
+                            {isVi ? 'Gợi ý mẫu' : 'Sample Pick'}
+                          </span>
+                        )}
                       </div>
 
                       {/* Star Rating */}
@@ -577,8 +607,8 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
             </h3>
             <p className="text-xs text-slate-500 max-w-md mx-auto">
               {isVi
-                ? 'Hãy bấm "Thêm Địa Điểm Mới" để lưu lại những quán xá, cảnh đẹp ai đó vừa khen nhé!'
-                : 'Click "Add New Place" to bookmark recommendations you want to visit later!'}
+                ? 'Bấm "Thêm địa điểm" để lưu lại quán ăn, điểm check-in yêu thích.'
+                : 'Click "Add Place" to bookmark recommendations you want to visit later!'}
             </p>
             <button
               type="button"
@@ -598,7 +628,7 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
             <div className="flex items-center justify-between px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-100 shrink-0 bg-white">
               <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
                 <span>📍</span>
-                <span>{editingPlace ? (isVi ? 'Sửa Địa Điểm' : 'Edit Place') : (isVi ? 'Thêm Địa Điểm' : 'Add Place')}</span>
+                <span>{editingPlace ? (isVi ? 'Sửa địa điểm' : 'Edit Place') : (isVi ? 'Thêm địa điểm' : 'Add Place')}</span>
               </h3>
               <button
                 type="button"
@@ -610,8 +640,14 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
             </div>
 
             {/* Modal Body Form */}
-            <form onSubmit={handleSavePlace} className="flex flex-col flex-1 overflow-hidden min-h-0">
+            <form noValidate onSubmit={handleSavePlace} className="flex flex-col flex-1 overflow-hidden min-h-0">
               <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3.5 overscroll-contain">
+                {placeFormError && (
+                  <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>{placeFormError}</span>
+                  </div>
+                )}
                 {/* Name */}
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
@@ -797,7 +833,7 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
                   type="submit"
                   className="px-5 py-2 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white shadow-xs transition-colors cursor-pointer"
                 >
-                  {editingPlace ? (isVi ? 'Cập Nhật' : 'Update') : (isVi ? 'Lưu' : 'Save')}
+                  {editingPlace ? (isVi ? 'Cập nhật' : 'Update') : (isVi ? 'Lưu' : 'Save')}
                 </button>
               </div>
             </form>
@@ -812,7 +848,7 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
                 <CalendarPlus className="w-5 h-5 text-teal-600" />
-                <span>{isVi ? 'Sắp Xếp Vào Lịch Trình' : 'Schedule into Trip'}</span>
+                <span>{isVi ? 'Thêm vào lịch trình' : 'Schedule into Trip'}</span>
               </h3>
               <button
                 type="button"
@@ -871,11 +907,16 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
                     onChange={(e) => setScheduleDayNumber(parseInt(e.target.value, 10))}
                     className="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-white text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-teal-500 cursor-pointer"
                   >
-                    {targetTripObj.days.map((d) => (
-                      <option key={d.dayNumber} value={d.dayNumber}>
-                        {isVi ? `Ngày ${d.dayNumber} (${d.title})` : `Day ${d.dayNumber} (${d.title})`}
-                      </option>
-                    ))}
+                    {targetTripObj.days.map((d) => {
+                      const cleanTitle = (d.title || '').replace(/^(ngày|day)\s*\d+[\s:–-]*/i, '').trim();
+                      return (
+                        <option key={d.dayNumber} value={d.dayNumber}>
+                          {isVi
+                            ? `Ngày ${d.dayNumber}${cleanTitle ? ` (${cleanTitle})` : ''}`
+                            : `Day ${d.dayNumber}${cleanTitle ? ` (${cleanTitle})` : ''}`}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
 
@@ -907,7 +948,7 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
                     className="px-5 py-2 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
                   >
                     <Check className="w-3.5 h-3.5" />
-                    <span>{isVi ? 'Xác Nhận Thêm' : 'Confirm Schedule'}</span>
+                    <span>{isVi ? 'Xác nhận thêm' : 'Confirm Schedule'}</span>
                   </button>
                 </div>
               </form>

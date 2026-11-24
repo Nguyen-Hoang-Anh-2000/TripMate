@@ -4,7 +4,7 @@ import {
   Sparkles, Utensils, Hotel, Car, Camera, ShoppingBag, Compass, Tag, X,
   Search, Calendar, Filter, ChevronDown, ChevronUp, Edit3, ExternalLink,
   Navigation, BookmarkCheck, DollarSign, Users, ArrowRight, Check, CreditCard,
-  RotateCcw, RefreshCw, PiggyBank, AlertCircle, Upload, Image, Receipt
+  RotateCcw, RefreshCw, PiggyBank, AlertCircle, Upload, Image, Receipt, Settings2
 } from 'lucide-react';
 import { Trip, ActivityItem, CategoryType, SavedPlace, Expense } from '../types';
 import { useLanguage } from '../context/LanguageContext';
@@ -37,6 +37,7 @@ interface ItineraryViewProps {
   ) => void;
   onDeleteExpense?: (expenseId: string, activityId?: string) => void;
   onNavigateToExpenses?: () => void;
+  externalQuickAddTrigger?: number;
 }
 
 const CATEGORY_ICONS: Record<CategoryType, React.ReactNode> = {
@@ -145,6 +146,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   onSaveActivityExpense,
   onDeleteExpense,
   onNavigateToExpenses,
+  externalQuickAddTrigger,
 }) => {
   const { lang, t } = useLanguage();
   const isVi = lang === 'vi';
@@ -477,6 +479,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
 
   // Editing activity modal state
   const [editingActivity, setEditingActivity] = useState<{ activity: ActivityItem; dayNumber: number } | null>(null);
+  const [editFormError, setEditFormError] = useState<string | null>(null);
   const [editDayNumber, setEditDayNumber] = useState<number>(1);
   const [editTitle, setEditTitle] = useState('');
   const [editLocationName, setEditLocationName] = useState('');
@@ -696,10 +699,18 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
     setEstimatedCost('');
     setNotes('');
     setSelectedSavedPlaceId('');
+    setActivityFormError(null);
     setIsAddModalOpen(true);
   };
 
+  useEffect(() => {
+    if (externalQuickAddTrigger && externalQuickAddTrigger > 0) {
+      handleOpenAddModal();
+    }
+  }, [externalQuickAddTrigger]);
+
   const handleOpenEditModal = (act: ActivityItem, dayNum: number) => {
+    setEditFormError(null);
     setEditingActivity({ activity: act, dayNumber: dayNum });
     setEditDayNumber(dayNum);
     setEditTitle(act.title);
@@ -775,7 +786,16 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
 
   const handleSaveEdit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingActivity || !editTitle.trim() || !editLocationName.trim()) return;
+    setEditFormError(null);
+    if (!editingActivity) return;
+    if (!editTitle.trim() || !editLocationName.trim()) {
+      setEditFormError(
+        isVi
+          ? 'Vui lòng nhập đầy đủ Tên hoạt động và Địa điểm.'
+          : 'Please enter both Activity Title and Location.'
+      );
+      return;
+    }
 
     const isCompleted = !!editingActivity.activity.isCompleted;
     // Unified cost: parsed from editEstimatedCost (which is synchronized with editActualCost)
@@ -890,10 +910,10 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setActivityFormError(null);
-    const finalLocation = locationName.trim();
-    const finalTitle = title.trim() || finalLocation;
+    const finalTitle = title.trim() || locationName.trim();
+    const finalLocation = locationName.trim() || title.trim();
     if (!finalTitle) {
-      setActivityFormError(isVi ? 'Vui lòng nhập tên hoạt động hoặc địa điểm.' : 'Please enter an activity title or location.');
+      setActivityFormError(isVi ? 'Vui lòng nhập tên hoạt động.' : 'Please enter an activity title.');
       return;
     }
     if (!time || !time.trim()) {
@@ -1097,7 +1117,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                           {onlyD && <span className="text-slate-400 ml-1 font-normal">({onlyD})</span>}
                         </div>
                         <span className="text-[11px] text-slate-400 shrink-0 ml-1.5">
-                          {d.activities.length} {isVi ? 'mục' : 'acts'}
+                          {d.activities.length} {isVi ? 'mục' : (d.activities.length === 1 ? 'activity' : 'activities')}
                         </span>
                       </button>
                     );
@@ -1279,11 +1299,11 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
         <div className="flex items-center gap-2">
           {searchQuery ? (
             <span className="font-semibold text-teal-700 bg-teal-50 px-2.5 py-0.5 rounded-lg border border-teal-200 text-[11px]">
-              {isVi ? `Tìm thấy ${totalFilteredCount} kết quả` : `Found ${totalFilteredCount} results`}
+              {isVi ? `Tìm thấy ${totalFilteredCount} kết quả` : `Found ${totalFilteredCount} ${totalFilteredCount === 1 ? 'result' : 'results'}`}
             </span>
           ) : (
             <span className="text-[11px] text-slate-500 font-medium">
-              {isVi ? `Đã hoàn thành ${completedActivitiesCount}/${totalActivitiesCount} hoạt động` : `Done ${completedActivitiesCount}/${totalActivitiesCount} activities`}
+              {isVi ? `Đã hoàn thành ${completedActivitiesCount}/${totalActivitiesCount} hoạt động` : `Done ${completedActivitiesCount}/${totalActivitiesCount} ${totalActivitiesCount === 1 ? 'activity' : 'activities'}`}
             </span>
           )}
         </div>
@@ -1389,7 +1409,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                     <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0 pt-1.5 sm:pt-0 border-t sm:border-t-0 border-slate-100">
                       <div className="flex items-center gap-1.5">
                         <span className="text-[11px] font-normal text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">
-                          {day.activities.length} {isVi ? 'hoạt động' : 'acts'}
+                          {day.activities.length} {isVi ? 'hoạt động' : (day.activities.length === 1 ? 'activity' : 'activities')}
                         </span>
 
                         {day.activities.length > 0 && (
@@ -1571,34 +1591,48 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                             </div>
 
                             {/* Row 2: Location & Google Maps Link & Price */}
-                            <div className="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-slate-100 text-xs">
-                              <div className="flex items-center gap-1 text-slate-500 min-w-0 truncate">
-                                <MapPin className="w-3.5 h-3.5 text-teal-600 shrink-0" />
-                                <span className="text-[11px] truncate font-medium text-slate-600">
-                                  {act.locationName}
-                                </span>
-                                <a
-                                  href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-                                    act.locationName ? `${act.locationName}, ${trip.destination}` : act.title
-                                  )}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  onClick={(e) => e.stopPropagation()}
-                                  className="inline-flex items-center justify-center w-5 h-5 text-blue-600 hover:text-white hover:bg-blue-600 bg-blue-50 rounded-md transition-colors shrink-0 ml-1"
-                                  title={isVi ? 'Mở trên Google Maps' : 'Open in Google Maps'}
-                                >
-                                  <MapPin className="w-3 h-3" />
-                                </a>
-                              </div>
+                            {(() => {
+                              const hasDistinctLocation = Boolean(
+                                act.locationName &&
+                                  act.locationName.trim().toLowerCase() !== act.title.trim().toLowerCase()
+                              );
+                              return (
+                                <div className="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-slate-100 text-xs">
+                                  <div className="flex items-center gap-1 text-slate-500 min-w-0 truncate">
+                                    <MapPin className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                                    {hasDistinctLocation ? (
+                                      <span className="text-[11px] truncate font-medium text-slate-600">
+                                        {act.locationName}
+                                      </span>
+                                    ) : (
+                                      <span className="text-[11px] font-medium text-slate-500">
+                                        {isVi ? 'Xem bản đồ' : 'View map'}
+                                      </span>
+                                    )}
+                                    <a
+                                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+                                        act.locationName ? `${act.locationName}, ${trip.destination}` : act.title
+                                      )}`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="inline-flex items-center justify-center w-5 h-5 text-blue-600 hover:text-white hover:bg-blue-600 bg-blue-50 rounded-md transition-colors shrink-0 ml-1"
+                                      title={isVi ? 'Mở trên Google Maps' : 'Open in Google Maps'}
+                                    >
+                                      <ExternalLink className="w-3 h-3" />
+                                    </a>
+                                  </div>
 
-                              {act.estimatedCost !== undefined && (
-                                <div className="shrink-0 font-bold text-[11px] text-emerald-700">
-                                  {act.estimatedCost > 0
-                                    ? formatMoney(act.estimatedCost, act.currency || trip.currency, lang)
-                                    : (isVi ? 'Miễn phí' : 'Free')}
+                                  {act.estimatedCost !== undefined && (
+                                    <div className="shrink-0 font-bold text-[11px] text-emerald-700">
+                                      {act.estimatedCost > 0
+                                        ? formatMoney(act.estimatedCost, act.currency || trip.currency, lang)
+                                        : (isVi ? 'Miễn phí' : 'Free')}
+                                    </div>
+                                  )}
                                 </div>
-                              )}
-                            </div>
+                              );
+                            })()}
 
                             {/* Row 3 (if completed): Display actual spent money, payer & participants + Edit button */}
                             {act.isCompleted && (() => {
@@ -1647,7 +1681,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                                     )}
                                     <span className="text-emerald-300">•</span>
                                     <span className="text-slate-600 font-medium">
-                                      {cardSplitIds.length} {isVi ? 'người chia' : 'participants'}
+                                      {cardSplitIds.length} {isVi ? 'người chia' : (cardSplitIds.length === 1 ? 'participant' : 'participants')}
                                     </span>
                                     {(act.receiptImageUrl || cardExpense?.receiptImageUrl) && (
                                       <>
@@ -1700,7 +1734,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
             <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between">
               <div>
                 <h3 className="font-display font-bold text-sm sm:text-base">
-                  {isVi ? 'Thêm Hoạt động' : 'Add Activity'}
+                  {isVi ? 'Thêm hoạt động' : 'Add Activity'}
                 </h3>
               </div>
               <button
@@ -1711,7 +1745,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleFormSubmit} className="p-4 sm:p-6 space-y-3.5">
+            <form noValidate onSubmit={handleFormSubmit} className="p-4 sm:p-6 space-y-3.5 max-h-[85vh] overflow-y-auto">
               {activityFormError && (
                 <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0" />
@@ -1739,11 +1773,29 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                 </select>
               </div>
 
+              {/* Activity Title */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  {isVi ? 'Tên hoạt động *' : 'Activity Title *'}
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder={isVi ? 'VD: Ăn tối hải sản, Tham quan Dinh Độc Lập...' : 'e.g., Seafood dinner, City museum visit...'}
+                  value={title}
+                  onChange={(e) => {
+                    setTitle(e.target.value);
+                    if (activityFormError) setActivityFormError(null);
+                  }}
+                  className="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                />
+              </div>
+
               {/* Location with Droplist */}
               <div className="relative" ref={locationDropdownRef}>
                 <div className="flex items-center justify-between mb-1">
                   <label className="block text-xs font-semibold text-slate-700">
-                    {t('itinerary.fieldLocation')} *
+                    {isVi ? 'Địa điểm / Địa chỉ' : t('itinerary.fieldLocation')}
                   </label>
                   {tripSavedPlaces && tripSavedPlaces.length > 0 && (
                     <button
@@ -1761,7 +1813,6 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                 <div className="relative">
                   <input
                     type="text"
-                    required
                     placeholder={isVi ? `Nhập địa điểm tại ${trip.destination || 'chuyến đi'}...` : `Type location in ${trip.destination || 'trip'}...`}
                     value={locationName}
                     onChange={(e) => {
@@ -1851,17 +1902,27 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
                     {t('itinerary.fieldCategory')}
                   </label>
-                  <select
-                    value={category}
-                    onChange={(e) => setCategory(e.target.value as CategoryType)}
-                    className="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
-                  >
-                    {categoriesList.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.icon ? `${c.icon} ` : ''}{isVi ? c.nameVi : c.nameEn}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={category}
+                      onChange={(e) => setCategory(e.target.value as CategoryType)}
+                      className="flex-1 min-w-0 text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50/50 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
+                    >
+                      {categoriesList.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.icon ? `${c.icon} ` : ''}{isVi ? c.nameVi : c.nameEn}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => setIsCategoryModalOpen(true)}
+                      className="p-2.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-teal-50 text-slate-600 hover:text-teal-700 transition-colors cursor-pointer shrink-0"
+                      title={isVi ? 'Cấu hình thể loại' : 'Configure categories'}
+                    >
+                      <Settings2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
 
                 {/* Cost */}
@@ -2169,25 +2230,34 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                           </div>
                         </div>
                       ) : (
-                        /* Capture & Upload action buttons */
-                        <div className="grid grid-cols-2 gap-2">
+                        /* Capture, Upload & AI OCR Scan buttons */
+                        <div className="grid grid-cols-3 gap-2">
                           <button
                             type="button"
                             onClick={() => itineraryCameraInputRef.current?.click()}
                             disabled={isScanningActivityReceipt}
-                            className="flex items-center justify-center gap-1.5 py-2 px-2.5 bg-white hover:bg-slate-50 border border-slate-200 hover:border-teal-300 rounded-xl text-xs font-semibold text-slate-700 transition-colors cursor-pointer disabled:opacity-50"
+                            className="flex items-center justify-center gap-1 py-2 px-2 bg-white hover:bg-slate-50 border border-slate-200 hover:border-teal-300 rounded-xl text-xs font-semibold text-slate-700 transition-colors cursor-pointer disabled:opacity-50"
                           >
-                            <Camera className="w-4 h-4 text-teal-600 shrink-0" />
-                            <span className="truncate">{isVi ? 'Chụp ảnh' : 'Take Photo'}</span>
+                            <Camera className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                            <span className="truncate">{isVi ? 'Chụp ảnh' : 'Camera'}</span>
                           </button>
                           <button
                             type="button"
                             onClick={() => itineraryFileInputRef.current?.click()}
                             disabled={isScanningActivityReceipt}
-                            className="flex items-center justify-center gap-1.5 py-2 px-2.5 bg-white hover:bg-slate-50 border border-slate-200 hover:border-teal-300 rounded-xl text-xs font-semibold text-slate-700 transition-colors cursor-pointer disabled:opacity-50"
+                            className="flex items-center justify-center gap-1 py-2 px-2 bg-white hover:bg-slate-50 border border-slate-200 hover:border-teal-300 rounded-xl text-xs font-semibold text-slate-700 transition-colors cursor-pointer disabled:opacity-50"
                           >
-                            <Upload className="w-4 h-4 text-slate-500 shrink-0" />
-                            <span className="truncate">{isVi ? 'Tải ảnh lên' : 'Upload'}</span>
+                            <Upload className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                            <span className="truncate">{isVi ? 'Tải ảnh' : 'Upload'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => itineraryFileInputRef.current?.click()}
+                            disabled={isScanningActivityReceipt}
+                            className="flex items-center justify-center gap-1 py-2 px-2 bg-teal-50 hover:bg-teal-100 border border-teal-200 hover:border-teal-400 rounded-xl text-xs font-bold text-teal-800 transition-colors cursor-pointer disabled:opacity-50"
+                          >
+                            <Sparkles className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                            <span className="truncate">{isVi ? 'Quét AI' : 'AI Scan'}</span>
                           </button>
                         </div>
                       )}
@@ -2739,7 +2809,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
             <div className="px-5 py-3.5 bg-blue-700 text-white flex items-center justify-between shrink-0">
               <h3 className="font-display font-bold text-sm sm:text-base flex items-center gap-1.5">
                 <Edit3 className="w-4 h-4" />
-                <span>{isVi ? 'Chỉnh Sửa Hoạt Động' : 'Edit Activity'}</span>
+                <span>{isVi ? 'Chỉnh sửa hoạt động' : 'Edit Activity'}</span>
               </h3>
               <button
                 type="button"
@@ -2750,7 +2820,13 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleSaveEdit} className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3.5">
+            <form noValidate onSubmit={handleSaveEdit} className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3.5">
+              {editFormError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{editFormError}</span>
+                </div>
+              )}
               
               {/* Day selection */}
               <div>
@@ -2819,17 +2895,27 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
                     {isVi ? 'Thể loại' : 'Category'}
                   </label>
-                  <select
-                    value={editCategory}
-                    onChange={(e) => setEditCategory(e.target.value as CategoryType)}
-                    className="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
-                  >
-                    {categoriesList.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.icon ? `${c.icon} ` : ''}{isVi ? c.nameVi : c.nameEn}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={editCategory}
+                      onChange={(e) => setEditCategory(e.target.value as CategoryType)}
+                      className="flex-1 min-w-0 text-xs p-2.5 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+                    >
+                      {categoriesList.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.icon ? `${c.icon} ` : ''}{isVi ? c.nameVi : c.nameEn}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => setIsCategoryModalOpen(true)}
+                      className="p-2.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-blue-50 text-slate-600 hover:text-blue-700 transition-colors cursor-pointer shrink-0"
+                      title={isVi ? 'Cấu hình thể loại' : 'Configure categories'}
+                    >
+                      <Settings2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
 
                 {/* Unified Cost (Chi phí) */}
@@ -3407,7 +3493,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               <div className="flex items-center gap-2">
                 <Receipt className="w-4 h-4 text-teal-600" />
                 <h4 className="font-bold text-xs sm:text-sm text-slate-800">
-                  {isVi ? 'Ảnh Hóa Đơn / Biên Lai' : 'Receipt Image'}
+                  {isVi ? 'Ảnh hóa đơn / Biên lai' : 'Receipt Image'}
                 </h4>
               </div>
               <button

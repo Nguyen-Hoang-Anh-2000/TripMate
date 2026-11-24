@@ -38,18 +38,39 @@ export function isMemberMatchingUser(member: TripMember, user?: Partial<UserProf
   return false;
 }
 
+export interface MemberFinancialStat {
+  member: TripMember;
+  contributed: number;
+  paidExtra: number;
+  used: number;
+  remainingBalance: number;
+  netSettlementBalance: number;
+}
+
+export interface ExpenseFundComputation {
+  totalContributed: number;
+  totalSpent: number;
+  paidByFundTotal: number;
+  fundRemaining: number;
+  contributorsCount: number;
+  fundHolderId: string;
+  memberStats: MemberFinancialStat[];
+  detailedSettlements: TripSettlementTransfer[];
+  simplifiedSettlements: TripSettlementTransfer[];
+}
+
+const round2 = (n: number): number => Math.round(n * 100) / 100;
+
 /**
- * Computes recorded expenses and simplified Splitwise-style settlements for a trip,
- * matching ExpenseSplitterView's accounting formula:
- *   remainingBalance = contributed + paidExtra - used
+ * Computes accurate group fund balances and both Detailed and Splitwise-simplified settlements.
+ * Accounts for `fundRemaining = totalContributed - paidByFundTotal` physically held by `fundHolderId`
+ * so the Treasurer properly refunds remaining pool money to positive-balance members.
  */
-export function computeTripDeletionSummary(
-  trip: Trip,
-  actor?: Partial<UserProfile> | null
-): TripDeletionSummary {
+export function computeExpenseFundSettlements(trip: Trip): ExpenseFundComputation {
   const currency = trip.currency || 'VND';
   const members = Array.isArray(trip.members) ? trip.members : [];
-  const otherMembers = members.filter((m) => !isMemberMatchingUser(m, actor));
+  const fundHolderId = trip.fundHolderId || members[0]?.id || '';
+  const memberById = new Map(members.map((m) => [m.id, m]));
 
   // Unify manual expenses + completed activities (avoid double counting linked expenseId)
   const unifiedRecords: Array<{
@@ -64,7 +85,7 @@ export function computeTripDeletionSummary(
     if (exp.activityId) processedActivityIds.add(exp.activityId);
     unifiedRecords.push({
       amount: Number(exp.amount) || 0,
-      paidBy: exp.paidBy || trip.fundHolderId || members[0]?.id || 'm1',
+      paidBy: exp.paidBy || fundHolderId || 'm1',
       splitWith: Array.isArray(exp.splitWith) ? exp.splitWith : [],
       memberSplits: exp.memberSplits,
     });
@@ -77,7 +98,7 @@ export function computeTripDeletionSummary(
         const cost = act.actualCost !== undefined ? Number(act.actualCost) : Number(act.estimatedCost || 0);
         unifiedRecords.push({
           amount: cost,
-          paidBy: act.paidBy || trip.fundHolderId || members[0]?.id || 'm1',
+          paidBy: act.paidBy || fundHolderId || 'm1',
           splitWith: Array.isArray(act.splitWith) && act.splitWith.length > 0 ? act.splitWith : members.map((m) => m.id),
           memberSplits: act.memberSplits,
         });
@@ -85,9 +106,15 @@ export function computeTripDeletionSummary(
     });
   });
 
+  const totalContributed = members.reduce((sum, m) => sum + (Number(m.contributedAmount) || 0), 0);
   const totalSpent = unifiedRecords.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+  const paidByFundTotal = unifiedRecords
+    .filter((r) => r.paidBy === 'fund')
+    .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+  const fundRemaining = round2(totalContributed - paidByFundTotal);
+  const contributorsCount = members.filter((m) => (Number(m.contributedAmount) || 0) > 0).length;
 
-  const memberStats = members.map((member) => {
+  const memberStats: MemberFinancialStat[] = members.map((member) => {
     const contributed = Number(member.contributedAmount) || 0;
     const paidExtra = unifiedRecords
       .filter((e) => e.paidBy === member.id)
@@ -106,55 +133,218 @@ export function computeTripDeletionSummary(
       }
     });
 
-    const remainingBalance = Math.round((contributed + paidExtra - used) * 100) / 100;
-    return { member, remainingBalance };
+    const remainingBalance = round2(contributed + paidExtra - used);
+    // The Treasurer physically holds `fundRemaining`. Their net settlement balance relative to clearing
+    // the trip ledger and distributing idle pool funds is `remainingBalance - fundRemaining`.
+    const netSettlementBalance =
+      member.id === fundHolderId
+        ? round2(remainingBalance - fundRemaining)
+        : remainingBalance;
+
+    return {
+      member,
+      contributed,
+      paidExtra: round2(paidExtra),
+      used: round2(used),
+      remainingBalance,
+      netSettlementBalance,
+    };
   });
 
-  const debtors = memberStats
-    .filter((s) => s.remainingBalance < -0.01)
-    .map((s) => ({ member: s.member, amount: Math.abs(s.remainingBalance) }));
-  const creditors = memberStats
-    .filter((s) => s.remainingBalance > 0.01)
-    .map((s) => ({ member: s.member, amount: s.remainingBalance }));
+  const makeTransfer = (fromId: string, toId: string, amount: number): TripSettlementTransfer => ({
+    fromId,
+    fromName: memberById.get(fromId)?.name || fromId,
+    toId,
+    toName: memberById.get(toId)?.name || toId,
+    amount: round2(amount),
+    currency,
+  });
 
-  const settlements: TripSettlementTransfer[] = [];
-  let i = 0;
-  let j = 0;
+  // 1. Detailed settlements (non-simplified):
+  // - Consumers with negative netSettlementBalance (not Treasurer refunding pool) pay direct payers first,
+  //   or reimburse the Treasurer for fund-paid deficit.
+  // - If Treasurer still holds excess pool cash (`netSettlementBalance < 0`), Treasurer refunds positive-balance creditors.
+  const detailedSettlements: TripSettlementTransfer[] = [];
+  {
+    const credMap = new Map<string, number>();
+    memberStats.forEach((s) => {
+      if (s.netSettlementBalance > 0.01) {
+        credMap.set(s.member.id, s.netSettlementBalance);
+      }
+    });
 
-  while (i < debtors.length && j < creditors.length) {
-    debtors.sort((a, b) => b.amount - a.amount);
-    creditors.sort((a, b) => b.amount - a.amount);
+    const consumerDebtors = memberStats
+      .filter((s) => s.remainingBalance < -0.01 && s.netSettlementBalance < -0.01)
+      .map((s) => ({
+        id: s.member.id,
+        debtAmount: Math.min(Math.abs(s.remainingBalance), Math.abs(s.netSettlementBalance)),
+      }));
 
-    const debtor = debtors[i];
-    const creditor = creditors[j];
-    const settleAmt = Math.min(debtor.amount, creditor.amount);
+    const paidForDebtorByPayer: Record<string, Record<string, number>> = {};
+    consumerDebtors.forEach((d) => {
+      paidForDebtorByPayer[d.id] = {};
+    });
 
-    if (settleAmt > 0.01) {
-      settlements.push({
-        fromId: debtor.member.id,
-        fromName: debtor.member.name,
-        toId: creditor.member.id,
-        toName: creditor.member.name,
-        amount: Math.round(settleAmt * 100) / 100,
-        currency,
+    unifiedRecords.forEach((exp) => {
+      const payerId = exp.paidBy === 'fund' ? fundHolderId : exp.paidBy;
+      if (!payerId) return;
+
+      consumerDebtors.forEach((d) => {
+        if (payerId === d.id) return;
+        let shareForD = 0;
+        if (exp.memberSplits && exp.memberSplits.length > 0) {
+          const ms = exp.memberSplits.find((s) => s.memberId === d.id);
+          if (ms) shareForD = Number(ms.amount) || 0;
+        } else {
+          const beneficiaries = exp.splitWith.length > 0 ? exp.splitWith : members.map((m) => m.id);
+          if (beneficiaries.includes(d.id)) {
+            shareForD = exp.amount / (beneficiaries.length || 1);
+          }
+        }
+        if (shareForD > 0) {
+          paidForDebtorByPayer[d.id][payerId] = (paidForDebtorByPayer[d.id][payerId] || 0) + shareForD;
+        }
       });
-      debtor.amount = Math.round((debtor.amount - settleAmt) * 100) / 100;
-      creditor.amount = Math.round((creditor.amount - settleAmt) * 100) / 100;
-    }
+    });
 
-    if (debtor.amount <= 0.01) i++;
-    if (creditor.amount <= 0.01) j++;
+    let treasurerExtraCashDebt = (() => {
+      const thStat = memberStats.find((s) => s.member.id === fundHolderId);
+      if (!thStat || thStat.netSettlementBalance >= -0.01) return 0;
+      const thConsumerDebt = thStat.remainingBalance < -0.01
+        ? Math.min(Math.abs(thStat.remainingBalance), Math.abs(thStat.netSettlementBalance))
+        : 0;
+      return Math.max(0, round2(Math.abs(thStat.netSettlementBalance) - thConsumerDebt));
+    })();
+
+    // Step A: Consumer debtors settle direct expenses + fund share
+    consumerDebtors.forEach((d) => {
+      let remDebt = d.debtAmount;
+
+      // Prioritize direct personal payers first (excluding group fund collection unless needed)
+      const payersForD = Object.entries(paidForDebtorByPayer[d.id] || {})
+        .sort(([, a], [, b]) => b - a);
+
+      for (const [payerId, paidAmt] of payersForD) {
+        if (remDebt <= 0.01) break;
+        const credAvail = credMap.get(payerId) || 0;
+        if (credAvail > 0.01) {
+          const amt = Math.min(remDebt, paidAmt, credAvail);
+          if (amt > 0.01) {
+            detailedSettlements.push(makeTransfer(d.id, payerId, amt));
+            remDebt = round2(remDebt - amt);
+            credMap.set(payerId, round2(credAvail - amt));
+          }
+        } else if (payerId === fundHolderId && d.id !== fundHolderId && fundHolderId) {
+          // Consumer debtor owes the group fund (held by Treasurer), so transfer goes to Treasurer first,
+          // which increases Treasurer's pool to refund positive creditors in Step B.
+          const amt = Math.min(remDebt, paidAmt);
+          if (amt > 0.01) {
+            detailedSettlements.push(makeTransfer(d.id, fundHolderId, amt));
+            remDebt = round2(remDebt - amt);
+            treasurerExtraCashDebt = round2(treasurerExtraCashDebt + amt);
+          }
+        }
+      }
+
+      if (remDebt > 0.01) {
+        for (const [credId, credAvail] of credMap.entries()) {
+          if (remDebt <= 0.01) break;
+          if (credId === d.id || credAvail <= 0.01) continue;
+          const amt = Math.min(remDebt, credAvail);
+          if (amt > 0.01) {
+            detailedSettlements.push(makeTransfer(d.id, credId, amt));
+            remDebt = round2(remDebt - amt);
+            credMap.set(credId, round2(credAvail - amt));
+          }
+        }
+      }
+    });
+
+    // Step B: Treasurer refunds remaining held fund cash to positive-balance members
+    if (treasurerExtraCashDebt > 0.01 && fundHolderId) {
+      let remRefund = treasurerExtraCashDebt;
+      for (const [credId, credAvail] of credMap.entries()) {
+        if (remRefund <= 0.01) break;
+        if (credId === fundHolderId || credAvail <= 0.01) continue;
+        const amt = Math.min(remRefund, credAvail);
+        if (amt > 0.01) {
+          detailedSettlements.push(makeTransfer(fundHolderId, credId, amt));
+          remRefund = round2(remRefund - amt);
+          credMap.set(credId, round2(credAvail - amt));
+        }
+      }
+    }
   }
+
+  // 2. Splitwise greedy minimization on `netSettlementBalance` (minimizes total bank transfers)
+  const simplifiedSettlements: TripSettlementTransfer[] = [];
+  {
+    const dList = memberStats
+      .filter((s) => s.netSettlementBalance < -0.01)
+      .map((s) => ({ id: s.member.id, amount: Math.abs(s.netSettlementBalance) }));
+    const cList = memberStats
+      .filter((s) => s.netSettlementBalance > 0.01)
+      .map((s) => ({ id: s.member.id, amount: s.netSettlementBalance }));
+
+    while (dList.length > 0 && cList.length > 0) {
+      dList.sort((a, b) => b.amount - a.amount);
+      cList.sort((a, b) => b.amount - a.amount);
+
+      const debtor = dList[0];
+      const creditor = cList[0];
+      const settleAmt = Math.min(debtor.amount, creditor.amount);
+
+      if (settleAmt > 0.01) {
+        simplifiedSettlements.push(makeTransfer(debtor.id, creditor.id, settleAmt));
+        debtor.amount = round2(debtor.amount - settleAmt);
+        creditor.amount = round2(creditor.amount - settleAmt);
+      }
+
+      if (debtor.amount <= 0.01) dList.shift();
+      if (creditor.amount <= 0.01) cList.shift();
+    }
+  }
+
+  return {
+    totalContributed,
+    totalSpent,
+    paidByFundTotal,
+    fundRemaining,
+    contributorsCount,
+    fundHolderId,
+    memberStats,
+    detailedSettlements,
+    simplifiedSettlements,
+  };
+}
+
+/**
+ * Computes recorded expenses and simplified Splitwise-style settlements for a trip,
+ * accounting for group fund remaining held by the treasurer.
+ */
+export function computeTripDeletionSummary(
+  trip: Trip,
+  actor?: Partial<UserProfile> | null
+): TripDeletionSummary {
+  const currency = trip.currency || 'VND';
+  const members = Array.isArray(trip.members) ? trip.members : [];
+  const otherMembers = members.filter((m) => !isMemberMatchingUser(m, actor));
+  const computed = computeExpenseFundSettlements(trip);
+  const recordedExpensesCount = (trip.expenses || []).length +
+    (trip.days || []).reduce(
+      (sum, d) => sum + (d.activities || []).filter((a) => a.isCompleted && !(trip.expenses || []).some((e) => e.activityId === a.id)).length,
+      0
+    );
 
   return {
     otherMembers,
     totalMembersCount: members.length,
-    recordedExpensesCount: unifiedRecords.length,
-    totalSpent,
+    recordedExpensesCount,
+    totalSpent: computed.totalSpent,
     currency,
-    settlements,
+    settlements: computed.simplifiedSettlements,
     hasOtherMembers: otherMembers.length > 0,
-    hasRecordedExpenses: unifiedRecords.length > 0,
+    hasRecordedExpenses: recordedExpensesCount > 0,
   };
 }
 
