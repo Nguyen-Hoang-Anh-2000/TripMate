@@ -950,148 +950,149 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
         </div>
       )}
 
-      {/* Pending Security Approval Alert Banner */}
-      {pendingSecurityRequest && (
-        <div className="p-3.5 sm:p-4 bg-amber-50/90 border-2 border-amber-300 rounded-2xl sm:rounded-3xl shadow-xs space-y-2.5 animate-in fade-in duration-150">
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0">
-                <AlertTriangle className="w-4 h-4" />
+      {/* When Unlocked (or no PIN): Show Pending Security Requests, Latest Announcement & Top Header */}
+      {(!savedPin || isUnlocked) && (
+        <>
+          {/* Pending Security Approval Alert Banner */}
+          {pendingSecurityRequest && (
+            <div className="p-3.5 sm:p-4 bg-amber-50/90 border border-amber-300 rounded-2xl shadow-xs space-y-2.5 animate-in fade-in duration-150">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0">
+                    <AlertTriangle className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs sm:text-sm font-extrabold text-amber-950">
+                      {isVi ? 'Yêu Cầu Phê Duyệt Bảo Mật Mã PIN' : 'Security PIN Approval Request'}
+                    </h4>
+                    <p className="text-[11px] text-amber-800">
+                      {pendingSecurityRequest.message}
+                    </p>
+                  </div>
+                </div>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 text-amber-900 shrink-0">
+                  {isVi ? 'Chờ xác nhận' : 'Pending'}
+                </span>
               </div>
-              <div>
-                <h4 className="text-xs sm:text-sm font-extrabold text-amber-950">
-                  {isVi ? 'Yêu Cầu Phê Duyệt Bảo Mật Mã PIN' : 'Security PIN Approval Request'}
-                </h4>
-                <p className="text-[11px] text-amber-800">
-                  {pendingSecurityRequest.message}
-                </p>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-amber-200 text-xs">
+                <div className="text-[11px] text-amber-800">
+                  {isVi ? 'Người tạo PIN' : 'PIN Creator'}: <strong>{pinCreator.name}</strong> ({pinCreator.email})
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleDirectApprovePending(pendingSecurityRequest)}
+                    className="py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer shadow-2xs"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>{isVi ? 'Đồng ý phê duyệt' : 'Approve'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDirectRejectPending(pendingSecurityRequest)}
+                    className="py-1.5 px-3 bg-white hover:bg-slate-100 border border-amber-300 text-slate-700 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                  >
+                    {isVi ? 'Từ chối' : 'Reject'}
+                  </button>
+                </div>
               </div>
             </div>
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 text-amber-900 shrink-0 animate-pulse">
-              {isVi ? 'Chờ xác nhận' : 'Pending'}
-            </span>
-          </div>
+          )}
 
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-amber-200 text-xs">
-            <div className="text-[11px] text-amber-800">
-              {isVi ? 'Người tạo PIN' : 'PIN Creator'}: <strong>{pinCreator.name}</strong> ({pinCreator.email})
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => handleDirectApprovePending(pendingSecurityRequest)}
-                className="py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer shadow-2xs"
-              >
-                <Check className="w-3.5 h-3.5" />
-                <span>{isVi ? 'Đồng ý phê duyệt' : 'Approve'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleDirectRejectPending(pendingSecurityRequest)}
-                className="py-1.5 px-3 bg-white hover:bg-slate-100 border border-amber-300 text-slate-700 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
-              >
-                {isVi ? 'Từ chối' : 'Reject'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Latest PIN Announcement Banner */}
-      {recentPinNotification && !pendingSecurityRequest && (() => {
-        const formattedRecent = formatTripNotificationI18n(recentPinNotification, lang);
-        return (
-          <div className="p-2.5 sm:p-3 bg-teal-50/70 border border-teal-200 rounded-2xl flex items-center justify-between gap-2 text-xs">
-            <div className="flex items-center gap-2 min-w-0">
-              <ShieldCheck className="w-4 h-4 text-teal-600 shrink-0" />
-              <span className="text-teal-950 font-medium truncate">
-                <strong>{isVi ? 'Thông báo:' : 'Notice:'}</strong> {formattedRecent.message}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setIsHistoryModalOpen(true)}
-              className="text-[11px] font-bold text-teal-700 hover:text-teal-900 underline shrink-0 cursor-pointer"
-            >
-              {isVi ? 'Lịch sử bảo mật' : 'Security History'}
-            </button>
-          </div>
-        );
-      })()}
-
-      {/* Top Header & Security Status Row */}
-      <div className="flex flex-wrap items-center justify-between gap-2.5">
-        <div className="flex items-center gap-2">
-          {savedPin ? (
-            <div className="flex items-center gap-1.5">
-              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-xl">
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                <span>{isVi ? 'Đã bảo vệ bằng PIN' : 'PIN Protected'}</span>
-              </span>
-              {isUnlocked && (
-                <button
-                  type="button"
-                  onClick={handleLockVault}
-                  className="px-2.5 py-1 text-xs font-medium text-slate-600 hover:text-slate-800 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl transition-colors flex items-center gap-1 cursor-pointer"
-                  title={isVi ? 'Khóa két ngay' : 'Lock Vault now'}
-                >
-                  <Lock className="w-3.5 h-3.5 text-slate-500" />
-                  <span>{isVi ? 'Khóa ngay' : 'Lock'}</span>
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setIsPinModalOpen(true)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-                title={isVi ? 'Cài đặt mã PIN' : 'PIN Settings'}
-              >
-                <KeyRound className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsHistoryModalOpen(true)}
-                className="p-1.5 text-slate-400 hover:text-teal-700 hover:bg-teal-50 rounded-lg transition-colors cursor-pointer"
-                title={isVi ? 'Lịch sử bảo mật PIN' : 'PIN Security History'}
-              >
-                <History className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setIsPinModalOpen(true)}
-                className="px-3 py-1.5 text-xs font-medium text-slate-700 hover:text-teal-800 bg-white hover:bg-teal-50 border border-slate-200 hover:border-teal-300 rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
-              >
-                <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
-                <span>{isVi ? 'Cài mã PIN bảo vệ' : 'Set PIN Lock'}</span>
-              </button>
-              {(trip.notifications?.length ?? 0) > 0 && (
+          {/* Latest PIN Announcement Banner */}
+          {recentPinNotification && !pendingSecurityRequest && (() => {
+            const formattedRecent = formatTripNotificationI18n(recentPinNotification, lang);
+            return (
+              <div className="p-2.5 sm:p-3 bg-teal-50/70 border border-teal-200 rounded-2xl flex items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2 min-w-0">
+                  <ShieldCheck className="w-4 h-4 text-teal-600 shrink-0" />
+                  <span className="text-teal-950 font-medium truncate">
+                    <strong>{isVi ? 'Thông báo:' : 'Notice:'}</strong> {formattedRecent.message}
+                  </span>
+                </div>
                 <button
                   type="button"
                   onClick={() => setIsHistoryModalOpen(true)}
-                  className="p-1.5 text-slate-400 hover:text-teal-700 hover:bg-teal-50 rounded-lg transition-colors cursor-pointer"
-                  title={isVi ? 'Lịch sử bảo mật PIN' : 'PIN Security History'}
+                  className="text-[11px] font-bold text-teal-700 hover:text-teal-900 underline shrink-0 cursor-pointer"
                 >
-                  <History className="w-3.5 h-3.5" />
+                  {isVi ? 'Lịch sử bảo mật' : 'Security History'}
                 </button>
+              </div>
+            );
+          })()}
+
+          {/* Top Header & Security Status Row */}
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2">
+              {savedPin ? (
+                <div className="flex items-center gap-1.5">
+                  <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-xl">
+                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>{isVi ? 'Đã bảo vệ bằng PIN' : 'PIN Protected'}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleLockVault}
+                    className="px-2.5 py-1 text-xs font-medium text-slate-600 hover:text-slate-800 bg-white hover:bg-slate-100 border border-slate-200 rounded-xl transition-colors flex items-center gap-1 cursor-pointer"
+                    title={isVi ? 'Khóa két ngay' : 'Lock Vault now'}
+                  >
+                    <Lock className="w-3.5 h-3.5 text-slate-500" />
+                    <span>{isVi ? 'Khóa ngay' : 'Lock'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsPinModalOpen(true)}
+                    className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                    title={isVi ? 'Cài đặt mã PIN' : 'PIN Settings'}
+                  >
+                    <KeyRound className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsHistoryModalOpen(true)}
+                    className="p-1.5 text-slate-400 hover:text-teal-700 hover:bg-teal-50 rounded-lg transition-colors cursor-pointer"
+                    title={isVi ? 'Lịch sử bảo mật PIN' : 'PIN Security History'}
+                  >
+                    <History className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsPinModalOpen(true)}
+                    className="px-3 py-1.5 text-xs font-medium text-slate-700 hover:text-teal-800 bg-white hover:bg-teal-50 border border-slate-200 hover:border-teal-300 rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                  >
+                    <ShieldAlert className="w-3.5 h-3.5 text-amber-500" />
+                    <span>{isVi ? 'Cài mã PIN bảo vệ' : 'Set PIN Lock'}</span>
+                  </button>
+                  {(trip.notifications?.length ?? 0) > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setIsHistoryModalOpen(true)}
+                      className="p-1.5 text-slate-400 hover:text-teal-700 hover:bg-teal-50 rounded-lg transition-colors cursor-pointer"
+                      title={isVi ? 'Lịch sử bảo mật PIN' : 'PIN Security History'}
+                    >
+                      <History className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
               )}
             </div>
-          )}
-        </div>
-        {(!savedPin || isUnlocked) && (
-          <button
-            type="button"
-            onClick={handleOpenAddModal}
-            className="w-full sm:w-auto px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white font-semibold text-xs sm:text-sm rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer min-h-[38px] shrink-0"
-          >
-            <Plus className="w-4 h-4" />
-            <span>{isVi ? 'Thêm vé / giấy tờ' : 'Add Document'}</span>
-          </button>
-        )}
-      </div>
+            <button
+              type="button"
+              onClick={handleOpenAddModal}
+              className="w-full sm:w-auto px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white font-semibold text-xs sm:text-sm rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer min-h-[38px] shrink-0"
+            >
+              <Plus className="w-4 h-4" />
+              <span>{isVi ? 'Thêm vé / giấy tờ' : 'Add Document'}</span>
+            </button>
+          </div>
+        </>
+      )}
 
-      {/* When Vault is Locked by PIN: Show Security Unlock Screen */}
+      {/* When Vault is Locked by PIN: Show Minimal Security Unlock Card Only */}
       {savedPin && !isUnlocked ? (
         <div className="bg-white p-5 sm:p-8 rounded-2xl sm:rounded-3xl border border-slate-200/80 shadow-xs max-w-sm mx-auto text-center space-y-4 sm:space-y-5 my-2 sm:my-4">
           <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl bg-teal-50 text-teal-600 flex items-center justify-center mx-auto shadow-2xs border border-teal-100">
@@ -1100,12 +1101,12 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
 
           <div>
             <h3 className="text-base sm:text-lg font-bold text-slate-900">
-              {isVi ? 'Két giấy tờ được bảo vệ' : 'Travel Vault Protected'}
+              {isVi ? 'Nhập mã PIN' : 'Enter PIN'}
             </h3>
             <p className="text-xs text-slate-500 mt-1 max-w-xs mx-auto">
               {isVi
-                ? 'Nhập mã PIN 4 chữ số để xem vé máy bay, phòng khách sạn và mã đặt chỗ.'
-                : 'Enter your 4-digit PIN to access tickets, vouchers, and reservation codes.'}
+                ? 'Mở khóa vé & mã đặt chỗ của chuyến đi.'
+                : 'Unlock trip tickets & booking codes.'}
             </p>
           </div>
 
@@ -1922,7 +1923,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                     pattern="\d{4}"
                     inputMode="numeric"
                     value={currentPinInput}
-                    onChange={(e) => setCurrentPinInput(e.target.value.replace(/\D/g, ''))}
+                    onChange={(e) => setCurrentPinInput(e.target.value.replace(/\D/g, '').slice(0, 4))}
                     placeholder="••••"
                     className="w-full text-center text-lg tracking-widest font-mono p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
                     autoFocus
@@ -1940,7 +1941,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                   pattern="\d{4}"
                   inputMode="numeric"
                   value={newPin}
-                  onChange={(e) => setNewPin(e.target.value.replace(/\D/g, ''))}
+                  onChange={(e) => setNewPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
                   placeholder="••••"
                   className="w-full text-center text-lg tracking-widest font-mono p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
                   autoFocus={!savedPin}
@@ -1957,7 +1958,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                   pattern="\d{4}"
                   inputMode="numeric"
                   value={confirmPin}
-                  onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, ''))}
+                  onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
                   placeholder="••••"
                   className="w-full text-center text-lg tracking-widest font-mono p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
                 />
@@ -2023,7 +2024,13 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                     {isVi ? 'Quên mã PIN & Khôi phục két vé' : 'Forgot PIN & Vault Recovery'}
                   </h4>
                   <p className="text-[11px] text-slate-500">
-                    {isVi ? 'Xác thực OTP và phê duyệt bởi người tạo PIN' : 'OTP verification & PIN creator approval'}
+                    {isCurrentUserCreator
+                      ? isVi
+                        ? 'Xác thực OTP để đặt lại PIN ngay.'
+                        : 'Verify OTP to reset PIN now.'
+                      : isVi
+                      ? 'Cần OTP và phê duyệt từ chủ PIN.'
+                      : 'Requires OTP & PIN owner approval.'}
                   </p>
                 </div>
               </div>
@@ -2074,11 +2081,11 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                   <p className="text-[11px] text-slate-500 pt-1 border-t border-teal-100">
                     {isCurrentUserCreator
                       ? isVi
-                        ? 'Xác thực OTP để đặt lại PIN ngay lập tức.'
-                        : 'Verify OTP to reset your PIN immediately.'
+                        ? 'Xác thực OTP để đặt lại PIN ngay.'
+                        : 'Verify OTP to reset PIN now.'
                       : isVi
-                      ? 'Xác thực OTP để gửi yêu cầu đổi PIN tới người tạo.'
-                      : 'Verify OTP before sending reset request to the creator.'}
+                      ? 'Cần OTP và phê duyệt từ chủ PIN.'
+                      : 'Requires OTP & PIN owner approval.'}
                   </p>
                 </div>
 
@@ -2275,7 +2282,11 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                 <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
                   <span>
-                    {isVi
+                    {isCurrentUserCreator
+                      ? isVi
+                        ? 'Đã xác thực OTP tài khoản! Vui lòng nhập mã PIN 4 số mới.'
+                        : 'Account OTP verified! Please enter your new 4-digit PIN.'
+                      : isVi
                       ? 'Đã xác thực OTP và nhận được sự phê duyệt! Vui lòng nhập mã PIN 4 số mới.'
                       : 'Verified & approved! Please enter your new 4-digit PIN.'}
                   </span>
@@ -2291,7 +2302,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                     pattern="\d{4}"
                     inputMode="numeric"
                     value={resetNewPin}
-                    onChange={(e) => setResetNewPin(e.target.value.replace(/\D/g, ''))}
+                    onChange={(e) => setResetNewPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
                     placeholder="••••"
                     className="w-full text-center text-xl tracking-widest font-mono p-2.5 rounded-xl border border-slate-300 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
                     autoFocus
@@ -2308,7 +2319,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                     pattern="\d{4}"
                     inputMode="numeric"
                     value={resetConfirmPin}
-                    onChange={(e) => setResetConfirmPin(e.target.value.replace(/\D/g, ''))}
+                    onChange={(e) => setResetConfirmPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
                     placeholder="••••"
                     className="w-full text-center text-xl tracking-widest font-mono p-2.5 rounded-xl border border-slate-300 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
                   />
@@ -2430,7 +2441,7 @@ export const TravelVaultView: React.FC<TravelVaultViewProps> = ({
                     pattern="\d{4}"
                     inputMode="numeric"
                     value={removeCurrentPinInput}
-                    onChange={(e) => setRemoveCurrentPinInput(e.target.value.replace(/\D/g, ''))}
+                    onChange={(e) => setRemoveCurrentPinInput(e.target.value.replace(/\D/g, '').slice(0, 4))}
                     placeholder="••••"
                     className="w-full text-center text-xl tracking-widest font-mono p-2.5 rounded-xl border border-slate-300 focus:ring-2 focus:ring-red-500 focus:outline-hidden"
                     autoFocus

@@ -19,6 +19,7 @@ import {
 import { auth, db, googleProvider, handleFirestoreError, OperationType } from '../firebase';
 import { UserProfile, TripInvitation, UserTripNotification } from '../types';
 import { hashStringSHA256 } from '../utils/cryptoUtils';
+import { normalizePhoneNumber } from '../utils/phoneUtils';
 
 export const RFC_EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
 
@@ -309,10 +310,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   ): Promise<{ success: boolean; message?: string }> => {
     try {
       const cleanInput = emailOrPhone.trim().toLowerCase();
-      const cleanPhone = (phone || '').trim();
+      const rawPhone = (phone || '').trim();
+      const cleanPhone = normalizePhoneNumber(rawPhone);
       const isInputEmail = cleanInput.includes('@');
       const cleanEmail = isInputEmail ? cleanInput : '';
-      const fallbackPhone = !isInputEmail ? emailOrPhone.trim() : cleanPhone;
+      const fallbackPhone = !isInputEmail ? normalizePhoneNumber(emailOrPhone.trim()) : cleanPhone;
 
       // Deterministic user ID generation for in-app session
       const seed = cleanEmail || fallbackPhone || 'user';
@@ -344,7 +346,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           };
         }
 
-        if (cleanPhone.length > 30) {
+        if (rawPhone.length > 30) {
           return {
             success: false,
             message: vi
@@ -374,16 +376,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           };
         }
 
-        // 2. Kiểm tra trùng Số điện thoại (nếu có nhập)
+        // 2. Kiểm tra trùng Số điện thoại đã chuẩn hóa (bỏ khoảng trắng, gạch ngang, ngoặc)
         if (cleanPhone) {
           const qPhone = query(usersRef, where('phone', '==', cleanPhone));
           const snapPhone = await getDocs(qPhone);
-          if (!snapPhone.empty) {
+          let phoneExists = !snapPhone.empty;
+          if (!phoneExists) {
+            const allUsersSnap = await getDocs(usersRef);
+            phoneExists = allUsersSnap.docs.some((docSnap) => {
+              const storedPhone = (docSnap.data() as any)?.phone;
+              return storedPhone ? normalizePhoneNumber(String(storedPhone)) === cleanPhone : false;
+            });
+          }
+          if (phoneExists) {
             return {
               success: false,
               message: vi
-                ? 'Số điện thoại này đã được sử dụng cho tài khoản khác. Vui lòng nhập số điện thoại khác.'
-                : 'This phone number is already used by another account.',
+                ? 'ERR-AUTH-02: Số điện thoại này đã được sử dụng cho tài khoản khác. Vui lòng nhập số điện thoại khác.'
+                : 'ERR-AUTH-02: This phone number is already used by another account.',
             };
           }
         }
@@ -434,14 +444,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (!snapPhone.empty) {
           existingUserDoc = snapPhone.docs[0];
         } else {
-          const compactPhone = fallbackPhone.replace(/[\s\-().]/g, '');
-          if (compactPhone && compactPhone !== fallbackPhone) {
-            const qCompact = query(usersRef, where('phone', '==', compactPhone));
-            const snapCompact = await getDocs(qCompact);
-            if (!snapCompact.empty) {
-              existingUserDoc = snapCompact.docs[0];
-            }
-          }
+          const allUsersSnap = await getDocs(usersRef);
+          existingUserDoc =
+            allUsersSnap.docs.find((docSnap) => {
+              const storedPhone = (docSnap.data() as any)?.phone;
+              return storedPhone ? normalizePhoneNumber(String(storedPhone)) === fallbackPhone : false;
+            }) || null;
         }
       }
 

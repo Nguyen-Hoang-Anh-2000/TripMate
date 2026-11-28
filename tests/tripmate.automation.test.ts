@@ -37,6 +37,10 @@ import {
   detectInstallPlatform,
   getInstallGuideContent,
 } from '../src/utils/pwaInstallUtils';
+import { normalizePhoneNumber } from '../src/utils/phoneUtils';
+import { validateImageUploadFile } from '../src/utils/fileValidationUtils';
+import { normalizeChatCacheKey, generateSmartFallbackChatReply } from '../src/utils/chatFallbackUtils';
+import { spawn } from 'node:child_process';
 import type { SavedPlace, Trip, TripInvitation, TripNotification } from '../src/types';
 
 const ROOT_DIR = process.cwd();
@@ -724,9 +728,9 @@ describe('UI Regression & Security Rules Verification', () => {
     assert.ok(!authModal.includes('(Demo: 123456)'));
   });
 
-  test('TC-UI-02: Mobile Cover Banner chỉ giữ icon 3 chấm dọc, bỏ chữ "Tùy chọn" & bỏ subtitle popup', () => {
+  test('TC-UI-02: Cover Banner chỉ giữ 1 Primary CTA và menu ⋯, bỏ subtitle popup', () => {
     const appContent = fs.readFileSync(path.join(ROOT_DIR, 'src/App.tsx'), 'utf8');
-    assert.ok(appContent.includes('<MoreVertical'));
+    assert.ok(appContent.includes('<MoreHorizontal'));
     assert.ok(!appContent.includes('Tải file PDF hoàn chỉnh kèm vé & lịch trình'));
     assert.ok(!appContent.includes('Đổi tên, ngày, điểm đến, ngân sách hoặc ảnh bìa'));
   });
@@ -805,10 +809,12 @@ describe('UI Regression & Security Rules Verification', () => {
     const notifModal = fs.readFileSync(path.join(ROOT_DIR, 'src/components/NotificationsModal.tsx'), 'utf8');
     const chat = fs.readFileSync(path.join(ROOT_DIR, 'src/components/AIAssistantChat.tsx'), 'utf8');
 
+    const authModal = fs.readFileSync(path.join(ROOT_DIR, 'src/components/AuthModal.tsx'), 'utf8');
     assert.ok(navbar.includes('totalUnreadNotificationsCount'));
     assert.ok(navbar.includes('tripmate_notifs_read_updated'));
     assert.ok(notifModal.includes('tripmate_notifs_read_updated'));
-    assert.ok(navbar.includes("isVi ? 'Tiếng Việt' : 'English'"));
+    assert.ok(navbar.includes('Tiếng Việt') && navbar.includes('English'));
+    assert.ok(authModal.includes('Tiếng Việt') && authModal.includes('English'));
     assert.ok(authScreen.includes("isVi ? 'Tiếng Việt' : 'English'"));
     assert.ok(authCtx.includes('isViLang'));
     assert.ok(chat.includes('navigator.onLine') || chat.includes('isOnline'));
@@ -1244,11 +1250,11 @@ describe('UI Regression & Security Rules Verification', () => {
     assert.ok(newTripModal.includes("isVi ? 'Thành viên' : 'Members'"));
     assert.ok(!newTripModal.includes('Chọn thành viên mời tham gia'));
     assert.ok(newTripModal.includes('new-trip-invite-member-input'));
-    assert.ok(newTripModal.includes('Nhập email hoặc số điện thoại để gợi ý tích chọn...'));
+    assert.ok(newTripModal.includes('Tên, email hoặc SĐT bạn đồng hành...'));
     assert.ok(!newTripModal.includes("'Thêm vào danh sách'"));
     assert.ok(!newTripModal.includes("isVi ? 'Xong' : 'Done'"));
     assert.ok(!newTripModal.includes("'Xóa chọn'"));
-    assert.ok(newTripModal.includes('Tài khoản đã tích chọn sẽ nhận lời mời qua app'));
+    assert.ok(newTripModal.includes('Tài khoản TripMate sẽ nhận lời mời tự động.'));
     assert.ok(newTripModal.includes('isMemberDropdownOpen'));
     assert.ok(!newTripModal.includes('Selected Leader + Invited Members List'));
 
@@ -1483,7 +1489,488 @@ describe('UI Regression & Security Rules Verification', () => {
   });
 });
 
+// ============================================================================
+// 4. MASTER QA REPORT v2 & RELEASE SIGN-OFF VERIFICATION SUITE (REM-01..REM-09)
+// ============================================================================
+describe('QA v2 Release Sign-off & Security Boundary Verification', () => {
+  test('TC-REL-01 (BVA / TC-18 / REM-07): Packing quantity clamp 1..999 & Expense split tolerance ±0.05 vs ±0.06', () => {
+    const clampQty = (raw: number) => Math.min(999, Math.max(1, Math.floor(raw || 1)));
+    assert.equal(clampQty(0), 1);
+    assert.equal(clampQty(-5), 1);
+    assert.equal(clampQty(1), 1);
+    assert.equal(clampQty(999), 999);
+    assert.equal(clampQty(1000), 999);
+    assert.equal(clampQty(9999), 999);
 
+    const packingSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/PackingListView.tsx'), 'utf8');
+    assert.ok(packingSrc.includes('min={1}') && packingSrc.includes('max={999}'));
+    assert.ok(packingSrc.includes('Math.min(999, Math.max(1,'));
 
+    // Expense split tolerance check matches ExpenseSplitterView (rounded diff > 0.05 rejected, <= 0.05 accepted)
+    const isSplitValid = (splits: number[], total: number) =>
+      Math.round(Math.abs(splits.reduce((a, b) => a + b, 0) - total) * 100) / 100 <= 0.05;
+    assert.equal(isSplitValid([50.02, 50.03], 100), true); // diff 0.05 -> PASS
+    assert.equal(isSplitValid([50.03, 50.03], 100), false); // diff 0.06 -> FAIL
 
+    const expenseSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/ExpenseSplitterView.tsx'), 'utf8');
+    assert.ok(expenseSrc.includes('splitDiff > 0.05'));
+    assert.ok(expenseSrc.includes('diff > 0.05'));
+  });
 
+  test('TC-REL-02 (TC-11 / REM-09): Chuẩn hóa SĐT loại bỏ dấu gạch/khoảng trắng & chặn trùng SĐT đăng ký', () => {
+    assert.equal(normalizePhoneNumber('0901-234-568'), '0901234568');
+    assert.equal(normalizePhoneNumber('(090) 123.4568 '), '0901234568');
+    assert.equal(normalizePhoneNumber('0901 234 567'), '0901234567');
+
+    const authCtx = fs.readFileSync(path.join(ROOT_DIR, 'src/context/AuthContext.tsx'), 'utf8');
+    assert.ok(authCtx.includes('normalizePhoneNumber'));
+    assert.ok(authCtx.includes('ERR-AUTH-02') || authCtx.includes('Số điện thoại này đã được đăng ký'));
+  });
+
+  test('TC-REL-03 (TC-12): validateImageUploadFile chặn .pdf, .txt, .exe, .svg (ERR-FILE-01) và cho phép .png/.jpg/.webp', () => {
+    const rejectCases = [
+      { name: 'doc.pdf', type: 'application/pdf', size: 1024 },
+      { name: 'note.txt', type: 'text/plain', size: 256 },
+      { name: 'malware.exe', type: 'application/x-msdownload', size: 4096 },
+      { name: 'vector.svg', type: 'image/svg+xml', size: 512 },
+      { name: 'fake.pdf', type: 'image/png', size: 512 },
+    ];
+    for (const f of rejectCases) {
+      const res = validateImageUploadFile(f);
+      assert.equal(res.valid, false, `Expected ${f.name} to be rejected`);
+      assert.ok(res.errorVi?.includes('ERR-FILE-01'));
+      assert.ok(res.errorEn?.includes('ERR-FILE-01'));
+    }
+
+    const allowCases = [
+      { name: 'photo.jpg', type: 'image/jpeg', size: 50000 },
+      { name: 'avatar.png', type: 'image/png', size: 50000 },
+      { name: 'receipt.webp', type: 'image/webp', size: 50000 },
+    ];
+    for (const f of allowCases) {
+      const res = validateImageUploadFile(f);
+      assert.equal(res.valid, true, `Expected ${f.name} to be allowed`);
+    }
+
+    // Verify wired into every image upload component
+    const uploadComponents = [
+      'src/components/AuthScreen.tsx',
+      'src/components/AuthModal.tsx',
+      'src/components/Navbar.tsx',
+      'src/components/EditTripModal.tsx',
+      'src/components/NewTripModal.tsx',
+      'src/components/ExpenseSplitterView.tsx',
+      'src/components/ReceiptScannerModal.tsx',
+      'src/components/ItineraryView.tsx',
+    ];
+    for (const rel of uploadComponents) {
+      const src = fs.readFileSync(path.join(ROOT_DIR, rel), 'utf8');
+      assert.ok(src.includes('validateImageUploadFile'), `${rel} missing validateImageUploadFile`);
+    }
+  });
+
+  test('TC-REL-04 (TC-19 / TC-26 / REM-06): Vault PIN chỉ nhận 4 chữ số & Creator tự reset PIN không nhắc phê duyệt', () => {
+    const vaultSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/TravelVaultView.tsx'), 'utf8');
+    assert.ok(vaultSrc.includes("replace(/\\D/g, '').slice(0, 4)"));
+    assert.ok(vaultSrc.includes('!/^\\d{4}$/.test(newPin)'));
+    assert.ok(vaultSrc.includes('isCurrentUserCreator'));
+    assert.ok(vaultSrc.includes('Xác thực OTP để đặt lại PIN ngay.'));
+    assert.ok(vaultSrc.includes('Cần OTP và phê duyệt từ chủ PIN.'));
+    assert.ok(vaultSrc.includes('Đã xác thực OTP tài khoản! Vui lòng nhập mã PIN 4 số mới.'));
+  });
+
+  test('TC-REL-05 (TC-21 / REM-02): RealtimeWeatherBadge dùng ReactDOM.createPortal ra document.body với z-[90]', () => {
+    const weatherSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/RealtimeWeatherBadge.tsx'), 'utf8');
+    assert.ok(weatherSrc.includes("from 'react-dom'"));
+    assert.ok(weatherSrc.includes('createPortal('));
+    assert.ok(weatherSrc.includes('document.body'));
+    assert.ok(weatherSrc.includes('z-[90]'));
+    assert.ok(weatherSrc.includes('items-end sm:items-center'));
+  });
+
+  test('TC-REL-06 (TC-30): TravelHandbookModal chống XSS khi render & xuất HTML có thẻ <script>', () => {
+    const handbookSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/TravelHandbookModal.tsx'), 'utf8');
+    assert.ok(!handbookSrc.includes('dangerouslySetInnerHTML'));
+    assert.ok(handbookSrc.includes(".replace(/</g, '&lt;')"));
+    assert.ok(handbookSrc.includes(".replace(/>/g, '&gt;')"));
+
+    const maliciousTitle = `<script>alert('xss')</script>`;
+    const escaped = String(maliciousTitle)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+    assert.equal(escaped, `&lt;script&gt;alert('xss')&lt;/script&gt;`);
+    assert.ok(!escaped.includes('<script>'));
+  });
+
+  test('TC-REL-07 (TC-31): Excel/CSV Formula Injection bị vô hiệu hóa với tiền tố nháy đơn', () => {
+    const sanitizeCellFormula = (val: unknown): unknown => {
+      if (typeof val === 'string' && /^[=+\-@\t\r]/.test(val.trim())) {
+        return `'` + val;
+      }
+      return val;
+    };
+    const payloads = ['=CMD|"/C calc"!A0', '=1+1', '+SUM(A1:A2)', '-100', '@IMPORTXML', '\t=1+1', '\r=1+1'];
+    for (const p of payloads) {
+      const sanitized = String(sanitizeCellFormula(p));
+      assert.ok(sanitized.startsWith(`'`), `Payload ${p} must be neutralized with leading quote`);
+    }
+    const expenseSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/ExpenseSplitterView.tsx'), 'utf8');
+    assert.ok(expenseSrc.includes('sanitizeCellFormula'));
+    assert.ok(expenseSrc.includes('/^[=+\\-@\\t\\r]/'));
+  });
+
+  test('TC-REL-08 (TC-32 / TC-49): Firestore Rules chặn xóa user, bất biến creatorId/email & giới hạn VAL-BIZ-04 / VAL-BIZ-06', () => {
+    const rules = fs.readFileSync(path.join(ROOT_DIR, 'firestore.rules'), 'utf8');
+    assert.ok(rules.includes('allow read, write: if false;'));
+    assert.ok(rules.includes('allow delete: if false;'));
+    assert.ok(rules.includes('incoming().id == existing().id'));
+    assert.ok(rules.includes('incoming().email == existing().email'));
+    assert.ok(rules.includes('incoming().creatorId == existing().creatorId'));
+    assert.ok(rules.includes("affectedKeys().hasOnly(['status', 'respondedAt'])"));
+    assert.ok(rules.includes("affectedKeys().hasOnly(['status', 'readAt'])"));
+  });
+
+  test('TC-REL-09 (TC-37 / REM-01): AIItineraryModal & server.ts có deadline cứng không treo loading > 11s', async () => {
+    const modalSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/AIItineraryModal.tsx'), 'utf8');
+    const serverSrc = fs.readFileSync(path.join(ROOT_DIR, 'server.ts'), 'utf8');
+    assert.ok(modalSrc.includes('isGeneratingRef'));
+    assert.ok(modalSrc.includes('Promise.race'));
+    assert.ok(modalSrc.includes('AbortController'));
+    assert.ok(modalSrc.includes('disabled={loading}'));
+    assert.ok(serverSrc.includes('totalBudgetMs'));
+    assert.ok(serverSrc.includes('allowThinking: false'));
+    assert.ok(serverSrc.includes('timeoutMs: 8500'));
+
+    const t0 = Date.now();
+    const res = await fetch(`${BASE_URL}/api/gemini/generate-itinerary`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        destination: 'Đà Lạt',
+        durationDays: 2,
+        travelStyle: 'Balanced Explorer',
+        groupType: 'Friends',
+        language: 'vi',
+      }),
+    });
+    const elapsed = Date.now() - t0;
+    assert.equal(res.status, 200);
+    assert.ok(elapsed < 10500, `Expected itinerary generation under 10.5s, got ${elapsed}ms`);
+  });
+
+  test('TC-REL-10 (TC-40 & TC-41): ERR-API-413 >4MB trên live server & ERR-API-429 rate limit 60 req/phút trên server.ts', async () => {
+    // 1. Live 413 Payload Too Large (> 4MB) check
+    const bigString = 'A'.repeat(4_500_000);
+    const res413 = await fetch(`${BASE_URL}/api/gemini/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: bigString }),
+    });
+    assert.equal(res413.status, 413);
+    const body413 = await res413.json();
+    assert.equal(body413.success, false);
+
+    // 2. Real server.ts rate limiter test on isolated ephemeral port 3099 so live port 3000 preview isn't throttled
+    const childPort = 3099;
+    const child = spawn('npx', ['tsx', 'server.ts'], {
+      cwd: ROOT_DIR,
+      env: { ...process.env, NODE_ENV: 'production', PORT: String(childPort) },
+      stdio: 'ignore',
+    });
+
+    try {
+      // Wait for isolated server to listen
+      let ready = false;
+      for (let attempt = 0; attempt < 25; attempt++) {
+        try {
+          const ping = await fetch(`http://127.0.0.1:${childPort}/api/health`);
+          if (ping.status === 200) {
+            ready = true;
+            break;
+          }
+        } catch {
+          await new Promise((r) => setTimeout(r, 150));
+        }
+      }
+      assert.ok(ready, 'Isolated rate-limit test server failed to start');
+
+      // Already sent 1 request above; send 60 more to exceed 60 req/min
+      let hit429 = false;
+      let errMsg = '';
+      for (let k = 0; k < 61; k++) {
+        const r = await fetch(`http://127.0.0.1:${childPort}/api/health`);
+        if (r.status === 429) {
+          hit429 = true;
+          const b = await r.json();
+          errMsg = b.error || '';
+          break;
+        }
+      }
+      assert.equal(hit429, true, 'Expected 429 rate-limit response after 60 requests in 1 minute');
+      assert.ok(errMsg.includes('Quá nhiều yêu cầu'));
+    } finally {
+      child.kill('SIGTERM');
+    }
+  });
+
+  test('TC-REL-11 (TC-43 / REM-06 / REM-08): Chat Fallback đặc sản Đà Lạt, thời tiết tháng 11 & Cache TTL 5 phút (hit < 200ms)', async () => {
+    assert.equal(
+      normalizeChatCacheKey('  Thời tiết Đà Lạt   tháng 11 thế nào? ', 'Đà Lạt', 'vi'),
+      'chat:thời tiết đà lạt tháng 11 thế nào?:đà lạt:vi'
+    );
+
+    const foodReply = generateSmartFallbackChatReply(
+      'Gợi ý món ăn đặc sản ngon ở Đà Lạt?',
+      { destination: 'Đà Lạt' },
+      'vi'
+    );
+    assert.ok(foodReply.includes('Lẩu gà lá é Tao Ngộ'));
+    assert.ok(foodReply.includes('Bánh mì xíu mại Hoàng Diệu'));
+
+    const weatherReply = generateSmartFallbackChatReply(
+      'Thời tiết Đà Lạt tháng 11 thế nào?',
+      { destination: 'Đà Lạt' },
+      'vi'
+    );
+    assert.ok(weatherReply.includes('Tháng 11') && weatherReply.includes('mùa khô'));
+
+    const query = `Thời tiết Đà Lạt tháng 11 thế nào?`;
+    const r1 = await fetch(`${BASE_URL}/api/gemini/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: query, tripContext: { destination: 'Đà Lạt' }, language: 'vi' }),
+    });
+    assert.equal(r1.status, 200);
+    const b1 = await r1.json();
+    assert.ok(typeof b1.reply === 'string' && b1.reply.length > 20);
+
+    const tCache0 = Date.now();
+    const r2 = await fetch(`${BASE_URL}/api/gemini/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: query, tripContext: { destination: 'Đà Lạt' }, language: 'vi' }),
+    });
+    const cacheElapsed = Date.now() - tCache0;
+    assert.equal(r2.status, 200);
+    const b2 = await r2.json();
+    assert.equal(b2.cached, true);
+    assert.equal(b2.reply, b1.reply);
+    assert.ok(cacheElapsed < 200, `Expected cached reply in <200ms, got ${cacheElapsed}ms`);
+
+    const chatUiSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/AIAssistantChat.tsx'), 'utf8');
+    assert.ok(chatUiSrc.includes('clientChatCacheRef'));
+  });
+
+  test('TC-REL-12 (TC-45 / REM-04): VAL-BIZ-03 chặn cứng xóa thành viên đã thanh toán hoặc đã góp quỹ', () => {
+    const expenseSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/ExpenseSplitterView.tsx'), 'utf8');
+    const appSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/App.tsx'), 'utf8');
+    assert.ok(expenseSrc.includes('getMemberDeletionBlockInfo'));
+    assert.ok(expenseSrc.includes('disabled={isBlockedByLedger}'));
+    assert.ok(expenseSrc.includes('VAL-BIZ-03'));
+    assert.ok(appSrc.includes('if (hasPaidExpense || hasPaidActivity || hasContribution)'));
+  });
+
+  test('TC-REL-13 (TC-47): Thủ quỹ hoàn quỹ dư phân bổ chính xác cho nhiều người nhận (2 creditors) đưa số dư về 0', () => {
+    const multiCreditorTrip: Trip = {
+      id: 'trip-refund-2creditors',
+      title: 'Refund Multi Creditor',
+      destination: 'Phú Quốc',
+      country: 'Việt Nam',
+      startDate: '2026-09-01',
+      endDate: '2026-09-03',
+      coverImage: '',
+      budgetTotal: 3000000,
+      currency: 'VND',
+      creatorId: 'm1',
+      fundHolderId: 'm1', // Perry holds 3,000,000 group fund (m1: 1M, m2: 1M, m3: 1M)
+      members: [
+        { id: 'm1', name: 'Perry', avatar: '', contributedAmount: 1000000 },
+        { id: 'm2', name: 'Linh Chi', avatar: '', contributedAmount: 1000000 },
+        { id: 'm3', name: 'Minh Quân', avatar: '', contributedAmount: 1000000 },
+      ],
+      days: [],
+      expenses: [
+        {
+          id: 'e_fund',
+          title: 'Hotel Deposit',
+          amount: 900000,
+          category: 'stay',
+          paidBy: 'fund',
+          splitWith: ['m1', 'm2', 'm3'],
+          date: '2026-09-01',
+        },
+        {
+          id: 'e_linh',
+          title: 'Dinner',
+          amount: 300000,
+          category: 'food',
+          paidBy: 'm2', // Linh Chi paid 300k out of pocket
+          splitWith: ['m1', 'm2', 'm3'],
+          date: '2026-09-01',
+        },
+        {
+          id: 'e_quan',
+          title: 'Scooters',
+          amount: 300000,
+          category: 'transport',
+          paidBy: 'm3', // Minh Quân paid 300k out of pocket
+          splitWith: ['m1', 'm2', 'm3'],
+          date: '2026-09-02',
+        },
+      ],
+      packingList: [],
+      documents: [],
+    };
+    // Total spent = 1,500,000 -> 500,000 each.
+    // Remaining fund held by Perry = 3,000,000 - 900,000 = 2,100,000.
+    // Perry net = 1,000,000 - 500,000 - 2,100,000 = -1,600,000
+    // Linh Chi net = 1,000,000 + 300,000 - 500,000 = +800,000
+    // Minh Quân net = 1,000,000 + 300,000 - 500,000 = +800,000
+    const settled = computeExpenseFundSettlements(multiCreditorTrip);
+    assert.equal(settled.fundRemaining, 2100000);
+    const totalTransfers = settled.simplifiedSettlements.reduce((s, t) => s + t.amount, 0);
+    assert.equal(totalTransfers, 1600000);
+
+    // Apply simplified settlements to balances -> every member reaches 0
+    const postBalances = new Map(settled.memberStats.map((s) => [s.member.id, s.netSettlementBalance]));
+    for (const tr of settled.simplifiedSettlements) {
+      postBalances.set(tr.fromId, (postBalances.get(tr.fromId) || 0) + tr.amount);
+      postBalances.set(tr.toId, (postBalances.get(tr.toId) || 0) - tr.amount);
+    }
+    for (const [, bal] of postBalances) {
+      assert.ok(Math.abs(bal) < 0.01, `Post-settlement balance must be 0, got ${bal}`);
+    }
+  });
+
+  test('TC-REL-14 (TC-51 / REM-03 & TC-54 / REM-05): NewTripModal luôn hiện nút thêm ngoại tuyến & sạch lỗi chính tả Sạc nhanh thoại / Mền Đông', () => {
+    const newTripSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/NewTripModal.tsx'), 'utf8');
+    assert.ok(newTripSrc.includes('Tên, email hoặc SĐT bạn đồng hành...'));
+    assert.ok(newTripSrc.includes('làm thành viên ngoại tuyến'));
+    assert.ok(newTripSrc.includes('handleAddOfflineInvitee(memberSearchTerm'));
+
+    // Global scan for typos 'Sạc nhanh thoại' and 'Mền Đông'
+    const filesToScan = [path.join(ROOT_DIR, 'server.ts')];
+    const walk = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(ts|tsx)$/.test(entry.name)) filesToScan.push(full);
+      }
+    };
+    walk(path.join(ROOT_DIR, 'src'));
+    for (const file of filesToScan) {
+      const content = fs.readFileSync(file, 'utf8');
+      assert.ok(!content.includes('Sạc nhanh thoại'), `${file} still contains typo Sạc nhanh thoại`);
+      assert.ok(!content.includes('Mền Đông'), `${file} still contains typo Mền Đông`);
+    }
+  });
+
+  test('TC-REL-15 (TC-38): Multi-user workflow từ lời mời -> chờ duyệt (chặn xem) -> chấp nhận -> thành viên ngoại tuyến & hoàn quỹ', () => {
+    const u1 = { id: 'u_leader', email: 'leader@tripmate.app', phone: '0901112222' };
+    const u2 = { id: 'u_guest', email: 'guest@tripmate.app', phone: '0903334444' };
+
+    const tripStep1: Trip = {
+      id: 'trip-multi-workflow',
+      title: 'Multi-user Đà Lạt',
+      destination: 'Đà Lạt',
+      country: 'Việt Nam',
+      startDate: '2026-10-01',
+      endDate: '2026-10-03',
+      budgetTotal: 6000000,
+      currency: 'VND',
+      creatorId: u1.id,
+      fundHolderId: 'm1',
+      memberUids: [u1.id],
+      members: [
+        { id: 'm1', uid: u1.id, email: u1.email, name: 'Leader', avatar: '', invitationStatus: 'accepted', contributedAmount: 1000000 },
+        { id: 'm2', uid: u2.id, email: u2.email, name: 'Guest', avatar: '', invitationStatus: 'pending', invitationId: 'inv_g1', contributedAmount: 0 },
+        { id: 'm3', name: 'Thành viên Offline', avatar: '', isRegistered: false, invitationStatus: 'offline', contributedAmount: 500000 },
+      ],
+      days: [],
+      expenses: [
+        { id: 'exp_m1', title: 'Hotel', amount: 1200000, category: 'stay', paidBy: 'fund', splitWith: ['m1', 'm2', 'm3'], date: '2026-10-01' },
+      ],
+      packingList: [],
+      documents: [],
+    };
+
+    // While u2 is pending: leader can view, guest cannot view
+    assert.equal(canUserAccessTrip(tripStep1, u1), true);
+    assert.equal(canUserAccessTrip(tripStep1, u2), false);
+
+    // After u2 accepts invitation:
+    const tripStep2: Trip = {
+      ...tripStep1,
+      memberUids: [u1.id, u2.id],
+      members: tripStep1.members.map((m) => (m.id === 'm2' ? { ...m, invitationStatus: 'accepted' } : m)),
+    };
+    assert.equal(canUserAccessTrip(tripStep2, u2), true);
+
+    // Verify 3-way fund settlement includes Leader + Accepted Guest + Offline Member accurately
+    const res = computeExpenseFundSettlements(tripStep2);
+    assert.equal(res.fundRemaining, 300000); // 1,500,000 - 1,200,000
+    assert.equal(res.simplifiedSettlements.length, 2); // Guest owes 400k; Leader holds 300k surplus (used 400k, net +300k? Leader contrib 1M - 400k - 300k = +300k; Offline contrib 500k - 400k = +100k)
+    const netZeroSum = res.memberStats.reduce((s, m) => s + m.netSettlementBalance, 0);
+    assert.ok(Math.abs(netZeroSum) < 0.01);
+  });
+
+  test('TC-UX-MINIMAL-01: Kiểm toán tối giản 10/10 màn hình & chuẩn Microcopy VI/EN', () => {
+    const tabBar = fs.readFileSync(path.join(ROOT_DIR, 'src/components/SwipeableTabBar.tsx'), 'utf8');
+    const expSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/ExpenseSplitterView.tsx'), 'utf8');
+    const receiptSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/ReceiptScannerModal.tsx'), 'utf8');
+    const vaultSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/TravelVaultView.tsx'), 'utf8');
+    const aiModalSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/AIItineraryModal.tsx'), 'utf8');
+    const chatSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/AIAssistantChat.tsx'), 'utf8');
+    const handbookSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/TravelHandbookModal.tsx'), 'utf8');
+    const packingSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/PackingListView.tsx'), 'utf8');
+    const placesSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/SavedPlacesView.tsx'), 'utf8');
+    const newTripSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/NewTripModal.tsx'), 'utf8');
+    const editTripSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/EditTripModal.tsx'), 'utf8');
+    const mapSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/InteractiveMapView.tsx'), 'utf8');
+    const appSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/App.tsx'), 'utf8');
+
+    // 1. Mobile 5-tab bottom bar + More sheet
+    assert.ok(tabBar.includes('grid-cols-5'));
+    assert.ok(tabBar.includes("isVi ? 'Thêm' : 'More'"));
+
+    // 2. Expense segmented control + OCR simplified labels
+    assert.ok(expSrc.includes("isVi ? 'Khoản chi' : 'Expenses'"));
+    assert.ok(expSrc.includes("isVi ? 'Quỹ & Chia tiền' : 'Pool & Split'"));
+    assert.ok(receiptSrc.includes("isVi ? 'Chụp hóa đơn' : 'Take Photo'"));
+    assert.ok(receiptSrc.includes("isVi ? 'Chụp rõ tên quán và tổng tiền' : 'Keep merchant & total clear'"));
+
+    // 3. Vault lock simplified copy
+    assert.ok(vaultSrc.includes("isVi ? 'Nhập mã PIN' : 'Enter PIN'"));
+    assert.ok(vaultSrc.includes('Mở khóa vé & mã đặt chỗ của chuyến đi.'));
+    assert.ok(vaultSrc.includes('Unlock trip tickets & booking codes.'));
+
+    // 4. AI modal 2 steps & Chat 2x2 quick prompts & Handbook short labels
+    assert.ok(aiModalSrc.includes('Bước 1:'));
+    assert.ok(aiModalSrc.includes('Bước 2:'));
+    assert.ok(chatSrc.includes('grid-cols-2'));
+    assert.ok(chatSrc.includes('🍜 Quán ngon'));
+    assert.ok(chatSrc.includes('✨ Top spots'));
+    assert.ok(handbookSrc.includes("isVi ? 'Chi tiêu' : 'Expenses'"));
+    assert.ok(handbookSrc.includes("isVi ? 'Vé & Đặt chỗ' : 'Tickets'"));
+    assert.ok(handbookSrc.includes("isVi ? 'Hành lý' : 'Packing'"));
+
+    // 5. Packing gear icon, SavedPlaces filter drawer, NewTrip More options, EditTrip concise header, Map drawer, Empty/Delete copy
+    assert.ok(packingSrc.includes('<Settings2'));
+    assert.ok(placesSrc.includes('isFilterPanelOpen'));
+    assert.ok(newTripSrc.includes('showMoreOptions'));
+    assert.ok(newTripSrc.includes("isVi ? 'Tùy chọn thêm' : 'More options'"));
+    assert.ok(!editTripSrc.includes('<p className="text-[11px] text-slate-400 mt-0.5">\n              {trip.title}'));
+    assert.ok(mapSrc.includes('isMobileStopsOpen'));
+    assert.ok(appSrc.includes('Tạo chuyến đi đầu tiên hoặc kiểm tra lời mời của bạn.'));
+    assert.ok(appSrc.includes('Xác nhận xóa và gửi thông báo công nợ cho nhóm.'));
+
+    // 6. Banner "AI" label, Weather badge without "AccuWeather", and Mobile Bottom Nav swapping places <-> vault
+    assert.ok(appSrc.includes("mobileMoreTabIds={['vault', 'packing']}"));
+    assert.ok(appSrc.includes("mobileLabel: isVi ? 'Địa điểm' : 'Places'"));
+    assert.ok(appSrc.includes('<span className="text-[11px] font-bold tracking-wide text-white whitespace-nowrap">\n                  AI\n                </span>'));
+    const weatherSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/RealtimeWeatherBadge.tsx'), 'utf8');
+    assert.ok(!weatherSrc.includes('AccuWeather'));
+  });
+});

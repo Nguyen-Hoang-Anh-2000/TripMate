@@ -3,6 +3,7 @@ import { X, Upload, Camera, AlertCircle } from 'lucide-react';
 import { Trip } from '../types';
 import { useLanguage } from '../context/LanguageContext';
 import { compressImage } from '../utils/imageUtils';
+import { validateImageUploadFile } from '../utils/fileValidationUtils';
 
 interface EditTripModalProps {
   isOpen: boolean;
@@ -65,8 +66,10 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!file.type.startsWith('image/')) {
-      setUploadError(isVi ? 'Vui lòng chọn tệp hình ảnh hợp lệ (PNG, JPG, WEBP).' : 'Please select an image file.');
+    e.target.value = '';
+    const validation = validateImageUploadFile(file);
+    if (!validation.valid) {
+      setUploadError(isVi ? validation.errorVi! : validation.errorEn!);
       return;
     }
     setUploadError('');
@@ -146,14 +149,9 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
         
         {/* Header */}
         <div className="px-4 py-3 sm:px-6 sm:py-3.5 bg-slate-900 text-white flex items-center justify-between shrink-0">
-          <div>
-            <h3 className="font-display font-bold text-sm sm:text-base">
-              {isVi ? 'Sửa chuyến đi' : 'Edit Trip'}
-            </h3>
-            <p className="text-[11px] text-slate-400 mt-0.5">
-              {trip.title}
-            </p>
-          </div>
+          <h3 className="font-display font-bold text-sm sm:text-base">
+            {isVi ? 'Sửa chuyến đi' : 'Edit Trip'}
+          </h3>
           <button
             type="button"
             onClick={onClose}
@@ -299,18 +297,18 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
                 <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
                 <span>
                   {isVi
-                    ? `Cảnh báo: Rút ngắn chuyến đi từ ${oldDaysCount} ngày còn ${newDaysCount} ngày`
-                    : `Warning: Trip shortened from ${oldDaysCount} to ${newDaysCount} days`}
+                    ? `Rút ngắn từ ${oldDaysCount} còn ${newDaysCount} ngày`
+                    : `Shortened from ${oldDaysCount} to ${newDaysCount} days`}
                 </span>
               </p>
               <p className="text-[11px] text-rose-700 leading-relaxed pl-5">
                 {affectedActivitiesCount > 0
                   ? (isVi
-                      ? `Có ${affectedActivitiesCount} hoạt động ở các ngày vượt quá sẽ được tự động chuyển về ngày cuối cùng (Ngày ${newDaysCount}) để đảm bảo bạn không bị mất lịch trình hay chi phí đã lên.`
-                      : `${affectedActivitiesCount} activities from truncated days will be automatically consolidated into the last day (Day ${newDaysCount}) so no plans or expenses are lost.`)
+                      ? `${affectedActivitiesCount} hoạt động ngày thừa sẽ dồn về Ngày ${newDaysCount}.`
+                      : `${affectedActivitiesCount} extra-day activities move to Day ${newDaysCount}.`)
                   : (isVi
-                      ? 'Lịch trình chuyến đi sẽ được điều chỉnh về số ngày mới.'
-                      : 'Trip schedule will be adjusted to the new duration.')}
+                      ? 'Lịch trình sẽ cập nhật theo số ngày mới.'
+                      : 'Schedule adjusts to the new dates.')}
               </p>
             </div>
           )}
@@ -322,8 +320,8 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
                 <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
                 <span>
                   {isVi
-                    ? `Thời gian chuyến đi tăng từ ${oldDaysCount} ngày lên ${newDaysCount} ngày`
-                    : `Duration increased from ${oldDaysCount} to ${newDaysCount} days`}
+                    ? `Tăng từ ${oldDaysCount} lên ${newDaysCount} ngày`
+                    : `Extended from ${oldDaysCount} to ${newDaysCount} days`}
                 </span>
               </p>
               <div className="space-y-1.5 pl-5">
@@ -337,8 +335,8 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
                   />
                   <span>
                     {isVi
-                      ? 'Giữ nguyên lịch trình các ngày cũ và thêm ngày mới (Khuyên dùng)'
-                      : 'Keep existing days unchanged and add new days (Recommended)'}
+                      ? 'Giữ nguyên ngày cũ, thêm ngày trống (Khuyên dùng)'
+                      : 'Keep existing days, add new days (Recommended)'}
                   </span>
                 </label>
                 <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
@@ -351,8 +349,8 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
                   />
                   <span>
                     {isVi
-                      ? 'Tự động phân bổ lại toàn bộ hoạt động cho tất cả các ngày'
-                      : 'Redistribute all activities across all days'}
+                      ? 'Tự chia lại hoạt động cho tất cả các ngày'
+                      : 'Redistribute activities across all days'}
                   </span>
                 </label>
               </div>

@@ -5,6 +5,7 @@ import { useLanguage } from '../context/LanguageContext';
 import { formatMoney } from '../utils/formatCurrency';
 import { getLocalDateString } from '../utils/dateUtils';
 import { compressImage } from '../utils/imageUtils';
+import { validateImageUploadFile } from '../utils/fileValidationUtils';
 
 export interface ScannedReceiptData {
   storeName: string;
@@ -102,8 +103,10 @@ export const ReceiptScannerModal: React.FC<ReceiptScannerModalProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (!file.type.startsWith('image/')) {
-      setErrorMessage(isVi ? 'Vui lòng chọn tệp hình ảnh hợp lệ (PNG, JPG, WEBP).' : 'Please select an image file.');
+    const validation = validateImageUploadFile(file);
+    if (!validation.valid) {
+      setErrorMessage(isVi ? validation.errorVi! : validation.errorEn!);
+      e.target.value = '';
       return;
     }
 
@@ -152,7 +155,7 @@ export const ReceiptScannerModal: React.FC<ReceiptScannerModalProps> = ({
                 {isVi ? 'Quét Hóa Đơn AI (OCR)' : 'AI Receipt Scanner (OCR)'}
               </h3>
               <p className="text-[11px] text-slate-500 font-normal">
-                {isVi ? 'Trích xuất tự động tên quán, số tiền, ngày và danh mục' : 'Auto-extract merchant, total, date & category'}
+                {isVi ? 'Trích xuất tên quán, số tiền & danh mục.' : 'Auto-extract merchant, total & category.'}
               </p>
             </div>
           </div>
@@ -189,47 +192,38 @@ export const ReceiptScannerModal: React.FC<ReceiptScannerModalProps> = ({
             <div className="space-y-4">
               <div
                 onClick={() => fileInputRef.current?.click()}
-                className="border-2 border-dashed border-violet-200 hover:border-violet-400 bg-violet-50/40 hover:bg-violet-50/70 rounded-2xl p-6 sm:p-8 text-center cursor-pointer transition-all group"
+                className="border-2 border-dashed border-violet-200 hover:border-violet-400 bg-violet-50/40 hover:bg-violet-50/70 rounded-2xl p-6 text-center cursor-pointer transition-all group"
               >
-                <div className="w-14 h-14 rounded-2xl bg-white shadow-2xs text-violet-600 flex items-center justify-center mx-auto mb-3 group-hover:scale-105 transition-transform">
-                  <Upload className="w-6 h-6" />
+                <div className="w-12 h-12 rounded-2xl bg-white shadow-2xs text-violet-600 flex items-center justify-center mx-auto mb-2.5 group-hover:scale-105 transition-transform">
+                  <Upload className="w-5 h-5" />
                 </div>
-                <h4 className="text-sm font-semibold text-slate-800 mb-1">
-                  {isVi ? 'Tải ảnh hóa đơn / biên lai từ thư viện' : 'Upload receipt from device'}
+                <h4 className="text-sm font-semibold text-slate-800">
+                  {isVi ? 'Chọn ảnh hóa đơn' : 'Upload receipt image'}
                 </h4>
-                <p className="text-xs text-slate-500 max-w-xs mx-auto">
-                  {isVi ? 'Hỗ trợ ảnh chụp hóa đơn ăn uống, vé tàu xe, phòng khách sạn (PNG, JPG)' : 'Supports dining bills, transport tickets, hotel vouchers'}
-                </p>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <button
                   type="button"
                   onClick={() => cameraInputRef.current?.click()}
-                  className="p-3.5 bg-slate-50 hover:bg-slate-100 border border-slate-200/90 rounded-xl text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition-all cursor-pointer shadow-2xs hover:border-slate-300"
+                  className="p-3 bg-slate-50 hover:bg-slate-100 border border-slate-200/90 rounded-xl text-slate-700 font-semibold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer shadow-2xs hover:border-slate-300"
                 >
                   <Camera className="w-4 h-4 text-violet-600" />
-                  <span>{isVi ? 'Chụp ảnh trực tiếp' : 'Take a Photo'}</span>
+                  <span>{isVi ? 'Chụp hóa đơn' : 'Take Photo'}</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="p-3.5 bg-slate-50 hover:bg-slate-100 border border-slate-200/90 rounded-xl text-slate-700 font-medium text-xs flex items-center justify-center gap-2 transition-all cursor-pointer shadow-2xs hover:border-slate-300"
+                  className="p-3 bg-slate-50 hover:bg-slate-100 border border-slate-200/90 rounded-xl text-slate-700 font-semibold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer shadow-2xs hover:border-slate-300"
                 >
                   <ImageIcon className="w-4 h-4 text-teal-600" />
-                  <span>{isVi ? 'Chọn từ thư viện' : 'Photo Library'}</span>
+                  <span>{isVi ? 'Chọn ảnh' : 'Upload Image'}</span>
                 </button>
               </div>
 
-              {/* Sample Guidance */}
-              <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200/60 text-[11px] text-slate-600 space-y-1">
-                <p className="font-semibold text-slate-700 flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-violet-600" />
-                  {isVi ? 'Mẹo chụp hóa đơn rõ nét:' : 'Tips for clear receipt scanning:'}
-                </p>
-                <p>• {isVi ? 'Đặt hóa đơn trên mặt phẳng có độ tương phản cao và đủ ánh sáng.' : 'Place receipt on a flat, well-lit surface.'}</p>
-                <p>• {isVi ? 'Đảm bảo tên quán và dòng tổng tiền không bị che khuất.' : 'Ensure store name and total amount are clearly visible.'}</p>
-              </div>
+              <p className="text-[11px] text-slate-400 text-center">
+                {isVi ? 'Chụp rõ tên quán và tổng tiền' : 'Keep merchant & total clear'}
+              </p>
             </div>
           ) : (
             /* Scanning or Scanned Result Display */

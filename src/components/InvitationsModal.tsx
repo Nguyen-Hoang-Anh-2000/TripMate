@@ -12,7 +12,8 @@ interface InvitationsModalProps {
 
 export const InvitationsModal: React.FC<InvitationsModalProps> = ({ isOpen, onClose, onSelectTrip }) => {
   const { isVi } = useLanguage();
-  const { pendingInvitations, acceptInvitation, declineInvitation } = useAuth();
+  const { invitations, respondToInvitation } = useAuth();
+  const pendingInvitations = invitations.filter((inv) => inv.status === 'pending');
   const [processingId, setProcessingId] = useState<string | null>(null);
 
   if (!isOpen) return null;
@@ -20,9 +21,8 @@ export const InvitationsModal: React.FC<InvitationsModalProps> = ({ isOpen, onCl
   const handleAccept = async (inv: TripInvitation) => {
     setProcessingId(inv.id);
     try {
-      await acceptInvitation(inv, (acceptedTrip) => {
-        onSelectTrip?.(acceptedTrip);
-      });
+      await respondToInvitation(inv.id, true, inv.tripId);
+      onClose();
     } catch (e) {
       console.error(e);
     } finally {
@@ -30,10 +30,10 @@ export const InvitationsModal: React.FC<InvitationsModalProps> = ({ isOpen, onCl
     }
   };
 
-  const handleDecline = async (invId: string) => {
-    setProcessingId(invId);
+  const handleDecline = async (inv: TripInvitation) => {
+    setProcessingId(inv.id);
     try {
-      await declineInvitation(invId);
+      await respondToInvitation(inv.id, false, inv.tripId);
     } catch (e) {
       console.error(e);
     } finally {
@@ -121,7 +121,7 @@ export const InvitationsModal: React.FC<InvitationsModalProps> = ({ isOpen, onCl
                 <div className="flex items-center justify-end gap-2 pt-1">
                   <button
                     type="button"
-                    onClick={() => handleDecline(inv.id)}
+                    onClick={() => handleDecline(inv)}
                     disabled={processingId === inv.id}
                     className="px-3.5 py-1.5 bg-white hover:bg-slate-100 border border-slate-200 text-slate-600 font-semibold text-xs rounded-xl transition-colors cursor-pointer disabled:opacity-50"
                   >

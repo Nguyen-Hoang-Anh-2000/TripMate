@@ -15,6 +15,7 @@ import { useAuth } from '../context/AuthContext';
 import { formatMoney } from '../utils/formatCurrency';
 import { getLocalDateString } from '../utils/dateUtils';
 import { compressAvatarImage } from '../utils/imageUtils';
+import { validateImageUploadFile } from '../utils/fileValidationUtils';
 import { buildDefaultAvatar, isMemberMatchingUser, resolveMemberAvatar } from '../utils/avatarSyncUtils';
 import { computeExpenseFundSettlements } from '../utils/tripSettlementUtils';
 import { calculateEvenSplits } from './ItineraryView';
@@ -82,6 +83,9 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
 }) => {
   const { t, lang } = useLanguage();
   const isVi = lang === 'vi';
+
+  // Segmented Sub-tab ('expenses' = Khoản chi | 'pool' = Quỹ & Chia tiền)
+  const [expenseSubTab, setExpenseSubTab] = useState<'expenses' | 'pool'>('expenses');
 
   // Forms & Modal state
   const [showExpenseForm, setShowExpenseForm] = useState(false);
@@ -241,6 +245,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   // Consume external FAB quick actions
   useEffect(() => {
     if (!externalQuickAction) return;
+    setExpenseSubTab('expenses');
     if (externalQuickAction.type === 'scan-receipt') {
       setIsReceiptScannerOpen(true);
     } else if (externalQuickAction.type === 'add-expense') {
@@ -398,7 +403,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     }));
 
     const totalEditSplitsSum = formattedMemberSplits.reduce((sum, s) => sum + s.amount, 0);
-    const diff = Math.abs(totalEditSplitsSum - parsedAmount);
+    const diff = Math.round(Math.abs(totalEditSplitsSum - parsedAmount) * 100) / 100;
     if (diff > 0.05) {
       setEditFormError(
         isVi
@@ -1006,7 +1011,7 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     }));
 
     const totalMemberSplitSum = formattedMemberSplits.reduce((sum, s) => sum + s.amount, 0);
-    const splitDiff = Math.abs(totalMemberSplitSum - parsedAmount);
+    const splitDiff = Math.round(Math.abs(totalMemberSplitSum - parsedAmount) * 100) / 100;
     if (splitDiff > 0.05) {
       setAddFormError(
         isVi
@@ -1147,6 +1152,12 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
   };
 
   const handleMemberAvatarUpload = async (member: TripMember, file: File) => {
+    const validation = validateImageUploadFile(file);
+    if (!validation.valid) {
+      setMemberActionToast(isVi ? validation.errorVi! : validation.errorEn!);
+      setTimeout(() => setMemberActionToast(null), 4000);
+      return;
+    }
     setUploadingMemberId(member.id);
     try {
       const compressed = await compressAvatarImage(file);
@@ -1183,11 +1194,34 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     }, 250);
   };
 
+  const getMemberDeletionBlockInfo = (member: TripMember) => {
+    const paidExpenseCount = trip.expenses.filter((e) => e.paidBy === member.id).length;
+    const paidActivityCount = trip.days.reduce(
+      (sum, d) =>
+        sum +
+        d.activities.filter(
+          (a) =>
+            a.isCompleted &&
+            a.paidBy === member.id &&
+            !trip.expenses.some((e) => e.activityId === a.id)
+        ).length,
+      0
+    );
+    const paidCount = paidExpenseCount + paidActivityCount;
+    const contributedAmount = member.contributedAmount || 0;
+    const hasContrib = contributedAmount > 0;
+    const isBlockedByLedger = paidCount > 0 || hasContrib;
+    return { paidCount, contributedAmount, hasContrib, isBlockedByLedger };
+  };
+
   const handleConfirmDeleteMember = () => {
-    if (memberToDelete && onDeleteMember) {
-      onDeleteMember(memberToDelete.id);
-      setMemberToDelete(null);
+    if (!memberToDelete || !onDeleteMember) return;
+    const { isBlockedByLedger } = getMemberDeletionBlockInfo(memberToDelete);
+    if (isBlockedByLedger) {
+      return;
     }
+    onDeleteMember(memberToDelete.id);
+    setMemberToDelete(null);
   };
 
   const getMemberName = (id: string) => {
@@ -1213,404 +1247,492 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
     return cleaned;
   };
 
+  const totalPendingSettlementAmount = activeSettlements.reduce((sum, s) => sum + s.amount, 0);
+
   return (
-    <div className="space-y-4 sm:space-y-6">
-      {/* Top Action Bar */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-        {/* Left: Quick Actions (Quét hóa đơn & Xuất file dropdown) */}
-        <div className="flex items-center gap-2 flex-wrap">
+    <div className="space-y-4">
+      {/* Sub-tab Segmented Control + Consolidated Export Menu */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
+        <div className="inline-flex p-1 bg-slate-100 rounded-xl border border-slate-200/80">
           <button
             type="button"
-            onClick={() => setIsReceiptScannerOpen(true)}
-            className="px-3.5 py-2.5 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white font-semibold text-xs sm:text-sm rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-xs hover:shadow-sm cursor-pointer"
-            title={isVi ? 'Quét hóa đơn tự động bằng AI Gemini Vision' : 'Scan receipt using AI Vision'}
+            onClick={() => setExpenseSubTab('expenses')}
+            className={`px-3.5 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+              expenseSubTab === 'expenses'
+                ? 'bg-white text-slate-900 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
           >
-            <Sparkles className="w-4 h-4 text-violet-200" />
-            <span>{isVi ? 'Quét hóa đơn' : 'Scan Receipt'}</span>
+            <Receipt className="w-3.5 h-3.5 text-teal-600" />
+            <span>{isVi ? 'Khoản chi' : 'Expenses'}</span>
+            <span className="text-[11px] font-semibold text-slate-400">({unifiedExpenses.length})</span>
           </button>
-
-          {/* Xuất file Droplist */}
-          <div ref={exportDropdownRef} className="relative">
-            <button
-              type="button"
-              onClick={() => setIsExportDropdownOpen(!isExportDropdownOpen)}
-              className="px-3.5 py-2.5 bg-white hover:bg-slate-50 active:scale-[0.98] border border-slate-200/90 hover:border-slate-300 text-slate-700 font-semibold text-xs sm:text-sm rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer"
-              title={isVi ? 'Xuất dữ liệu hóa đơn và quyết toán chi tiêu' : 'Export expense invoices & settlements'}
-            >
-              <Download className="w-4 h-4 text-teal-600" />
-              <span>{isVi ? 'Xuất file' : 'Export File'}</span>
-              <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isExportDropdownOpen ? 'rotate-180' : ''}`} />
-            </button>
-
-            {isExportDropdownOpen && (
-              <div className="absolute top-full left-0 mt-1.5 w-36 sm:w-40 bg-white rounded-xl border border-slate-200 shadow-xl z-30 p-1 space-y-0.5 animate-in fade-in-50 zoom-in-95 duration-100">
-                {/* 1. Excel */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsExportDropdownOpen(false);
-                    handleExportExcel();
-                  }}
-                  className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left hover:bg-emerald-50 text-slate-700 hover:text-emerald-800 transition-colors cursor-pointer group"
-                >
-                  <div className="w-6 h-6 rounded-md bg-emerald-100 flex items-center justify-center text-emerald-700 shrink-0 group-hover:scale-105 transition-transform">
-                    <FileSpreadsheet className="w-3.5 h-3.5" />
-                  </div>
-                  <span className="text-xs font-bold">
-                    Excel
-                  </span>
-                </button>
-
-                {/* 2. PDF */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsExportDropdownOpen(false);
-                    setIsPdfModalOpen(true);
-                  }}
-                  className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left hover:bg-rose-50 text-slate-700 hover:text-rose-800 transition-colors cursor-pointer group"
-                >
-                  <div className="w-6 h-6 rounded-md bg-rose-100 flex items-center justify-center text-rose-700 shrink-0 group-hover:scale-105 transition-transform">
-                    <FileText className="w-3.5 h-3.5" />
-                  </div>
-                  <span className="text-xs font-bold">
-                    PDF
-                  </span>
-                </button>
-
-                {/* 3. CSV */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsExportDropdownOpen(false);
-                    handleExportCSV();
-                  }}
-                  className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left hover:bg-blue-50 text-slate-700 hover:text-blue-800 transition-colors cursor-pointer group"
-                >
-                  <div className="w-6 h-6 rounded-md bg-blue-100 flex items-center justify-center text-blue-700 shrink-0 group-hover:scale-105 transition-transform">
-                    <Download className="w-3.5 h-3.5" />
-                  </div>
-                  <span className="text-xs font-bold">
-                    CSV
-                  </span>
-                </button>
-              </div>
+          <button
+            type="button"
+            onClick={() => setExpenseSubTab('pool')}
+            className={`px-3.5 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+              expenseSubTab === 'pool'
+                ? 'bg-white text-slate-900 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <PiggyBank className="w-3.5 h-3.5 text-teal-600" />
+            <span>{isVi ? 'Quỹ & Chia tiền' : 'Pool & Split'}</span>
+            {activeSettlements.length > 0 && (
+              <span className="text-[10px] font-bold px-1.5 py-0.2 rounded-full bg-rose-100 text-rose-700">
+                {activeSettlements.length}
+              </span>
             )}
-          </div>
+          </button>
         </div>
 
-        {/* Right: Thêm chi tiêu button */}
-        <button
-          type="button"
-          onClick={() => {
-            const resetIds = trip.members.map((m) => m.id);
-            setTitle('');
-            setAmount('');
-            setAttachedReceiptUrl(null);
-            setPaidBy('fund');
-            setSplitWith(resetIds);
-            setAddMemberSplits(calculateEvenSplits(0, resetIds));
-            setAddSplitWithSearch('');
-            setAddParticipantsFilter('all');
-            setIsAddParticipantsExpanded(true);
-            setAddFormError(null);
-            setShowExpenseForm(true);
-          }}
-          className="w-full sm:w-auto px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white font-semibold text-xs sm:text-sm rounded-xl transition-all flex items-center justify-center gap-2 shadow-xs cursor-pointer shrink-0"
-        >
-          <Plus className="w-4 h-4" />
-          <span>{isVi ? 'Thêm chi tiêu' : 'Add Expense'}</span>
-        </button>
+        {/* Consolidated Neutral Export Dropdown */}
+        <div ref={exportDropdownRef} className="relative">
+          <button
+            type="button"
+            onClick={() => setIsExportDropdownOpen(!isExportDropdownOpen)}
+            className="px-3 py-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold text-xs sm:text-sm rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+            title={isVi ? 'Xuất Excel, PDF hoặc CSV' : 'Export Excel, PDF or CSV'}
+          >
+            <Download className="w-3.5 h-3.5 text-slate-500" />
+            <span>{isVi ? 'Xuất' : 'Export'}</span>
+            <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isExportDropdownOpen ? 'rotate-180' : ''}`} />
+          </button>
+
+          {isExportDropdownOpen && (
+            <div className="absolute top-full right-0 mt-1.5 w-36 bg-white rounded-xl border border-slate-200 shadow-xl z-30 p-1 space-y-0.5 animate-in fade-in-50 zoom-in-95 duration-100">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsExportDropdownOpen(false);
+                  handleExportExcel();
+                }}
+                className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left hover:bg-emerald-50 text-slate-700 hover:text-emerald-800 transition-colors cursor-pointer"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span className="text-xs font-bold">Excel</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsExportDropdownOpen(false);
+                  setIsPdfModalOpen(true);
+                }}
+                className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left hover:bg-rose-50 text-slate-700 hover:text-rose-800 transition-colors cursor-pointer"
+              >
+                <FileText className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                <span className="text-xs font-bold">PDF</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsExportDropdownOpen(false);
+                  handleExportCSV();
+                }}
+                className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left hover:bg-blue-50 text-slate-700 hover:text-blue-800 transition-colors cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                <span className="text-xs font-bold">CSV</span>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Budget Warning Banner if expenses exceed allocated budget */}
+      {/* Budget Warning Banner (concise) */}
       {trip.budgetTotal > 0 && totalSpent > trip.budgetTotal && (
-        <div className="p-3 bg-amber-50 border border-amber-200/90 rounded-xl text-xs text-amber-800 flex items-center justify-between gap-2 shadow-2xs animate-in fade-in">
-          <div className="flex items-center gap-2">
+        <div className="px-3.5 py-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
             <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-            <span>
+            <span className="truncate">
               {isVi
-                ? `Cảnh báo ngân sách: Tổng chi tiêu (${formatMoney(totalSpent, trip.currency, lang)}) đã vượt ngân sách dự kiến (${formatMoney(trip.budgetTotal, trip.currency, lang)}), vượt ${formatMoney(totalSpent - trip.budgetTotal, trip.currency, lang)}.`
-                : `Budget Alert: Total expenses exceed planned budget by ${formatMoney(totalSpent - trip.budgetTotal, trip.currency, lang)}.`}
+                ? `Đã vượt ngân sách ${formatMoney(totalSpent - trip.budgetTotal, trip.currency, lang)}.`
+                : `Over budget by ${formatMoney(totalSpent - trip.budgetTotal, trip.currency, lang)}.`}
             </span>
           </div>
           <span className="text-[10px] font-bold px-2 py-0.5 bg-amber-200/70 text-amber-900 rounded-md shrink-0">
-            {Math.round((totalSpent / trip.budgetTotal) * 100)}% {isVi ? 'ngân sách' : 'budget'}
+            {Math.round((totalSpent / trip.budgetTotal) * 100)}%
           </span>
         </div>
       )}
 
-      {/* 1. Top Overview Stats Bar - Responsive 2 columns on mobile, 4 on desktop */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3.5">
-        
-        {/* Card 1: Tổng tiền đã góp */}
-        <div className="bg-white p-3 sm:p-4.5 rounded-xl sm:rounded-2xl border border-slate-200/80 shadow-2xs relative overflow-hidden group hover:border-teal-300 transition-all flex flex-col justify-between">
-          <div className="flex items-center justify-between gap-1">
-            <span className="text-[11px] sm:text-xs font-bold text-slate-500 uppercase tracking-wider truncate">
-              {isVi ? 'Tổng tiền đã góp' : 'Total Contributed'}
-            </span>
-            <div className="w-6 h-6 sm:w-8 sm:h-8 rounded-lg sm:rounded-xl bg-teal-50 flex items-center justify-center text-teal-600 shrink-0">
-              <PiggyBank className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+      {/* SUB-TAB 1: KHOẢN CHI (Total Spent + Actions + Expense History) */}
+      {expenseSubTab === 'expenses' && (
+        <div className="space-y-4">
+          {/* Block 1: Compact Total Spent + 1 Primary CTA (+ Thêm chi tiêu) & Secondary OCR */}
+          <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200/80 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
+                {isVi ? 'Tổng tiền đã chi' : 'Total Spent'}
+              </span>
+              <div className="flex items-baseline gap-2.5 mt-0.5">
+                <span className="text-xl sm:text-2xl font-extrabold text-slate-900">
+                  {formatMoney(totalSpent, trip.currency, lang)}
+                </span>
+                <span className="text-xs text-slate-500 font-medium">
+                  {isVi
+                    ? `${unifiedExpenses.length} khoản chi`
+                    : `${unifiedExpenses.length} ${unifiedExpenses.length === 1 ? 'expense' : 'expenses'}`}
+                </span>
+              </div>
             </div>
-          </div>
-          <div className="mt-1.5 sm:mt-2.5">
-            <span className="text-base sm:text-xl lg:text-2xl font-extrabold text-slate-900 block truncate leading-tight">
-              {formatMoney(totalContributed, trip.currency, lang)}
-            </span>
-            <span className="text-[10px] sm:text-[11px] text-teal-700 font-semibold mt-0.5 block truncate">
-              {contributorsCount}{' '}
-              {isVi
-                ? 'người đóng quỹ'
-                : contributorsCount === 1
-                ? 'contributor'
-                : 'contributors'}
-            </span>
-          </div>
-        </div>
 
-        {/* Card 2: Tổng tiền đã chi (Hoàn thành hoạt động + Chi tiêu được thêm mới) */}
-        <div 
-          className="bg-white p-3 sm:p-4.5 rounded-xl sm:rounded-2xl border border-slate-200/80 shadow-2xs relative overflow-hidden group hover:border-amber-300 transition-all flex flex-col justify-between"
-          title={isVi ? 'Tổng tiền đã chi của tất cả chi tiêu và các hoạt động hoàn tất' : 'Total spent of all expenses and completed activities'}
-        >
-          <div className="flex items-center justify-between gap-1">
-            <span className="text-[11px] sm:text-xs font-bold text-slate-500 uppercase tracking-wider truncate">
-              {isVi ? 'Tổng tiền đã chi' : 'Total Spent'}
-            </span>
-            <div className="w-6 h-6 sm:w-8 sm:h-8 rounded-lg sm:rounded-xl bg-amber-50 flex items-center justify-center text-amber-600 shrink-0">
-              <Receipt className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-            </div>
-          </div>
-          <div className="mt-1.5 sm:mt-2.5">
-            <span className="text-base sm:text-xl lg:text-2xl font-extrabold text-slate-900 block truncate leading-tight">
-              {formatMoney(totalSpent, trip.currency, lang)}
-            </span>
-            <span 
-              className="text-[10px] sm:text-[11px] text-slate-500 font-medium mt-0.5 block truncate"
-              title={isVi ? `Gồm ${manualExpensesCount} chi tiêu và ${completedActivitiesCount} hoạt động hoàn tất` : undefined}
-            >
-              {isVi
-                ? (completedActivitiesCount > 0 && manualExpensesCount > 0
-                    ? `${unifiedExpenses.length} khoản (${manualExpensesCount} chi tiêu, ${completedActivitiesCount} hoạt động)`
-                    : `${unifiedExpenses.length} khoản (tất cả chi tiêu & hoạt động)`)
-                : `${unifiedExpenses.length} ${unifiedExpenses.length === 1 ? 'record' : 'records'}`}
-            </span>
-          </div>
-        </div>
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <button
+                type="button"
+                onClick={() => setIsReceiptScannerOpen(true)}
+                className="flex-1 sm:flex-initial px-3.5 py-2.5 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold text-xs sm:text-sm rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Camera className="w-4 h-4 text-slate-500" />
+                <span>{isVi ? 'Quét hóa đơn' : 'Scan Receipt'}</span>
+              </button>
 
-        {/* Card 3: Số dư quỹ nhóm */}
-        <div className={`p-3 sm:p-4.5 rounded-xl sm:rounded-2xl border shadow-2xs relative overflow-hidden transition-all flex flex-col justify-between ${
-          fundRemaining >= 0 
-            ? 'bg-emerald-50/50 border-emerald-200/80' 
-            : 'bg-rose-50/50 border-rose-200/80'
-        }`}>
-          <div className="flex items-center justify-between gap-1">
-            <span className="text-[11px] sm:text-xs font-bold text-slate-600 uppercase tracking-wider truncate">
-              {isVi ? 'Số dư quỹ nhóm' : 'Fund Balance'}
-            </span>
-            <div className={`w-6 h-6 sm:w-8 sm:h-8 rounded-lg sm:rounded-xl flex items-center justify-center shrink-0 ${
-              fundRemaining >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
-            }`}>
-              <Wallet className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+              <button
+                type="button"
+                onClick={() => {
+                  const resetIds = trip.members.map((m) => m.id);
+                  setTitle('');
+                  setAmount('');
+                  setAttachedReceiptUrl(null);
+                  setPaidBy('fund');
+                  setSplitWith(resetIds);
+                  setAddMemberSplits(calculateEvenSplits(0, resetIds));
+                  setAddSplitWithSearch('');
+                  setAddParticipantsFilter('all');
+                  setIsAddParticipantsExpanded(true);
+                  setAddFormError(null);
+                  setShowExpenseForm(true);
+                }}
+                className="flex-1 sm:flex-initial px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white font-semibold text-xs sm:text-sm rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-xs cursor-pointer shrink-0"
+              >
+                <Plus className="w-4 h-4" />
+                <span>{isVi ? 'Thêm chi tiêu' : 'Add Expense'}</span>
+              </button>
             </div>
           </div>
-          <div className="mt-1.5 sm:mt-2.5">
-            <span className={`text-base sm:text-xl lg:text-2xl font-extrabold block truncate leading-tight ${
-              fundRemaining >= 0 ? 'text-emerald-700' : 'text-rose-700'
-            }`}>
-              {formatMoney(fundRemaining, trip.currency, lang)}
-            </span>
-            <div className="mt-0.5 flex items-center gap-1">
-              <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded-full truncate ${
-                fundRemaining >= 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
-              }`}>
-                {fundRemaining >= 0 
-                  ? (isVi ? '✓ Quỹ còn tiền' : 'Available') 
-                  : (isVi ? '⚠ Quỹ thâm hụt' : 'Deficit')}
+
+          {/* Block 2: Expenses History */}
+          <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200/80 shadow-xs">
+            <div className="pb-3 border-b border-slate-100 flex items-center justify-between gap-2">
+              <h3 className="font-display font-bold text-slate-900 text-base">{t('expenses.historyTitle')}</h3>
+              <span className="text-xs text-slate-500 font-medium">
+                {isVi
+                  ? `${unifiedExpenses.length} khoản chi`
+                  : `${unifiedExpenses.length} ${unifiedExpenses.length === 1 ? 'expense' : 'expenses'}`}
               </span>
             </div>
+
+            <div className="mt-3.5 space-y-2.5">
+              {unifiedExpenses.length === 0 ? (
+                <p className="text-xs text-slate-400 italic text-center py-8">
+                  {isVi ? 'Chưa có khoản chi tiêu nào.' : 'No expenses recorded.'}
+                </p>
+              ) : (
+                unifiedExpenses.map((item) => {
+                  const linkedDay = item.dayNumber ? trip.days.find((d) => d.dayNumber === item.dayNumber) : null;
+                  const rawDate = linkedDay?.date || item.date;
+                  const dateStr = formatDisplayDate(rawDate);
+                  const dateLabel = item.dayNumber
+                    ? `${isVi ? `Ngày ${item.dayNumber}` : `Day ${item.dayNumber}`}${dateStr ? ` · ${dateStr}` : ''}`
+                    : (dateStr || (isVi ? 'Chi tiêu thêm' : 'Manual'));
+
+                  return (
+                    <div
+                      key={item.id}
+                      onClick={() => handleOpenExpenseDetails(item)}
+                      className="p-3 sm:p-3.5 rounded-xl border border-slate-200/80 bg-slate-50/70 hover:bg-white hover:border-teal-300 hover:shadow-xs transition-all flex items-center justify-between gap-2.5 cursor-pointer group"
+                      title={isVi ? 'Xem chi tiết chi tiêu' : 'View expense details'}
+                    >
+                      <div className="flex items-start gap-3 min-w-0 pr-2">
+                        <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 mt-0.5 transition-colors ${
+                          item.activityId
+                            ? 'bg-emerald-100/90 text-emerald-700 group-hover:bg-emerald-200/90'
+                            : 'bg-slate-200/80 text-slate-700 group-hover:bg-teal-100 group-hover:text-teal-700'
+                        }`}>
+                          {item.activityId ? <RefreshCw className="w-4 h-4" /> : <Receipt className="w-4 h-4" />}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <h4 className="text-xs sm:text-sm font-semibold text-slate-800 group-hover:text-teal-700 transition-colors truncate">
+                              {item.title}
+                            </h4>
+                            {item.activityId && (
+                              <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded-md shrink-0">
+                                {isVi ? 'Hoạt động' : 'Activity'}
+                              </span>
+                            )}
+                            {item.receiptImageUrl && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setViewingReceiptImage(item.receiptImageUrl!);
+                                }}
+                                className="text-[10px] font-medium text-violet-700 bg-violet-50 hover:bg-violet-100 border border-violet-200/80 px-1.5 py-0.2 rounded-md shrink-0 flex items-center gap-1 cursor-pointer transition-colors"
+                                title={isVi ? 'Xem ảnh hóa đơn' : 'View receipt image'}
+                              >
+                                <Camera className="w-3 h-3 text-violet-600" />
+                                <span>{isVi ? 'Hóa đơn' : 'Receipt'}</span>
+                              </button>
+                            )}
+                          </div>
+
+                          <p className="text-[11px] text-slate-500 mt-1 truncate flex items-center gap-1.5 flex-wrap">
+                            {item.paidBy === 'fund' ? (
+                              <span className="font-bold text-amber-800 bg-amber-100/90 px-1.5 py-0.5 rounded-md inline-flex items-center gap-1 shrink-0">
+                                <PiggyBank className="w-3 h-3 text-amber-700" />
+                                <span>{isVi ? 'Quỹ' : 'Group Fund'}</span>
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 font-semibold text-slate-700 truncate">
+                                <img
+                                  src={getMemberAvatar(item.paidBy)}
+                                  alt={getMemberName(item.paidBy)}
+                                  className="w-4 h-4 rounded-full object-cover border border-slate-200 shrink-0"
+                                />
+                                <span className="truncate">{getMemberName(item.paidBy)}</span>
+                              </span>
+                            )}
+                            <span className="shrink-0 text-slate-500">
+                              ({item.splitWith.length}{' '}
+                              {isVi
+                                ? 'người tham gia'
+                                : item.splitWith.length === 1
+                                ? 'participant'
+                                : 'participants'})
+                            </span>
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+                        <div className="flex flex-col items-end text-right">
+                          <span className="text-[10px] sm:text-[11px] font-bold text-emerald-700 bg-emerald-100/90 px-1.5 py-0.5 rounded-md shrink-0 flex items-center gap-1">
+                            <Calendar className="w-2.5 h-2.5 text-emerald-600" />
+                            <span>{dateLabel}</span>
+                          </span>
+                          <span className="text-xs sm:text-sm font-extrabold text-slate-900 group-hover:text-teal-700 transition-colors mt-1">
+                            {formatMoney(item.amount, item.currency || trip.currency, lang)}
+                          </span>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenExpenseDetails(item);
+                          }}
+                          className="p-1.5 text-slate-400 hover:text-teal-600 hover:bg-teal-50 rounded-lg transition-colors cursor-pointer"
+                          title={isVi ? 'Chi tiết chi tiêu' : 'Expense details'}
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setExpenseToDelete(item);
+                          }}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                          title={isVi ? 'Xóa chi tiêu' : 'Delete expense'}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
           </div>
         </div>
+      )}
 
-        {/* Card 4: Thành viên giữ tiền đã góp của nhóm */}
-        <div className="bg-white p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-slate-200/80 shadow-2xs relative overflow-hidden group hover:border-blue-300 transition-all flex flex-col justify-between">
-          <div className="flex items-center justify-between gap-1">
-            <span className="text-[11px] sm:text-xs font-bold text-slate-500 uppercase tracking-wider truncate">
-              {isVi ? 'Người giữ quỹ' : 'Treasurer'}
-            </span>
-            <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg sm:rounded-xl bg-blue-50 flex items-center justify-center text-blue-600 shrink-0">
-              <ShieldCheck className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+      {/* SUB-TAB 2: QUỸ & CHIA TIỀN (2 Core Stats + Members & Settlements) */}
+      {expenseSubTab === 'pool' && (
+        <div className="space-y-4">
+          {/* Top 2 Core Stats: Quỹ còn + Công nợ */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Stat 1: Số dư quỹ nhóm & Thủ quỹ */}
+            <div className={`p-4 rounded-2xl border shadow-2xs flex flex-col justify-between gap-2 ${
+              fundRemaining >= 0
+                ? 'bg-emerald-50/50 border-emerald-200/80'
+                : 'bg-rose-50/50 border-rose-200/80'
+            }`}>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">
+                  {isVi ? 'Số dư quỹ nhóm' : 'Fund Balance'}
+                </span>
+                <span className="text-[11px] font-medium text-slate-500">
+                  {isVi ? 'Đã góp: ' : 'Pool: '}
+                  <strong className="text-slate-700">{formatMoney(totalContributed, trip.currency, lang)}</strong>
+                </span>
+              </div>
+              <div className="flex items-end justify-between gap-2">
+                <span className={`text-xl sm:text-2xl font-extrabold leading-tight ${
+                  fundRemaining >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                }`}>
+                  {formatMoney(fundRemaining, trip.currency, lang)}
+                </span>
+                {onSetFundHolder && trip.members.length > 0 && (
+                  <select
+                    value={fundHolderId}
+                    onChange={(e) => onSetFundHolder(e.target.value)}
+                    className="max-w-[140px] text-[11px] font-semibold text-slate-700 bg-white/90 border border-slate-200 rounded-lg px-2 py-1 cursor-pointer focus:outline-hidden focus:ring-1 focus:ring-teal-500 truncate"
+                    title={isVi ? 'Người giữ quỹ' : 'Treasurer'}
+                  >
+                    {trip.members.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {isVi ? `Giữ quỹ: ${m.name}` : `Treasurer: ${m.name}`}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </div>
+
+            {/* Stat 2: Công nợ / Cần chuyển */}
+            <div className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-2xs flex flex-col justify-between gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                  {isVi ? 'Công nợ' : 'Pending Settlements'}
+                </span>
+                <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
+                  activeSettlements.length === 0
+                    ? 'bg-emerald-100 text-emerald-700'
+                    : 'bg-rose-100 text-rose-700'
+                }`}>
+                  {activeSettlements.length === 0
+                    ? (isVi ? 'Đã cân bằng' : 'Settled')
+                    : (isVi ? `${activeSettlements.length} khoản chuyển` : `${activeSettlements.length} transfers`)}
+                </span>
+              </div>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className={`text-xl sm:text-2xl font-extrabold leading-tight ${
+                  totalPendingSettlementAmount > 0 ? 'text-rose-600' : 'text-emerald-700'
+                }`}>
+                  {formatMoney(totalPendingSettlementAmount, trip.currency, lang)}
+                </span>
+                <span className="text-[11px] text-slate-500">
+                  {contributorsCount} {isVi ? 'thành viên đóng quỹ' : 'contributors'}
+                </span>
+              </div>
             </div>
           </div>
 
-          {/* 2 hàng: Hàng 1 tên người giữ quỹ, Hàng 2 combobox chọn người giữ quỹ */}
-          <div className="mt-2 space-y-2">
-            {/* Hàng 1: Tên và avatar người giữ quỹ */}
-            <div className="flex items-center gap-2 min-w-0">
-              {fundHolder ? (
-                <>
-                  <img
-                    src={resolveMemberAvatar(fundHolder, userProfile, trip.creatorId)}
-                    alt={fundHolder.name}
-                    className="w-7 h-7 sm:w-8 sm:h-8 rounded-full object-cover border border-blue-200 shrink-0 shadow-2xs"
-                  />
-                  <div className="min-w-0">
-                    <p className="text-xs sm:text-sm font-bold text-slate-900 truncate" title={fundHolder.name}>
-                      {fundHolder.name}
-                    </p>
-                    <p className="text-[10px] text-blue-600 font-medium truncate">
-                      {isVi ? 'Thủ quỹ nhóm' : 'Group treasurer'}
-                    </p>
-                  </div>
-                </>
-              ) : (
-                <p className="text-xs text-slate-400 italic truncate">{isVi ? 'Chưa chọn người giữ quỹ' : 'No treasurer selected'}</p>
+          {/* Block 1: Member Fund & Contribution Management Section */}
+          <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200/80 shadow-xs space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
+              <h3 className="font-display font-bold text-slate-900 text-base flex items-center gap-2">
+                <Users className="w-4 h-4 text-teal-600" />
+                <span>{isVi ? 'Thành viên & Quỹ đóng góp' : 'Members & Contribution Funds'}</span>
+              </h3>
+
+              {onAddMember && (
+                <button
+                  type="button"
+                  onClick={() => setShowAddMemberModal(true)}
+                  className="py-1.5 px-3 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+                >
+                  <UserPlus className="w-3.5 h-3.5 text-teal-600" />
+                  <span>{isVi ? 'Thêm thành viên' : 'Add Member'}</span>
+                </button>
               )}
             </div>
 
-            {/* Hàng 2: Combobox chọn người giữ quỹ nằm ở dưới */}
-            {onSetFundHolder && trip.members.length > 0 && (
-              <div className="pt-0.5">
-                <select
-                  value={fundHolderId}
-                  onChange={(e) => onSetFundHolder(e.target.value)}
-                  className="w-full text-xs font-semibold text-blue-800 bg-blue-50/80 hover:bg-blue-100/90 border border-blue-200 rounded-lg px-2.5 py-1.5 cursor-pointer focus:outline-hidden focus:ring-1 focus:ring-blue-500 transition-colors truncate"
-                  title={isVi ? 'Chọn người giữ quỹ' : 'Change treasurer'}
-                >
-                  {trip.members.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name}
-                    </option>
-                  ))}
-                </select>
+            {memberStats.length === 0 ? (
+              <div className="p-6 text-center bg-slate-50/70 rounded-2xl border border-dashed border-slate-300 space-y-2">
+                <Users className="w-6 h-6 text-slate-400 mx-auto" />
+                <p className="text-xs font-bold text-slate-700">
+                  {isVi ? 'Chưa có người tham gia' : 'No participants yet'}
+                </p>
+                <p className="text-[11px] text-slate-500 max-w-xs mx-auto">
+                  {isVi
+                    ? 'Thêm thành viên để bắt đầu chia chi phí.'
+                    : 'Add members to start splitting expenses.'}
+                </p>
+                {onAddMember && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAddMemberModal(true)}
+                    className="mt-1 py-1.5 px-3.5 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-xl shadow-xs transition-all inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>{isVi ? 'Thêm thành viên' : 'Add Member'}</span>
+                  </button>
+                )}
               </div>
-            )}
-          </div>
-        </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                {memberStats.map(({ member, contributed, paidExtra, used, remainingBalance }) => {
+                  const isTreasurer = member.id === fundHolderId;
+                  const isEditing = editingContribMemberId === member.id;
 
-      </div>
-
-      {/* 2. Member Fund & Contribution Management Section */}
-      <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
-          <div>
-            <h3 className="font-display font-bold text-slate-900 text-base flex items-center gap-2">
-              <Users className="w-4 h-4 text-teal-600" />
-              <span>{isVi ? 'Thành viên & Quỹ đóng góp' : 'Members & Contribution Funds'}</span>
-            </h3>
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0">
-            {onAddMember && (
-              <button
-                type="button"
-                onClick={() => setShowAddMemberModal(true)}
-                className="py-1.5 px-3 bg-teal-600 hover:bg-teal-700 active:scale-[0.98] text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5 cursor-pointer"
-              >
-                <UserPlus className="w-3.5 h-3.5" />
-                <span>{isVi ? 'Thêm thành viên' : 'Add Member'}</span>
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Member cards grid or empty state */}
-        {memberStats.length === 0 ? (
-          <div className="p-8 text-center bg-slate-50/70 rounded-2xl border border-dashed border-slate-300 space-y-2.5">
-            <div className="w-12 h-12 rounded-2xl bg-white border border-slate-200 text-slate-400 flex items-center justify-center mx-auto shadow-2xs">
-              <Users className="w-6 h-6 text-slate-400" />
-            </div>
-            <div>
-              <p className="text-xs font-bold text-slate-700">
-                {isVi ? 'Chưa có người tham gia' : 'No participants yet'}
-              </p>
-              <p className="text-[11px] text-slate-400 mt-0.5 max-w-xs mx-auto">
-                {isVi
-                  ? 'Nhấn "Thêm thành viên" để thêm người vào chuyến đi và phân chia chi phí.'
-                  : 'Click "Add Member" to add participants and split expenses.'}
-              </p>
-            </div>
-            {onAddMember && (
-              <button
-                type="button"
-                onClick={() => setShowAddMemberModal(true)}
-                className="mt-2 py-1.5 px-3.5 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-xl shadow-xs transition-all inline-flex items-center gap-1.5 cursor-pointer"
-              >
-                <UserPlus className="w-3.5 h-3.5" />
-                <span>{isVi ? 'Thêm thành viên' : 'Add Member'}</span>
-              </button>
-            )}
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
-            {memberStats.map(({ member, contributed, paidExtra, used, remainingBalance }) => {
-              const isTreasurer = member.id === fundHolderId;
-              const isEditing = editingContribMemberId === member.id;
-
-              return (
-                <div 
-                  key={member.id} 
-                  className={`p-4 rounded-xl border transition-all ${
-                    isTreasurer 
-                      ? 'bg-blue-50/40 border-blue-200/80 ring-1 ring-blue-200' 
-                      : 'bg-slate-50/70 hover:bg-slate-50 border-slate-200/80'
-                  }`}
-                >
-                {/* Member Header */}
-                <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-200/60">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    {onUpdateMember ? (
-                      <label
-                        className="relative group/avatar cursor-pointer shrink-0"
-                        title={isVi ? 'Đổi ảnh đại diện thành viên' : 'Change member avatar'}
-                      >
-                        <img
-                          src={resolveMemberAvatar(member, userProfile, trip.creatorId)}
-                          alt={member.name}
-                          className="w-9 h-9 rounded-full object-cover border-2 border-white shadow-2xs shrink-0 group-hover/avatar:opacity-80 transition-opacity"
-                        />
-                        <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-teal-600 text-white border border-white flex items-center justify-center shadow-2xs">
-                          {uploadingMemberId === member.id ? (
-                            <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                  return (
+                    <div
+                      key={member.id}
+                      className={`p-4 rounded-xl border transition-all ${
+                        isTreasurer
+                          ? 'bg-blue-50/40 border-blue-200/80 ring-1 ring-blue-200'
+                          : 'bg-slate-50/70 hover:bg-slate-50 border-slate-200/80'
+                      }`}
+                    >
+                      {/* Member Header */}
+                      <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-200/60">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          {onUpdateMember ? (
+                            <label
+                              className="relative group/avatar cursor-pointer shrink-0"
+                              title={isVi ? 'Đổi ảnh đại diện thành viên' : 'Change member avatar'}
+                            >
+                              <img
+                                src={resolveMemberAvatar(member, userProfile, trip.creatorId)}
+                                alt={member.name}
+                                className="w-9 h-9 rounded-full object-cover border-2 border-white shadow-2xs shrink-0 group-hover/avatar:opacity-80 transition-opacity"
+                              />
+                              <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-teal-600 text-white border border-white flex items-center justify-center shadow-2xs">
+                                {uploadingMemberId === member.id ? (
+                                  <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                                ) : (
+                                  <Camera className="w-2.5 h-2.5" />
+                                )}
+                              </span>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  e.target.value = '';
+                                  if (file) {
+                                    handleMemberAvatarUpload(member, file);
+                                  }
+                                }}
+                              />
+                            </label>
                           ) : (
-                            <Camera className="w-2.5 h-2.5" />
+                            <img
+                              src={resolveMemberAvatar(member, userProfile, trip.creatorId)}
+                              alt={member.name}
+                              className="w-9 h-9 rounded-full object-cover border-2 border-white shadow-2xs shrink-0"
+                            />
                           )}
-                        </span>
-                        <input
-                          type="file"
-                          accept="image/*"
-                          className="hidden"
-                          onChange={(e) => {
-                            const file = e.target.files?.[0];
-                            e.target.value = '';
-                            if (file) {
-                              handleMemberAvatarUpload(member, file);
-                            }
-                          }}
-                        />
-                      </label>
-                    ) : (
-                      <img
-                        src={resolveMemberAvatar(member, userProfile, trip.creatorId)}
-                        alt={member.name}
-                        className="w-9 h-9 rounded-full object-cover border-2 border-white shadow-2xs shrink-0"
-                      />
-                    )}
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="font-bold text-xs sm:text-sm text-slate-900 truncate">{member.name}</span>
-                        {isTreasurer && (
-                          <span className="text-[10px] font-bold text-blue-700 bg-blue-100/90 px-1.5 py-0.2 rounded-full shrink-0 flex items-center gap-0.5">
-                            <ShieldCheck className="w-3 h-3" />
-                            <span>{isVi ? 'Giữ quỹ' : 'Treasurer'}</span>
-                          </span>
-                        )}
-                        {member.invitationStatus === 'pending' && (
-                          <span className="text-[10px] font-bold text-amber-700 bg-amber-100/90 border border-amber-200 px-1.5 py-0.2 rounded-full shrink-0 flex items-center gap-1" title={isVi ? 'Đang chờ người này bấm đồng ý trong app' : 'Waiting for in-app acceptance'}>
-                            <Clock className="w-2.5 h-2.5 text-amber-600 animate-pulse" />
-                            <span>{isVi ? 'Chờ đồng ý' : 'Pending'}</span>
-                          </span>
-                        )}
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-bold text-xs sm:text-sm text-slate-900 truncate">{member.name}</span>
+                              {isTreasurer && (
+                                <span className="text-[10px] font-bold text-blue-700 bg-blue-100/90 px-1.5 py-0.2 rounded-full shrink-0 flex items-center gap-0.5">
+                                  <ShieldCheck className="w-3 h-3" />
+                                  <span>{isVi ? 'Giữ quỹ' : 'Treasurer'}</span>
+                                </span>
+                              )}
+                              {member.invitationStatus === 'pending' && (
+                                <span className="text-[10px] font-bold text-amber-700 bg-amber-100/90 border border-amber-200 px-1.5 py-0.2 rounded-full shrink-0 flex items-center gap-1">
+                                  <Clock className="w-2.5 h-2.5 text-amber-600" />
+                                  <span>{isVi ? 'Chờ đồng ý' : 'Pending'}</span>
+                                </span>
+                              )}
                         {(member.invitationStatus === 'accepted' || (member.isRegistered && member.invitationStatus !== 'pending')) && (
                           <span className="text-[10px] font-bold text-emerald-700 bg-emerald-100/90 border border-emerald-200 px-1.5 py-0.2 rounded-full shrink-0 flex items-center gap-0.5" title={isVi ? 'Đã tham gia chuyến đi' : 'Joined member'}>
                             <UserCheck className="w-2.5 h-2.5 text-emerald-600" />
@@ -1804,277 +1926,113 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
         )}
       </div>
 
-      {/* 3. Settlement Summary & Expenses History */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
-        {/* Settlements Calculation ("Ai nợ ai" / "Quyết toán") */}
-        <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-            <div>
+          {/* Block 2: Settlements Calculation ("Ai nợ ai" / "Quyết toán") */}
+          <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200/80 shadow-xs">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="font-display font-semibold text-slate-900 text-base">{t('expenses.settlementSummary')}</h3>
-              <p className="text-[11px] text-slate-500 font-normal mt-0.5">
-                {isVi ? 'Phương án chuyển tiền thanh toán nợ' : 'Settlement and debt payment'}
-              </p>
-            </div>
-            
-            <button
-              type="button"
-              onClick={handleCopySettlement}
-              className={`px-2.5 py-1.5 rounded-xl border text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
-                copiedSettlement
-                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                  : 'bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-900 border-slate-200'
-              }`}
-              title={isVi ? 'Sao chép bảng quyết toán để gửi vào nhóm chat Zalo' : 'Copy settlement to clipboard'}
-            >
-              {copiedSettlement ? (
-                <>
-                  <Check className="w-3.5 h-3.5 text-emerald-600" />
-                  <span className="text-[11px] font-semibold">{isVi ? 'Đã sao chép!' : 'Copied!'}</span>
-                </>
-              ) : (
-                <>
-                  <Copy className="w-3.5 h-3.5" />
-                  <span className="text-[11px] font-medium">{isVi ? 'Sao chép' : 'Copy'}</span>
-                </>
-              )}
-            </button>
-          </div>
 
-          {/* Toggle Tối ưu hóa nợ (Splitwise-style) */}
-          <div className="mt-3.5 p-2.5 bg-slate-50 rounded-xl border border-slate-200/70 flex items-center justify-between">
-            <div className="flex items-center gap-1.5">
-              <SlidersHorizontal className="w-3.5 h-3.5 text-teal-600" />
-              <div>
-                <span className="text-xs font-semibold text-slate-800 block leading-tight">
-                  {isVi ? 'Tối ưu hóa số lần chuyển' : 'Simplify Debts (Splitwise)'}
-                </span>
-                <span className="text-[10px] text-slate-500 font-normal">
-                  {isVi ? 'Thu gọn giao dịch ít lần chuyển nhất' : 'Minimize number of bank transfers'}
-                </span>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setIsSimplifiedDebts(!isSimplifiedDebts)}
-              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
-                isSimplifiedDebts ? 'bg-teal-600' : 'bg-slate-300'
-              }`}
-              title={isVi ? 'Bật/Tắt chế độ tối ưu hóa nợ nhóm' : 'Toggle simplified debts'}
-            >
-              <span
-                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-xs ring-0 transition duration-200 ease-in-out ${
-                  isSimplifiedDebts ? 'translate-x-4' : 'translate-x-0'
+              <button
+                type="button"
+                onClick={handleCopySettlement}
+                className={`px-2.5 py-1.5 rounded-xl border text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
+                  copiedSettlement
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                    : 'bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-900 border-slate-200'
                 }`}
-              />
-            </button>
-          </div>
-
-          <div className="mt-3.5 space-y-2.5">
-            {activeSettlements.length === 0 ? (
-              <div className="p-4 text-center bg-emerald-50/60 rounded-xl border border-emerald-100">
-                <CheckCircle className="w-6 h-6 text-emerald-600 mx-auto mb-1" />
-                <p className="text-xs font-semibold text-emerald-900">{t('expenses.allSettled')}</p>
-                <p className="text-[11px] text-emerald-700 mt-0.5">
-                  {trip.members.length === 0
-                    ? (isVi ? 'Chưa có người tham gia để tính quyết toán.' : 'No participants to settle.')
-                    : fundRemaining >= 0 
-                    ? (isVi ? 'Tất cả thành viên đều có số dư hợp lệ, không ai nợ ai.' : 'All members have positive balance, no pending debts.')
-                    : (isVi ? 'Không có công nợ cần quyết toán giữa các cá nhân.' : t('expenses.noPendingDebts'))}
-                </p>
-                {fundRemaining > 0 && (
-                  <p className="text-[10px] text-emerald-700 font-medium mt-1">
-                    {isVi ? `Quỹ chung còn dư ${formatMoney(fundRemaining, trip.currency, lang)} cho cả nhóm` : `Group fund surplus: ${formatMoney(fundRemaining, trip.currency, lang)}`}
-                  </p>
+                title={isVi ? 'Sao chép bảng quyết toán' : 'Copy settlement to clipboard'}
+              >
+                {copiedSettlement ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-600" />
+                    <span className="text-[11px] font-semibold">{isVi ? 'Đã sao chép!' : 'Copied!'}</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span className="text-[11px] font-medium">{isVi ? 'Sao chép' : 'Copy'}</span>
+                  </>
                 )}
-              </div>
-            ) : (
-              activeSettlements.map((s, idx) => (
-                <div key={idx} className="p-3 bg-slate-50/80 hover:bg-slate-50 rounded-xl border border-slate-200/70 flex items-center justify-between gap-2 transition-colors">
-                  <div className="flex items-center gap-1.5 min-w-0 pr-1">
-                    <img
-                      src={getMemberAvatar(s.from)}
-                      alt={getMemberName(s.from)}
-                      className="w-5 h-5 rounded-full object-cover border border-white shadow-2xs shrink-0"
-                    />
-                    <p className="text-xs font-medium text-slate-800 truncate">
-                      <span className="text-slate-900 font-semibold">{getMemberName(s.from)}</span>{' '}
-                      <span className="text-rose-600 text-[11px] font-normal">{t('expenses.owes')}</span>{' '}
-                      <span className="text-teal-700 font-semibold">{getMemberName(s.to)}</span>
-                    </p>
-                    <img
-                      src={getMemberAvatar(s.to)}
-                      alt={getMemberName(s.to)}
-                      className="w-5 h-5 rounded-full object-cover border border-white shadow-2xs shrink-0"
-                    />
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <span className="text-xs font-semibold text-rose-700 bg-rose-50 px-2.5 py-1 rounded-lg border border-rose-100 shrink-0">
-                      {formatMoney(s.amount, trip.currency, lang)}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleOpenVietQRModal(s)}
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-[11px] font-bold transition-colors cursor-pointer shrink-0"
-                      title={isVi ? 'Tạo mã VietQR chuyển khoản nhanh' : 'Generate VietQR transfer code'}
-                    >
-                      <QrCode className="w-3.5 h-3.5" />
-                      <span>QR</span>
-                    </button>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-
-        {/* Expenses Log & Add Expense Form */}
-        <div className="lg:col-span-2 space-y-4">
-          <div className="bg-white p-5 rounded-2xl border border-slate-200/80 shadow-xs">
-            <div className="pb-3 border-b border-slate-100">
-              <h3 className="font-display font-bold text-slate-900 text-base">{t('expenses.historyTitle')}</h3>
-              <span className="text-xs text-slate-500">
-                {isVi 
-                  ? `Ghi nhận ${unifiedExpenses.length} khoản (${manualExpensesCount} chi tiêu, ${completedActivitiesCount} hoạt động hoàn tất)`
-                  : `Tracking ${unifiedExpenses.length} ${unifiedExpenses.length === 1 ? 'item' : 'items'} (${manualExpensesCount} ${manualExpensesCount === 1 ? 'expense' : 'expenses'}, ${completedActivitiesCount} ${completedActivitiesCount === 1 ? 'activity' : 'activities'})`}
-              </span>
+              </button>
             </div>
 
+            {/* Toggle Tối ưu hóa nợ (Splitwise-style) */}
+            <div className="mt-3 p-2.5 bg-slate-50 rounded-xl border border-slate-200/70 flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <SlidersHorizontal className="w-3.5 h-3.5 text-teal-600" />
+                <span className="text-xs font-semibold text-slate-800">
+                  {isVi ? 'Tối ưu hóa số lần chuyển' : 'Simplify Debts'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsSimplifiedDebts(!isSimplifiedDebts)}
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
+                  isSimplifiedDebts ? 'bg-teal-600' : 'bg-slate-300'
+                }`}
+                title={isVi ? 'Bật/Tắt chế độ tối ưu hóa nợ nhóm' : 'Toggle simplified debts'}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-xs ring-0 transition duration-200 ease-in-out ${
+                    isSimplifiedDebts ? 'translate-x-4' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
 
-
-            {/* Expenses List: Hiển thị toàn bộ các khoản chi tiêu một cách đồng bộ */}
-            <div className="mt-4 space-y-2.5">
-              {unifiedExpenses.length === 0 ? (
-                <p className="text-xs text-slate-400 italic text-center py-8">
-                  {isVi ? 'Chưa có khoản chi tiêu nào.' : 'No expenses recorded.'}
-                </p>
+            <div className="mt-3.5 space-y-2.5">
+              {activeSettlements.length === 0 ? (
+                <div className="p-4 text-center bg-emerald-50/60 rounded-xl border border-emerald-100">
+                  <CheckCircle className="w-6 h-6 text-emerald-600 mx-auto mb-1" />
+                  <p className="text-xs font-semibold text-emerald-900">{t('expenses.allSettled')}</p>
+                  <p className="text-[11px] text-emerald-700 mt-0.5">
+                    {trip.members.length === 0
+                      ? (isVi ? 'Chưa có người tham gia.' : 'No participants to settle.')
+                      : fundRemaining >= 0
+                      ? (isVi ? 'Tất cả thành viên đều đã cân bằng.' : 'All members are settled.')
+                      : (isVi ? 'Không có công nợ cá nhân.' : t('expenses.noPendingDebts'))}
+                  </p>
+                </div>
               ) : (
-                unifiedExpenses.map((item) => {
-                  const linkedDay = item.dayNumber ? trip.days.find((d) => d.dayNumber === item.dayNumber) : null;
-                  const rawDate = linkedDay?.date || item.date;
-                  const dateStr = formatDisplayDate(rawDate);
-                  const dateLabel = item.dayNumber 
-                    ? `${isVi ? `Ngày ${item.dayNumber}` : `Day ${item.dayNumber}`}${dateStr ? ` · ${dateStr}` : ''}`
-                    : (dateStr || (isVi ? 'Chi tiêu thêm' : 'Manual'));
-
-                  return (
-                    <div 
-                      key={item.id} 
-                      onClick={() => handleOpenExpenseDetails(item)}
-                      className="p-3 sm:p-3.5 rounded-xl border border-slate-200/80 bg-slate-50/70 hover:bg-white hover:border-teal-300 hover:shadow-xs transition-all flex items-center justify-between gap-2.5 cursor-pointer group"
-                      title={isVi ? 'Bấm để xem chi tiết chi tiêu' : 'Click to view expense details'}
-                    >
-                      <div className="flex items-start gap-3 min-w-0 pr-2">
-                        <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 mt-0.5 transition-colors ${
-                          item.activityId 
-                            ? 'bg-emerald-100/90 text-emerald-700 group-hover:bg-emerald-200/90' 
-                            : 'bg-slate-200/80 text-slate-700 group-hover:bg-teal-100 group-hover:text-teal-700'
-                        }`}>
-                          {item.activityId ? <RefreshCw className="w-4 h-4" /> : <Receipt className="w-4 h-4" />}
-                        </div>
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <h4 className="text-xs sm:text-sm font-semibold text-slate-800 group-hover:text-teal-700 transition-colors truncate">
-                              {item.title}
-                            </h4>
-                            {item.activityId && (
-                              <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded-md shrink-0">
-                                {isVi ? 'Hoạt động' : 'Activity'}
-                              </span>
-                            )}
-                            {item.receiptImageUrl && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setViewingReceiptImage(item.receiptImageUrl!);
-                                }}
-                                className="text-[10px] font-medium text-violet-700 bg-violet-50 hover:bg-violet-100 border border-violet-200/80 px-1.5 py-0.2 rounded-md shrink-0 flex items-center gap-1 cursor-pointer transition-colors"
-                                title={isVi ? 'Xem ảnh hóa đơn' : 'View receipt image'}
-                              >
-                                <Camera className="w-3 h-3 text-violet-600" />
-                                <span>{isVi ? 'Hóa đơn' : 'Receipt'}</span>
-                              </button>
-                            )}
-                          </div>
-
-                          <p className="text-[11px] text-slate-500 mt-1 truncate flex items-center gap-1.5 flex-wrap">
-                            {item.paidBy === 'fund' ? (
-                              <span className="font-bold text-amber-800 bg-amber-100/90 px-1.5 py-0.5 rounded-md inline-flex items-center gap-1 shrink-0">
-                                <PiggyBank className="w-3 h-3 text-amber-700" />
-                                <span>{isVi ? 'Quỹ' : 'Group Fund'}</span>
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 font-semibold text-slate-700 truncate">
-                                <img
-                                  src={getMemberAvatar(item.paidBy)}
-                                  alt={getMemberName(item.paidBy)}
-                                  className="w-4 h-4 rounded-full object-cover border border-slate-200 shrink-0"
-                                />
-                                <span className="truncate">{getMemberName(item.paidBy)}</span>
-                              </span>
-                            )}
-                            <span className="shrink-0 text-slate-500">
-                              ({item.splitWith.length}{' '}
-                              {isVi
-                                ? 'người tham gia'
-                                : item.splitWith.length === 1
-                                ? 'participant'
-                                : 'participants'})
-                            </span>
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
-                        <div className="flex flex-col items-end text-right">
-                          {/* Phần ngày */}
-                          <span className="text-[10px] sm:text-[11px] font-bold text-emerald-700 bg-emerald-100/90 px-1.5 py-0.5 rounded-md shrink-0 flex items-center gap-1">
-                            <Calendar className="w-2.5 h-2.5 text-emerald-600" />
-                            <span>{dateLabel}</span>
-                          </span>
-
-                          {/* Số tiền nằm dưới phần ngày */}
-                          <span className="text-xs sm:text-sm font-extrabold text-slate-900 group-hover:text-teal-700 transition-colors mt-1">
-                            {formatMoney(item.amount, item.currency || trip.currency, lang)}
-                          </span>
-                        </div>
-
-                        {/* Nút Xem chi tiết & Chỉnh sửa */}
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleOpenExpenseDetails(item);
-                          }}
-                          className="p-1.5 text-slate-400 hover:text-teal-600 hover:bg-teal-50 rounded-lg transition-colors cursor-pointer"
-                          title={isVi ? 'Chi tiết chi tiêu' : 'Expense details'}
-                        >
-                          <Edit3 className="w-3.5 h-3.5" />
-                        </button>
-                        
-                        {/* Nút Xóa */}
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setExpenseToDelete(item);
-                          }}
-                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                          title={isVi ? 'Xóa chi tiêu' : 'Delete expense'}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
+                activeSettlements.map((s, idx) => (
+                  <div key={idx} className="p-3 bg-slate-50/80 hover:bg-slate-50 rounded-xl border border-slate-200/70 flex items-center justify-between gap-2 transition-colors">
+                    <div className="flex items-center gap-1.5 min-w-0 pr-1">
+                      <img
+                        src={getMemberAvatar(s.from)}
+                        alt={getMemberName(s.from)}
+                        className="w-5 h-5 rounded-full object-cover border border-white shadow-2xs shrink-0"
+                      />
+                      <p className="text-xs font-medium text-slate-800 truncate">
+                        <span className="text-slate-900 font-semibold">{getMemberName(s.from)}</span>{' '}
+                        <span className="text-rose-600 text-[11px] font-normal">{t('expenses.owes')}</span>{' '}
+                        <span className="text-teal-700 font-semibold">{getMemberName(s.to)}</span>
+                      </p>
+                      <img
+                        src={getMemberAvatar(s.to)}
+                        alt={getMemberName(s.to)}
+                        className="w-5 h-5 rounded-full object-cover border border-white shadow-2xs shrink-0"
+                      />
                     </div>
-                  );
-                })
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className="text-xs font-semibold text-rose-700 bg-rose-50 px-2.5 py-1 rounded-lg border border-rose-100 shrink-0">
+                        {formatMoney(s.amount, trip.currency, lang)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenVietQRModal(s)}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-[11px] font-bold transition-colors cursor-pointer shrink-0"
+                        title={isVi ? 'Tạo mã VietQR' : 'Generate VietQR code'}
+                      >
+                        <QrCode className="w-3.5 h-3.5" />
+                        <span>QR</span>
+                      </button>
+                    </div>
+                  </div>
+                ))
               )}
             </div>
           </div>
         </div>
-
-      </div>
+      )}
 
       {/* Modal: Thêm chi tiêu (Popup) */}
       {showExpenseForm && (
@@ -2755,12 +2713,19 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
                       const file = e.target.files?.[0];
                       e.target.value = '';
                       if (!file) return;
+                      const validation = validateImageUploadFile(file);
+                      if (!validation.valid) {
+                        setAddMemberError(isVi ? validation.errorVi! : validation.errorEn!);
+                        return;
+                      }
+                      setAddMemberError(null);
                       setIsCompressingNewMemberAvatar(true);
                       try {
                         const compressed = await compressAvatarImage(file);
                         setNewMemberAvatar(compressed);
                       } catch (err) {
                         console.warn('Error compressing member avatar:', err);
+                        setAddMemberError(isVi ? 'Không thể xử lý ảnh đại diện.' : 'Unable to process avatar image.');
                       } finally {
                         setIsCompressingNewMemberAvatar(false);
                       }
@@ -2885,51 +2850,60 @@ export const ExpenseSplitterView: React.FC<ExpenseSplitterViewProps> = ({
             </div>
 
             {(() => {
-              const paidCount = trip.expenses.filter((e) => e.paidBy === memberToDelete.id).length;
-              const hasContrib = (memberToDelete.contributedAmount || 0) > 0;
+              const { paidCount, contributedAmount, hasContrib, isBlockedByLedger } =
+                getMemberDeletionBlockInfo(memberToDelete);
               const isSplitting = trip.expenses.filter((e) => e.splitWith.includes(memberToDelete.id)).length;
 
-              if (paidCount > 0 || hasContrib) {
-                return (
-                  <div className="p-3 bg-rose-50 rounded-xl border border-rose-200 text-xs text-rose-800 space-y-1.5">
-                    <div className="font-bold flex items-center gap-1.5 text-rose-700">
-                      <AlertCircle className="w-4 h-4 shrink-0" />
-                      <span>{isVi ? 'Cảnh báo tài chính quan trọng:' : 'Important Financial Warning:'}</span>
-                    </div>
-                    <p className="text-[11px] leading-relaxed text-rose-700">
-                      {isVi
-                        ? `Thành viên này đã trực tiếp thanh toán ${paidCount} khoản chi ${hasContrib ? `và đã đóng góp quỹ ${formatMoney(memberToDelete.contributedAmount || 0, trip.currency)}` : ''}. Nếu xóa, các khoản chi sẽ tự động chuyển người trả sang thành viên khác. Bạn có chắc chắn muốn xóa không?`
-                        : `This member has paid for ${paidCount} expenses ${hasContrib ? `and contributed ${formatMoney(memberToDelete.contributedAmount || 0, trip.currency)} to the group fund` : ''}. Deleting them will automatically reassign payer to another member. Confirm removal?`}
-                    </p>
-                  </div>
-                );
-              }
-
               return (
-                <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-800">
-                  {isVi 
-                    ? `Thành viên này đang tham gia vào ${isSplitting} khoản chia chi phí. Khi xóa, các phần chia sẽ được tự động phân bổ lại cho các thành viên còn lại.` 
-                    : `This member is part of ${isSplitting} expense splits. Deleting them will redistribute the shares evenly among remaining members.`}
-                </div>
+                <>
+                  {isBlockedByLedger ? (
+                    <div className="p-3 bg-rose-50 rounded-xl border border-rose-200 text-xs text-rose-800 space-y-1.5">
+                      <div className="font-bold flex items-center gap-1.5 text-rose-700">
+                        <AlertCircle className="w-4 h-4 shrink-0" />
+                        <span>{isVi ? 'Không thể xóa thành viên (VAL-BIZ-03)' : 'Cannot Delete Member (VAL-BIZ-03)'}</span>
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-rose-700">
+                        {isVi
+                          ? `Thành viên này ${
+                              paidCount > 0 ? `đã trực tiếp thanh toán ${paidCount} khoản chi` : ''
+                            }${paidCount > 0 && hasContrib ? ' và ' : ''}${
+                              hasContrib ? `đã đóng góp quỹ ${formatMoney(contributedAmount, trip.currency)}` : ''
+                            }. Để bảo toàn tính toàn vẹn sổ cái tài chính, hệ thống chặn xóa thành viên đã phát sinh giao dịch hoặc góp quỹ.`
+                          : `This member ${
+                              paidCount > 0 ? `has paid ${paidCount} expense(s)` : ''
+                            }${paidCount > 0 && hasContrib ? ' and ' : ''}${
+                              hasContrib ? `contributed ${formatMoney(contributedAmount, trip.currency)} to the group fund` : ''
+                            }. Deletion is blocked to preserve financial ledger integrity.`}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-800">
+                      {isVi
+                        ? `Thành viên này đang tham gia vào ${isSplitting} khoản chia chi phí. Khi xóa, các phần chia sẽ được tự động phân bổ lại cho các thành viên còn lại.`
+                        : `This member is part of ${isSplitting} expense splits. Deleting them will redistribute the shares evenly among remaining members.`}
+                    </div>
+                  )}
+
+                  <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => setMemberToDelete(null)}
+                      className="px-3.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                    >
+                      {isVi ? 'Hủy' : 'Cancel'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isBlockedByLedger}
+                      onClick={handleConfirmDeleteMember}
+                      className="px-4 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl shadow-xs cursor-pointer transition-colors"
+                    >
+                      {isVi ? 'Xác nhận' : 'Confirm'}
+                    </button>
+                  </div>
+                </>
               );
             })()}
-
-            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => setMemberToDelete(null)}
-                className="px-3.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
-              >
-                {isVi ? 'Hủy' : 'Cancel'}
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmDeleteMember}
-                className="px-4 py-1.5 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow-xs cursor-pointer transition-colors"
-              >
-                {isVi ? 'Xác nhận' : 'Confirm'}
-              </button>
-            </div>
           </div>
         </div>
       )}

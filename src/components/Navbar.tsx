@@ -11,6 +11,7 @@ import { useAuth } from '../context/AuthContext';
 import { ForgotPasswordFlow } from './ForgotPasswordFlow';
 import { PWAInstallButton } from './PWAInstallButton';
 import { compressAvatarImage } from '../utils/imageUtils';
+import { validateImageUploadFile } from '../utils/fileValidationUtils';
 
 interface NavbarProps {
   trips: Trip[];
@@ -161,8 +162,9 @@ export const Navbar: React.FC<NavbarProps> = ({
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
-    if (!file.type.startsWith('image/')) {
-      setSheetErrorMsg(isVi ? 'Vui lòng chọn tệp hình ảnh hợp lệ (PNG, JPG, WEBP).' : 'Please select a valid image file.');
+    const validation = validateImageUploadFile(file);
+    if (!validation.valid) {
+      setSheetErrorMsg(isVi ? validation.errorVi! : validation.errorEn!);
       return;
     }
     setSheetErrorMsg(null);
@@ -273,17 +275,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <MessageSquare className={`w-3.5 h-3.5 ${!activeTrip ? 'text-slate-400' : 'text-teal-600'}`} />
                 <span>{isVi ? 'Trợ lý AI' : 'AI Assistant'}</span>
               </button>
-
-              {/* Language Switcher Desktop */}
-              <button
-                type="button"
-                onClick={toggleLanguage}
-                className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 transition-colors cursor-pointer min-h-[36px]"
-                title={isVi ? 'Switch to English' : 'Chuyển sang Tiếng Việt'}
-              >
-                <Globe className="w-3.5 h-3.5 text-teal-600" />
-                <span>{isVi ? 'Tiếng Việt' : 'English'}</span>
-              </button>
             </div>
 
             {/* Notification Bell (Both Mobile & Desktop) */}
@@ -295,15 +286,15 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <Bell className="w-4 h-4 text-slate-700" />
               {totalUnreadNotificationsCount > 0 && (
-                <span className="absolute -top-1 -right-1 flex h-4 min-w-[16px] px-1 items-center justify-center rounded-full bg-rose-600 text-[9px] font-extrabold text-white shadow-xs animate-pulse">
+                <span className="absolute -top-1 -right-1 flex h-4 min-w-[16px] px-1 items-center justify-center rounded-full bg-rose-600 text-[9px] font-extrabold text-white shadow-xs">
                   {totalUnreadNotificationsCount}
                 </span>
               )}
             </button>
 
-            {/* Desktop User Profile Button */}
+            {/* Desktop User Profile Button (Language & Sign Out consolidated inside Profile Modal) */}
             {userProfile ? (
-              <div className="hidden sm:flex items-center gap-1.5">
+              <div className="hidden sm:flex items-center">
                 <button
                   type="button"
                   onClick={() => openAuthModal('profile')}
@@ -318,16 +309,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                   <span className="max-w-[110px] truncate font-bold text-teal-900">
                     {userProfile.displayName}
                   </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    await logout();
-                  }}
-                  className="inline-flex items-center justify-center p-2 rounded-xl text-slate-500 hover:text-rose-600 hover:bg-rose-50 border border-slate-200 transition-colors cursor-pointer min-h-[36px]"
-                  title={isVi ? 'Đăng xuất' : 'Sign Out'}
-                >
-                  <LogOut className="w-4 h-4" />
                 </button>
               </div>
             ) : (

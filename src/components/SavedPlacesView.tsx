@@ -50,16 +50,21 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
     setSelectedCity(matchingTripCity);
   }, [activeTrip?.id]);
 
-  // City Searchable Droplist state
+  // Compact Filters popover state (City, Category, Rating)
+  const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(false);
   const [isCityDropdownOpen, setIsCityDropdownOpen] = useState(false);
   const [citySearchInput, setCitySearchInput] = useState('');
   const cityDropdownRef = useRef<HTMLDivElement>(null);
+  const filterPanelRef = useRef<HTMLDivElement>(null);
 
-  // Close city dropdown on click outside
+  // Close popovers on click outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (cityDropdownRef.current && !cityDropdownRef.current.contains(event.target as Node)) {
         setIsCityDropdownOpen(false);
+      }
+      if (filterPanelRef.current && !filterPanelRef.current.contains(event.target as Node)) {
+        setIsFilterPanelOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -284,184 +289,206 @@ export const SavedPlacesView: React.FC<SavedPlacesViewProps> = ({
           </button>
         </div>
 
-        {/* Search, City Droplist & Category Filter Row */}
-        <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 pt-1">
-            
-            {/* 1. City Searchable Droplist (Search-Like) */}
-            <div className="sm:col-span-3 relative" ref={cityDropdownRef}>
+        {/* Compact 1-Row Filter Bar: Search Input + Filters Popover Button */}
+        <div className="flex items-center gap-2 pt-1">
+          {/* 1. Text Search Input */}
+          <div className="flex-1 relative min-w-0">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder={isVi ? 'Tìm quán, địa chỉ, ghi chú...' : 'Search name, address, notes...'}
+              className="w-full text-xs pl-8 pr-7 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white text-slate-800 placeholder:text-slate-400 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
+            />
+            {searchQuery && (
               <button
                 type="button"
-                onClick={() => setIsCityDropdownOpen(!isCityDropdownOpen)}
-                className={`w-full flex items-center justify-between text-xs font-semibold py-2 px-2.5 rounded-xl border transition-colors shadow-2xs cursor-pointer truncate ${
-                  selectedCity !== 'all'
-                    ? 'border-teal-500 bg-teal-50/70 text-teal-900 font-bold'
-                    : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
-                }`}
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 cursor-pointer"
               >
-                <span className="truncate flex items-center gap-1.5">
-                  <MapPin className="w-3.5 h-3.5 text-teal-600 shrink-0" />
-                  <span className="truncate">
-                    {selectedCity === 'all'
-                      ? (isVi ? `Tất cả thành phố (${savedPlaces.length})` : `All Cities (${savedPlaces.length})`)
-                      : `${selectedCity} (${savedPlaces.filter((p) => p.cityName.toLowerCase() === selectedCity.toLowerCase()).length})`}
-                  </span>
-                </span>
-                <div className="flex items-center gap-1 shrink-0 ml-1">
-                  {selectedCity !== 'all' && (
-                    <span
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedCity('all');
-                        setCitySearchInput('');
-                      }}
-                      className="p-0.5 hover:bg-teal-200/60 rounded text-teal-700"
-                      title={isVi ? 'Hiện tất cả thành phố' : 'Show all cities'}
-                    >
-                      <X className="w-3 h-3" />
-                    </span>
-                  )}
-                  <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isCityDropdownOpen ? 'rotate-180' : ''}`} />
-                </div>
+                <X className="w-3.5 h-3.5" />
               </button>
+            )}
+          </div>
 
-              {/* City Search Droplist Popover Menu */}
-              {isCityDropdownOpen && (
-                <div className="absolute left-0 top-full mt-1.5 w-72 max-w-[calc(100vw-2.5rem)] bg-white rounded-2xl border border-slate-200 shadow-xl z-40 p-2.5 space-y-2 animate-in fade-in zoom-in-95 duration-100">
-                  {/* Search input inside city droplist */}
-                  <div className="relative">
-                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                    <input
-                      type="text"
-                      autoFocus
-                      value={citySearchInput}
-                      onChange={(e) => setCitySearchInput(e.target.value)}
-                      placeholder={isVi ? 'Tìm thành phố (Đà Lạt, Tokyo...)...' : 'Search city (Da Lat, Tokyo...)...'}
-                      className="w-full text-xs pl-8 pr-7 py-2 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white text-slate-800 placeholder:text-slate-400 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
-                    />
-                    {citySearchInput && (
-                      <button
-                        type="button"
-                        onClick={() => setCitySearchInput('')}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Cities list */}
-                  <div className="max-h-56 overflow-y-auto space-y-1 pr-0.5">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedCity('all');
-                        setIsCityDropdownOpen(false);
-                        setCitySearchInput('');
-                      }}
-                      className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
-                        selectedCity === 'all'
-                          ? 'bg-teal-50 text-teal-800 font-bold'
-                          : 'text-slate-700 hover:bg-slate-100'
-                      }`}
-                    >
-                      <span>{isVi ? `📍 Tất cả thành phố (${savedPlaces.length})` : `📍 All Cities (${savedPlaces.length})`}</span>
-                      {selectedCity === 'all' && <span className="text-teal-600 text-xs">✓</span>}
-                    </button>
-
-                    {filteredCitiesForDropdown.map((city) => {
-                      const count = savedPlaces.filter((p) => p.cityName.toLowerCase() === city.toLowerCase()).length;
-                      const isSelected = selectedCity.toLowerCase() === city.toLowerCase();
-                      return (
-                        <button
-                          key={city}
-                          type="button"
-                          onClick={() => {
-                            setSelectedCity(city);
-                            setIsCityDropdownOpen(false);
-                            setCitySearchInput('');
-                          }}
-                          className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
-                            isSelected
-                              ? 'bg-teal-50 text-teal-800 font-bold'
-                              : 'text-slate-700 hover:bg-slate-100'
-                          }`}
-                        >
-                          <span className="truncate">{city}</span>
-                          <span className="text-[11px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 ml-1 shrink-0">
-                            {count} {isVi ? 'địa điểm' : (count === 1 ? 'place' : 'places')}
-                          </span>
-                        </button>
-                      );
-                    })}
-
-                    {filteredCitiesForDropdown.length === 0 && (
-                      <div className="text-center py-3 text-xs text-slate-400 italic">
-                        {isVi ? 'Không tìm thấy thành phố' : 'No matching cities'}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* 2. Text Search Input */}
-            <div className="sm:col-span-4 relative">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder={isVi ? 'Tìm theo tên quán, địa chỉ, ai mách...' : 'Search place name, address, notes...'}
-                className="w-full text-xs pl-8 pr-7 py-2 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white text-slate-800 placeholder:text-slate-400 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
-              />
-              {searchQuery && (
+          {/* 2. Consolidated Bộ lọc (Filters) Popover */}
+          <div className="relative shrink-0" ref={filterPanelRef}>
+            {(() => {
+              const activeFilterCount =
+                (selectedCity !== 'all' ? 1 : 0) +
+                (selectedCategory !== 'all' ? 1 : 0) +
+                (selectedRating !== 'all' ? 1 : 0);
+              return (
                 <button
                   type="button"
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5"
+                  onClick={() => setIsFilterPanelOpen(!isFilterPanelOpen)}
+                  className={`px-3.5 py-2.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer min-h-[38px] ${
+                    activeFilterCount > 0
+                      ? 'border-teal-500 bg-teal-50 text-teal-900'
+                      : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                  }`}
                 >
-                  <X className="w-3.5 h-3.5" />
+                  <Filter className="w-3.5 h-3.5 text-teal-600" />
+                  <span>{isVi ? 'Bộ lọc' : 'Filters'}</span>
+                  {activeFilterCount > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-teal-600 text-white text-[10px] font-bold">
+                      {activeFilterCount}
+                    </span>
+                  )}
                 </button>
-              )}
-            </div>
+              );
+            })()}
 
-            {/* 3. Category Select */}
-            <div className="sm:col-span-3 relative">
-              <select
-                value={selectedCategory}
-                onChange={(e) => setSelectedCategory(e.target.value)}
-                className="w-full text-xs font-semibold py-2 px-2.5 rounded-xl border border-slate-200 bg-white text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-teal-500 cursor-pointer"
-              >
-                {categories.map((c) => (
-                  <option key={c.value} value={c.value}>
-                    {c.label}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {isFilterPanelOpen && (
+              <div className="fixed inset-x-3 bottom-20 sm:inset-x-auto sm:bottom-auto sm:absolute sm:right-0 sm:top-full sm:mt-1.5 sm:w-80 bg-white rounded-2xl border border-slate-200 shadow-2xl z-40 p-4 space-y-3 animate-in fade-in zoom-in-95 duration-100">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                  <span className="text-xs font-bold text-slate-900">
+                    {isVi ? 'Lọc địa điểm' : 'Filter Places'}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    {(selectedCity !== 'all' || selectedCategory !== 'all' || selectedRating !== 'all') && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedCity('all');
+                          setSelectedCategory('all');
+                          setSelectedRating('all');
+                          setCitySearchInput('');
+                        }}
+                        className="text-[11px] font-semibold text-teal-600 hover:text-teal-800 cursor-pointer"
+                      >
+                        {isVi ? 'Đặt lại' : 'Reset'}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setIsFilterPanelOpen(false)}
+                      className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
 
-            {/* 4. Rating Filter */}
-            <div className="sm:col-span-2 relative">
-              <select
-                value={String(selectedRating)}
-                onChange={(e) => setSelectedRating(e.target.value === 'all' ? 'all' : parseInt(e.target.value, 10))}
-                className={`w-full text-xs font-semibold py-2 px-2.5 rounded-xl border cursor-pointer transition-colors ${
-                  selectedRating !== 'all'
-                    ? 'border-amber-400 bg-amber-50 text-amber-900 font-bold'
-                    : 'border-slate-200 bg-white text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-teal-500'
-                }`}
-              >
-                <option value="all">{isVi ? '⭐ Tất cả sao' : '⭐ All stars'}</option>
-                <option value="5">⭐⭐⭐⭐⭐ 5 sao</option>
-                <option value="4">⭐⭐⭐⭐ 4 sao</option>
-                <option value="3">⭐⭐⭐ 3 sao</option>
-                <option value="2">⭐⭐ 2 sao</option>
-                <option value="1">⭐ 1 sao</option>
-              </select>
-            </div>
+                {/* City Filter */}
+                <div className="space-y-1 relative" ref={cityDropdownRef}>
+                  <label className="block text-[11px] font-semibold text-slate-600">
+                    {isVi ? 'Thành phố' : 'City'}
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setIsCityDropdownOpen(!isCityDropdownOpen)}
+                    className="w-full flex items-center justify-between text-xs font-semibold py-2 px-2.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-white text-slate-800 cursor-pointer truncate"
+                  >
+                    <span className="truncate flex items-center gap-1.5">
+                      <MapPin className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                      <span className="truncate">
+                        {selectedCity === 'all'
+                          ? (isVi ? `Tất cả thành phố (${savedPlaces.length})` : `All Cities (${savedPlaces.length})`)
+                          : `${selectedCity} (${savedPlaces.filter((p) => p.cityName.toLowerCase() === selectedCity.toLowerCase()).length})`}
+                      </span>
+                    </span>
+                    <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isCityDropdownOpen ? 'rotate-180' : ''}`} />
+                  </button>
 
+                  {isCityDropdownOpen && (
+                    <div className="mt-1 bg-white rounded-xl border border-slate-200 shadow-lg p-2 space-y-1.5 max-h-48 overflow-y-auto">
+                      <input
+                        type="text"
+                        value={citySearchInput}
+                        onChange={(e) => setCitySearchInput(e.target.value)}
+                        placeholder={isVi ? 'Tìm thành phố...' : 'Search city...'}
+                        className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedCity('all');
+                          setIsCityDropdownOpen(false);
+                          setCitySearchInput('');
+                        }}
+                        className={`w-full text-left px-2 py-1.5 rounded-lg text-xs font-medium flex items-center justify-between cursor-pointer ${
+                          selectedCity === 'all' ? 'bg-teal-50 text-teal-800 font-bold' : 'text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        <span>{isVi ? 'Tất cả thành phố' : 'All Cities'}</span>
+                        <span className="text-[11px] text-slate-400">{savedPlaces.length}</span>
+                      </button>
+                      {filteredCitiesForDropdown.map((city) => {
+                        const count = savedPlaces.filter((p) => p.cityName.toLowerCase() === city.toLowerCase()).length;
+                        const isSelected = selectedCity.toLowerCase() === city.toLowerCase();
+                        return (
+                          <button
+                            key={city}
+                            type="button"
+                            onClick={() => {
+                              setSelectedCity(city);
+                              setIsCityDropdownOpen(false);
+                              setCitySearchInput('');
+                            }}
+                            className={`w-full text-left px-2 py-1.5 rounded-lg text-xs font-medium flex items-center justify-between cursor-pointer ${
+                              isSelected ? 'bg-teal-50 text-teal-800 font-bold' : 'text-slate-700 hover:bg-slate-100'
+                            }`}
+                          >
+                            <span className="truncate">{city}</span>
+                            <span className="text-[11px] text-slate-400 shrink-0 ml-1">{count}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Category Select */}
+                <div className="space-y-1">
+                  <label className="block text-[11px] font-semibold text-slate-600">
+                    {isVi ? 'Thể loại' : 'Category'}
+                  </label>
+                  <select
+                    value={selectedCategory}
+                    onChange={(e) => setSelectedCategory(e.target.value)}
+                    className="w-full text-xs font-semibold py-2 px-2.5 rounded-xl border border-slate-200 bg-slate-50 text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-teal-500 cursor-pointer"
+                  >
+                    {categories.map((c) => (
+                      <option key={c.value} value={c.value}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Rating Filter */}
+                <div className="space-y-1">
+                  <label className="block text-[11px] font-semibold text-slate-600">
+                    {isVi ? 'Đánh giá' : 'Rating'}
+                  </label>
+                  <select
+                    value={String(selectedRating)}
+                    onChange={(e) => setSelectedRating(e.target.value === 'all' ? 'all' : parseInt(e.target.value, 10))}
+                    className="w-full text-xs font-semibold py-2 px-2.5 rounded-xl border border-slate-200 bg-slate-50 text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-teal-500 cursor-pointer"
+                  >
+                    <option value="all">{isVi ? '⭐ Tất cả sao' : '⭐ All stars'}</option>
+                    <option value="5">⭐⭐⭐⭐⭐ 5 {isVi ? 'sao' : 'stars'}</option>
+                    <option value="4">⭐⭐⭐⭐ 4 {isVi ? 'sao' : 'stars'}</option>
+                    <option value="3">⭐⭐⭐ 3 {isVi ? 'sao' : 'stars'}</option>
+                    <option value="2">⭐⭐ 2 {isVi ? 'sao' : 'stars'}</option>
+                    <option value="1">⭐ 1 {isVi ? 'sao' : 'star'}</option>
+                  </select>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setIsFilterPanelOpen(false)}
+                  className="w-full py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl cursor-pointer transition-colors"
+                >
+                  {isVi ? `Xem ${filteredPlaces.length} địa điểm` : `Show ${filteredPlaces.length} places`}
+                </button>
+              </div>
+            )}
           </div>
         </div>
+      </div>
 
       {/* Places Grid (Đã lưu) */}
       {filteredPlaces.length > 0 ? (

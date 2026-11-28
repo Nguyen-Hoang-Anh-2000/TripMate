@@ -32,7 +32,7 @@ import { filterTripsForUser, getUserTripsCacheKey } from './utils/tripAccessUtil
 import { 
   Calendar, MapPin, DollarSign, CloudSun, Users, Compass, 
   Map as MapIcon, BookmarkCheck, CreditCard, CheckSquare, ShieldCheck, Sparkles, Plus, Share2,
-  Edit3, Trash2, Camera, Printer, Wifi, WifiOff, MoreHorizontal, MoreVertical, ChevronRight, X,
+  Edit3, Trash2, Camera, Printer, Wifi, WifiOff, MoreHorizontal, ChevronRight, X,
   Wallet, Receipt
 } from 'lucide-react';
 import { RealtimeWeatherBadge } from './components/RealtimeWeatherBadge';
@@ -111,6 +111,8 @@ function AppContent() {
   const [isAiPackingLoading, setIsAiPackingLoading] = useState(false);
   const [isHandbookModalOpen, setIsHandbookModalOpen] = useState(false);
   const [isTripActionMenuOpen, setIsTripActionMenuOpen] = useState(false);
+  const [isDesktopTripMenuOpen, setIsDesktopTripMenuOpen] = useState(false);
+  const desktopTripMenuRef = React.useRef<HTMLDivElement>(null);
   const [isDeleteTripConfirmOpen, setIsDeleteTripConfirmOpen] = useState(false);
   const [tripPendingDelete, setTripPendingDelete] = useState<Trip | null>(null);
   const [isDeletingTrip, setIsDeletingTrip] = useState(false);
@@ -118,6 +120,16 @@ function AppContent() {
   const [appNotice, setAppNotice] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState<boolean>(true);
   const [showOnlineToast, setShowOnlineToast] = useState<boolean>(false);
+
+  useEffect(() => {
+    const handleOutsideMenu = (e: MouseEvent) => {
+      if (desktopTripMenuRef.current && !desktopTripMenuRef.current.contains(e.target as Node)) {
+        setIsDesktopTripMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideMenu);
+    return () => document.removeEventListener('mousedown', handleOutsideMenu);
+  }, []);
   const [invitationToast, setInvitationToast] = useState<string | null>(null);
   const [isQuickAddFabOpen, setIsQuickAddFabOpen] = useState(false);
   const [quickAddActivitySeq, setQuickAddActivitySeq] = useState(0);
@@ -897,6 +909,14 @@ function AppContent() {
     updateActiveTrip((trip) => {
       if (trip.members.length <= 1) return trip;
       const deletedMember = trip.members.find((m) => m.id === memberId);
+      const hasPaidExpense = trip.expenses.some((e) => e.paidBy === memberId);
+      const hasPaidActivity = trip.days.some((d) =>
+        d.activities.some((a) => a.isCompleted && a.paidBy === memberId)
+      );
+      const hasContribution = (deletedMember?.contributedAmount || 0) > 0;
+      if (hasPaidExpense || hasPaidActivity || hasContribution) {
+        return trip;
+      }
       const updatedMembers = trip.members.filter((m) => m.id !== memberId);
       const fallbackMemberId = updatedMembers[0].id;
       const nextMemberUids = Array.isArray(trip.memberUids)
@@ -1715,8 +1735,8 @@ function AppContent() {
     { id: 'itinerary', label: t('tab.itinerary'), icon: <Compass className="w-4 h-4" /> },
     { id: 'expenses', label: t('tab.expenses'), icon: <CreditCard className="w-4 h-4" /> },
     { id: 'map', label: t('tab.map'), icon: <MapIcon className="w-4 h-4" /> },
-    { id: 'places', label: t('tab.places'), icon: <BookmarkCheck className="w-4 h-4" /> },
-    { id: 'vault', label: t('tab.vault'), icon: <ShieldCheck className="w-4 h-4" /> },
+    { id: 'places', label: t('tab.places'), mobileLabel: isVi ? 'Địa điểm' : 'Places', icon: <BookmarkCheck className="w-4 h-4" /> },
+    { id: 'vault', label: t('tab.vault'), mobileLabel: isVi ? 'Vé' : 'Vault', icon: <ShieldCheck className="w-4 h-4" /> },
     { id: 'packing', label: t('tab.packing'), icon: <CheckSquare className="w-4 h-4" /> },
   ];
 
@@ -1763,8 +1783,8 @@ function AppContent() {
               </h2>
               <p className="text-xs sm:text-sm text-slate-500 leading-relaxed">
                 {isVi
-                  ? 'Bạn chỉ xem được các chuyến đi do chính mình tạo hoặc đã đồng ý tham gia. Hãy tạo chuyến đi mới hoặc kiểm tra thông báo để nhận lời mời.'
-                  : 'You can only view trips you created or joined. Create a new trip or check notifications for pending invitations.'}
+                  ? 'Tạo chuyến đi đầu tiên hoặc kiểm tra lời mời của bạn.'
+                  : 'Create your first trip or check pending invites.'}
               </p>
             </div>
             <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5 pt-2">
@@ -1817,75 +1837,97 @@ function AppContent() {
               </span>
             </div>
 
-            {/* Mobile Only: Single Frosted Glass Vertical 3-Dots Button (⋮) */}
-            <div className="sm:hidden shrink-0">
-              <button
-                type="button"
-                onClick={() => setIsTripActionMenuOpen(true)}
-                aria-label={isVi ? 'Tùy chọn chuyến đi' : 'Trip options'}
-                className="w-9 h-9 rounded-xl bg-white/20 hover:bg-white/30 active:scale-95 text-white backdrop-blur-md border border-white/25 transition-all flex items-center justify-center cursor-pointer shadow-xs"
-                title={isVi ? 'Tùy chọn chuyến đi' : 'Trip options'}
-              >
-                <MoreVertical className="w-4 h-4 text-white" />
-              </button>
-            </div>
-
-            {/* Desktop Only: Full 4 Action Buttons */}
-            <div className="hidden sm:flex items-center gap-1.5 shrink-0">
-              {/* Export Travel Handbook / Print PDF */}
-              <button
-                type="button"
-                onClick={() => setIsHandbookModalOpen(true)}
-                className="px-2.5 py-1.5 bg-white/20 hover:bg-white/30 text-white rounded-xl text-xs font-semibold backdrop-blur-md border border-white/20 flex items-center gap-1 transition-all cursor-pointer shadow-sm"
-                title={isVi ? 'Xuất cẩm nang / In PDF' : 'Travel Handbook / Print PDF'}
-              >
-                <Printer className="w-3.5 h-3.5 text-white" />
-                <span>{isVi ? 'Cẩm nang' : 'Handbook'}</span>
-              </button>
-
-              {/* Edit Trip Button */}
-              <button
-                type="button"
-                onClick={() => setIsEditTripModalOpen(true)}
-                className="px-2.5 py-1.5 bg-white/20 hover:bg-white/30 text-white rounded-xl text-xs font-semibold backdrop-blur-md border border-white/20 flex items-center gap-1 transition-all cursor-pointer shadow-sm"
-                title={isVi ? 'Sửa chuyến đi' : 'Edit Trip'}
-              >
-                <Edit3 className="w-3.5 h-3.5 text-white" />
-                <span>{isVi ? 'Sửa' : 'Edit'}</span>
-              </button>
-
-              {/* Delete Trip Button */}
-              <button
-                type="button"
-                onClick={handleDeleteTrip}
-                className={`px-2.5 py-1.5 rounded-xl transition-all flex items-center gap-1 text-xs font-semibold backdrop-blur-md cursor-pointer shadow-sm ${
-                  hasCompletedActivities
-                    ? 'bg-black/30 text-white/40 border border-white/10 cursor-not-allowed opacity-60'
-                    : 'bg-rose-500/80 hover:bg-rose-600 text-white border border-rose-400/30'
-                }`}
-                title={
-                  hasCompletedActivities
-                    ? (isVi ? 'Chỉ được xóa chuyến đi nếu chưa có hoạt động nào hoàn thành' : 'Cannot delete: has completed activities')
-                    : (isVi ? 'Xóa chuyến đi' : 'Delete Trip')
-                }
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>{isVi ? 'Xóa' : 'Delete'}</span>
-              </button>
-
-              {/* AI Itinerary Architect Button */}
+            {/* Banner Actions (1 Primary CTA: AI Itinerary + 1 Overflow Menu: Handbook / Edit / Delete) */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              {/* Primary CTA: AI Itinerary */}
               <button
                 type="button"
                 onClick={() => {
                   setAiTargetTrip(activeTrip);
                   setIsAIModalOpen(true);
                 }}
-                className="px-2.5 py-1.5 bg-teal-500 hover:bg-teal-600 text-white border border-teal-400/40 rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-sm group/ai"
+                className="px-2.5 sm:px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white border border-teal-400/40 rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-sm min-h-[36px]"
                 title={isVi ? 'Lịch trình AI' : 'AI Itinerary'}
+                aria-label={isVi ? 'Lịch trình AI' : 'AI Itinerary'}
               >
-                <Sparkles className="w-3.5 h-3.5 text-white group-hover/ai:rotate-12 transition-transform" />
-                <span className="text-[11px] font-bold tracking-wide text-white">{isVi ? 'Lịch trình AI' : 'AI Itinerary'}</span>
+                <Sparkles className="w-3.5 h-3.5 text-white shrink-0" />
+                <span className="text-[11px] font-bold tracking-wide text-white whitespace-nowrap">
+                  AI
+                </span>
               </button>
+
+              {/* Mobile Overflow Button (⋯ opens bottom sheet) */}
+              <button
+                type="button"
+                onClick={() => setIsTripActionMenuOpen(true)}
+                aria-label={isVi ? 'Tùy chọn chuyến đi' : 'Trip options'}
+                className="sm:hidden w-9 h-9 rounded-xl bg-white/20 hover:bg-white/30 active:scale-95 text-white backdrop-blur-md border border-white/25 transition-all flex items-center justify-center cursor-pointer shadow-xs"
+                title={isVi ? 'Tùy chọn chuyến đi' : 'Trip options'}
+              >
+                <MoreHorizontal className="w-4 h-4 text-white" />
+              </button>
+
+              {/* Desktop Overflow Button (⋯ opens popover menu with Handbook / Edit / Delete) */}
+              <div ref={desktopTripMenuRef} className="hidden sm:block relative">
+                <button
+                  type="button"
+                  onClick={() => setIsDesktopTripMenuOpen((prev) => !prev)}
+                  aria-label={isVi ? 'Tùy chọn chuyến đi' : 'Trip options'}
+                  aria-expanded={isDesktopTripMenuOpen}
+                  className="w-9 h-9 rounded-xl bg-white/20 hover:bg-white/30 text-white backdrop-blur-md border border-white/25 transition-all flex items-center justify-center cursor-pointer shadow-xs"
+                  title={isVi ? 'Tùy chọn chuyến đi' : 'Trip options'}
+                >
+                  <MoreHorizontal className="w-4 h-4 text-white" />
+                </button>
+
+                {isDesktopTripMenuOpen && (
+                  <div className="absolute right-0 top-full mt-1.5 w-48 bg-white rounded-2xl border border-slate-200 shadow-xl py-1.5 z-40 animate-in fade-in zoom-in-95 duration-100">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsDesktopTripMenuOpen(false);
+                        setIsHandbookModalOpen(true);
+                      }}
+                      className="w-full px-3.5 py-2 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2.5 cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5 text-slate-500" />
+                      <span>{isVi ? 'Cẩm nang' : 'Handbook'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsDesktopTripMenuOpen(false);
+                        setIsEditTripModalOpen(true);
+                      }}
+                      className="w-full px-3.5 py-2 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2.5 cursor-pointer"
+                    >
+                      <Edit3 className="w-3.5 h-3.5 text-slate-500" />
+                      <span>{isVi ? 'Sửa' : 'Edit'}</span>
+                    </button>
+                    <div className="my-1 border-t border-slate-100" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsDesktopTripMenuOpen(false);
+                        handleDeleteTrip();
+                      }}
+                      className={`w-full px-3.5 py-2 text-left text-xs font-semibold flex items-center gap-2.5 ${
+                        hasCompletedActivities
+                          ? 'text-slate-400 cursor-not-allowed opacity-60'
+                          : 'text-rose-600 hover:bg-rose-50 cursor-pointer'
+                      }`}
+                      title={
+                        hasCompletedActivities
+                          ? (isVi ? 'Chỉ được xóa chuyến đi nếu chưa có hoạt động nào hoàn thành' : 'Cannot delete: has completed activities')
+                          : (isVi ? 'Xóa chuyến đi' : 'Delete Trip')
+                      }
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>{isVi ? 'Xóa' : 'Delete'}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -1921,6 +1963,7 @@ function AppContent() {
           tabs={tabs}
           activeTab={activeTab}
           onSelectTab={(tabId) => setActiveTab(tabId as TabType)}
+          mobileMoreTabIds={['vault', 'packing']}
         />
 
         {/* Tab View Contents */}
@@ -2050,11 +2093,11 @@ function AppContent() {
             type="button"
             onClick={() => setIsQuickAddFabOpen((prev) => !prev)}
             aria-label={isVi ? 'Thao tác nhanh' : 'Quick Add'}
-            className={`w-13 h-13 rounded-full bg-gradient-to-tr from-teal-600 to-emerald-500 text-white shadow-xl border-2 border-white/80 flex items-center justify-center transition-transform cursor-pointer ${
+            className={`w-12 h-12 rounded-full bg-slate-900 hover:bg-slate-800 text-white shadow-xl border border-white/25 flex items-center justify-center transition-transform cursor-pointer ${
               isQuickAddFabOpen ? 'rotate-45' : 'active:scale-95'
             }`}
           >
-            <Plus className="w-6 h-6" />
+            <Plus className="w-5 h-5" />
           </button>
         </div>
       )}
@@ -2170,35 +2213,8 @@ function AppContent() {
               </button>
             </div>
 
-            {/* Actions list - minimum 48px touch targets */}
+            {/* Actions list - secondary trip actions tucked inside ⋯ menu (AI Itinerary is primary on Banner) */}
             <div className="space-y-2">
-              {/* AI Itinerary Architect */}
-              <button
-                type="button"
-                onClick={() => {
-                  setAiTargetTrip(activeTrip);
-                  setIsAIModalOpen(true);
-                  setIsTripActionMenuOpen(false);
-                }}
-                className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-gradient-to-r from-teal-500/10 via-emerald-500/10 to-teal-500/5 hover:bg-teal-500/20 active:scale-[0.99] border border-teal-500/20 transition-all text-left cursor-pointer group"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-teal-500 text-white flex items-center justify-center shadow-xs shrink-0 group-hover:scale-105 transition-transform">
-                    <Sparkles className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
-                      <span>{isVi ? 'Lịch trình AI' : 'AI Itinerary'}</span>
-                      <span className="text-[10px] font-extrabold uppercase px-1.5 py-0.2 rounded bg-teal-500 text-white">Gemini</span>
-                    </div>
-                    <div className="text-xs text-slate-500">
-                      {isVi ? 'Tự động lập lịch trình, gợi ý điểm đến & dự toán' : 'Auto-generate schedule, spots & budget'}
-                    </div>
-                  </div>
-                </div>
-                <ChevronRight className="w-5 h-5 text-slate-400 shrink-0" />
-              </button>
-
               {/* Export Travel Handbook PDF */}
               <button
                 type="button"
@@ -2206,16 +2222,14 @@ function AppContent() {
                   setIsHandbookModalOpen(true);
                   setIsTripActionMenuOpen(false);
                 }}
-                className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-slate-50 hover:bg-slate-100 active:scale-[0.99] border border-slate-200/80 transition-all text-left cursor-pointer"
+                className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-slate-50 hover:bg-slate-100 active:scale-[0.99] border border-slate-200/80 transition-all text-left cursor-pointer min-h-[48px]"
               >
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
                     <Printer className="w-5 h-5" />
                   </div>
-                  <div>
-                    <div className="text-sm font-bold text-slate-800">
-                      {isVi ? 'Xuất cẩm nang du lịch (PDF)' : 'Travel Handbook / Print PDF'}
-                    </div>
+                  <div className="text-sm font-bold text-slate-800">
+                    {isVi ? 'Cẩm nang PDF' : 'Travel Handbook PDF'}
                   </div>
                 </div>
                 <ChevronRight className="w-5 h-5 text-slate-400 shrink-0" />
@@ -2228,16 +2242,14 @@ function AppContent() {
                   setIsEditTripModalOpen(true);
                   setIsTripActionMenuOpen(false);
                 }}
-                className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-slate-50 hover:bg-slate-100 active:scale-[0.99] border border-slate-200/80 transition-all text-left cursor-pointer"
+                className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-slate-50 hover:bg-slate-100 active:scale-[0.99] border border-slate-200/80 transition-all text-left cursor-pointer min-h-[48px]"
               >
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
                     <Edit3 className="w-5 h-5" />
                   </div>
-                  <div>
-                    <div className="text-sm font-bold text-slate-800">
-                      {isVi ? 'Chỉnh sửa chuyến đi' : 'Edit Trip Details'}
-                    </div>
+                  <div className="text-sm font-bold text-slate-800">
+                    {isVi ? 'Sửa chuyến đi' : 'Edit Trip'}
                   </div>
                 </div>
                 <ChevronRight className="w-5 h-5 text-slate-400 shrink-0" />
@@ -2250,7 +2262,7 @@ function AppContent() {
                   setIsTripActionMenuOpen(false);
                   handleDeleteTrip();
                 }}
-                className={`w-full flex items-center justify-between p-3.5 rounded-2xl border transition-all text-left ${
+                className={`w-full flex items-center justify-between p-3.5 rounded-2xl border transition-all text-left min-h-[48px] ${
                   hasCompletedActivities
                     ? 'bg-slate-50/60 border-slate-200 text-slate-400 cursor-not-allowed opacity-60'
                     : 'bg-rose-50/60 hover:bg-rose-100/70 border-rose-200 text-rose-700 active:scale-[0.99] cursor-pointer'
@@ -2266,11 +2278,11 @@ function AppContent() {
                     <div className="text-sm font-bold">
                       {isVi ? 'Xóa chuyến đi' : 'Delete Trip'}
                     </div>
-                    <div className="text-xs text-slate-500">
-                      {hasCompletedActivities
-                        ? (isVi ? 'Không thể xóa khi đã có hoạt động hoàn thành' : 'Cannot delete: contains completed items')
-                        : (isVi ? 'Xóa chuyến đi vĩnh viễn khỏi danh sách' : 'Permanently remove this trip')}
-                    </div>
+                    {hasCompletedActivities && (
+                      <div className="text-xs text-slate-500">
+                        {isVi ? 'Đã có hoạt động hoàn thành' : 'Contains completed items'}
+                      </div>
+                    )}
                   </div>
                 </div>
                 <ChevronRight className="w-5 h-5 text-slate-400 shrink-0" />
@@ -2389,8 +2401,8 @@ function AppContent() {
                   />
                   <span className="text-[11px] font-semibold text-slate-800 leading-snug">
                     {isVi
-                      ? 'Tôi xác nhận xóa chuyến đi có chi tiêu ghi nhận và gửi thông báo giải quyết tiền tới các thành viên.'
-                      : 'I confirm deleting this trip with recorded expenses and notifying members to settle balances.'}
+                      ? 'Xác nhận xóa và gửi thông báo công nợ cho nhóm.'
+                      : 'Confirm deletion and notify group of balances.'}
                   </span>
                 </label>
               </div>

@@ -9,6 +9,10 @@ import {
   areSimilarPlaceNames,
   type RankedPlaceCandidate,
 } from './src/utils/itineraryPlannerUtils.ts';
+import {
+  normalizeChatCacheKey,
+  generateSmartFallbackChatReply,
+} from './src/utils/chatFallbackUtils.ts';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -135,16 +139,30 @@ async function generateWithModelFallback(
     allowThinking?: boolean;
   }
 ) {
-  const now = Date.now();
+  const totalBudgetMs = Math.max(1500, params.timeoutMs ?? 9000);
+  const deadline = Date.now() + totalBudgetMs;
   let lastError: any = null;
   let quotaHit = false;
 
-  for (const model of GEMINI_MODEL_CHAIN) {
+  for (let i = 0; i < GEMINI_MODEL_CHAIN.length; i++) {
+    const model = GEMINI_MODEL_CHAIN[i];
+    const now = Date.now();
     const cooldownUntil = modelCooldownUntil.get(model) ?? 0;
     if (cooldownUntil > now) {
       quotaHit = true;
       continue;
     }
+
+    const remainingMs = deadline - now;
+    if (remainingMs <= 250) {
+      lastError = lastError || new Error(`Upstream deadline exceeded (${totalBudgetMs}ms)`);
+      break;
+    }
+
+    const perModelBudgetMs =
+      i === 0 && GEMINI_MODEL_CHAIN.length > 1
+        ? Math.min(remainingMs, Math.max(3000, Math.floor(totalBudgetMs * 0.65)))
+        : remainingMs;
 
     const baseConfig = params.config ? { ...params.config } : {};
     if (params.allowThinking) {
@@ -162,7 +180,7 @@ async function generateWithModelFallback(
           contents: params.contents,
           config: baseConfig,
         }),
-        params.timeoutMs ?? 12000
+        perModelBudgetMs
       );
       return { response, modelUsed: model };
     } catch (err: any) {
@@ -174,7 +192,7 @@ async function generateWithModelFallback(
         console.info(`[Gemini Quota] ${model} reached rate limit; switching to fallback model for ${Math.round(delayMs / 60000)}m.`);
         continue;
       }
-      // Retry transient non-quota error on secondary model once
+      // Retry transient non-quota error on secondary model within remaining total deadline
       continue;
     }
   }
@@ -882,32 +900,23 @@ function generateFallbackPackingList(
   const isVi = language === 'vi';
   return {
     packingItems: [
-      { category: 'Essentials', name: isVi ? 'Căn cước công dân / Hộ chiếu & Giấy tờ' : 'Passport / National ID & Documents', quantity: 1, reason: isVi ? 'Bắt buộc để check-in khách sạn, máy bay' : 'Mandatory for travel check-in' },
-      { category: 'Essentials', name: isVi ? 'Thẻ ngân hàng & Tiền mặt dự phòng' : 'Bank Cards & Emergency Cash', quantity: 1, reason: isVi ? 'Thanh toán tại các quán ăn địa phương' : 'For local stalls and transit' },
-      { category: 'Clothing', name: isVi ? `Bộ quần áo đi chơi thoải mái (${durationDays} ngày)` : `Daily casual outfits (${durationDays} days)`, quantity: durationDays + 1, reason: isVi ? 'Trang phục thấm hút mồ hôi, dễ chụp ảnh đẹp' : 'Comfortable breathable travel clothes' },
-      { category: 'Clothing', name: isVi ? 'Áo khoác nhẹ / Áo chống nắng' : 'Light jacket or windbreaker', quantity: 1, reason: isVi ? 'Bảo vệ khi trời trở gió hoặc nắng gắt' : 'Protection against sudden breeze or intense sun' },
-      { category: 'Clothing', name: isVi ? 'Đồ bơi hoặc trang phục thể thao' : 'Swimwear / Activewear', quantity: 1, reason: isVi ? 'Dành cho hoạt động tắm biển, bơi lội hoặc leo núi' : 'For beach, pool, or outdoor hikes' },
-      { category: 'Electronics', name: isVi ? 'Điện thoại & Sạc nhanh' : 'Smartphone & Fast Charger', quantity: 1, reason: isVi ? 'Tra cứu bản đồ và chụp ảnh' : 'Navigation, photos, and communication' },
-      { category: 'Electronics', name: isVi ? 'Sạc dự phòng (Powerbank) 10.000mAh' : 'Portable Power Bank (10,000mAh)', quantity: 1, reason: isVi ? 'Đảm bảo máy luôn đầy pin suốt cả ngày dài' : 'Keeps devices powered while touring' },
-      { category: 'Toiletries', name: isVi ? 'Kem chống nắng SPF 50+' : 'Broad-spectrum Sunscreen SPF 50+', quantity: 1, reason: isVi ? 'Bảo vệ da dưới tia UV khi hoạt động ngoài trời' : 'Skin protection during outdoor activities' },
-      { category: 'Toiletries', name: isVi ? 'Bộ bàn chải & Kem đánh răng du lịch' : 'Travel Toothbrush & Toothpaste set', quantity: 1, reason: isVi ? 'Vệ sinh cá nhân tiện lợi' : 'Personal hygiene' },
-      { category: 'Toiletries', name: isVi ? 'Khăn giấy ướt & Nước rửa tay khô' : 'Wet wipes & Travel hand sanitizer', quantity: 1, reason: isVi ? 'Giữ sạch tay khi thưởng thức ẩm thực đường phố' : 'Hand hygiene while sampling street food' },
-      { category: 'Gear', name: isVi ? 'Kính râm chống tia UV' : 'UV Protection Sunglasses', quantity: 1, reason: isVi ? 'Bảo vệ mắt và phối đồ thời trang' : 'Eye protection and stylish travel look' },
-      { category: 'Gear', name: isVi ? 'Ô gấp gọn hoặc áo mưa tiện lợi' : 'Compact Folding Umbrella or Rain Poncho', quantity: 1, reason: isVi ? 'Dự phòng cho những cơn mưa bất chợt' : 'Prepared for sudden weather changes' },
-      { category: 'Gear', name: isVi ? 'Giày đi bộ êm chân / Giày thể thao' : 'Comfortable Walking Sneakers', quantity: 1, reason: isVi ? 'Di chuyển dễ chịu không bị đau chân' : 'All-day walking comfort' },
-      { category: 'Documents', name: isVi ? 'Vé máy bay / Vé xe điện tử đã lưu' : 'Saved E-Tickets & Boarding Passes', quantity: 1, reason: isVi ? 'Mở xuất trình nhanh chóng ngay cả khi mất mạng' : 'Fast check-in even offline' },
+      { category: 'Essentials', name: isVi ? 'CCCD / Hộ chiếu & Giấy tờ' : 'Passport / ID & Documents', quantity: 1, reason: isVi ? 'Check-in khách sạn & sân bay' : 'Mandatory for check-in' },
+      { category: 'Essentials', name: isVi ? 'Thẻ ngân hàng & Tiền mặt' : 'Bank Cards & Cash', quantity: 1, reason: isVi ? 'Thanh toán địa phương' : 'Local payments' },
+      { category: 'Clothing', name: isVi ? `Quần áo thoải mái (${durationDays} ngày)` : `Casual outfits (${durationDays} days)`, quantity: durationDays + 1, reason: isVi ? 'Trang phục di chuyển hằng ngày' : 'Daily travel outfits' },
+      { category: 'Clothing', name: isVi ? 'Áo khoác nhẹ / Chống nắng' : 'Light jacket / Windbreaker', quantity: 1, reason: isVi ? 'Giữ ấm & chống nắng' : 'Weather protection' },
+      { category: 'Electronics', name: isVi ? 'Điện thoại & Sạc' : 'Phone & Charger', quantity: 1, reason: isVi ? 'Liên lạc & bản đồ' : 'Maps & communication' },
+      { category: 'Electronics', name: isVi ? 'Sạc dự phòng 10.000mAh' : 'Power Bank 10,000mAh', quantity: 1, reason: isVi ? 'Sạc pin khi di chuyển' : 'All-day battery backup' },
+      { category: 'Toiletries', name: isVi ? 'Kem chống nắng SPF 50+' : 'Sunscreen SPF 50+', quantity: 1, reason: isVi ? 'Bảo vệ da ngoài trời' : 'UV protection' },
+      { category: 'Toiletries', name: isVi ? 'Bộ vệ sinh cá nhân du lịch' : 'Travel toiletries kit', quantity: 1, reason: isVi ? 'Bàn chải, kem đánh răng, khăn giấy' : 'Personal hygiene' },
+      { category: 'Gear', name: isVi ? 'Giày đi bộ êm chân' : 'Comfortable Walking Shoes', quantity: 1, reason: isVi ? 'Di chuyển nhiều không đau chân' : 'All-day walking comfort' },
+      { category: 'Gear', name: isVi ? 'Ô gấp gọn / Áo mưa' : 'Compact Umbrella / Poncho', quantity: 1, reason: isVi ? 'Dự phòng mưa nắng' : 'Sudden rain protection' },
+      { category: 'Documents', name: isVi ? 'Vé điện tử & Đặt phòng' : 'Saved E-Tickets & Bookings', quantity: 1, reason: isVi ? 'Mở nhanh khi ngoại tuyến' : 'Offline check-in access' },
     ],
   };
 }
 
 function generateFallbackChatReply(message: string, tripContext?: any, language: string = 'vi') {
-  const isVi = language === 'vi';
-  const dest = tripContext?.destination || (isVi ? 'điểm đến của bạn' : 'your destination');
-  
-  if (isVi) {
-    return `Chào bạn! Mình là TripMate AI, người bạn đồng hành cho chuyến đi ${dest}. Đối với thắc mắc của bạn: Bạn nên lên kế hoạch các hoạt động ngoài trời vào buổi sáng để tận hưởng không khí mát mẻ, chuẩn bị sẵn tiền mặt nhỏ và lưu số hotline cứu hộ địa phương. Nếu bạn cần gợi ý cụ thể về quán ăn ngon, địa điểm check-in hay cách đi lại tại ${dest}, cứ nhắn mình nhé!`;
-  }
-  return `Hello! I'm TripMate AI, your personal travel companion for ${dest}. Regarding your inquiry: Make sure to plan your main outdoor highlights earlier in the day for pleasant weather, keep a bit of local cash on hand, and save your accommodation address offline. Let me know if you need specific dining spots, hidden gems, or transit directions in ${dest}!`;
+  return generateSmartFallbackChatReply(message, tripContext, language);
 }
 // --- End Inlined Resilient Fallback Generators ---
 
@@ -1024,8 +1033,8 @@ STRICT PLANNING RULES:
 
     const { response } = await generateWithModelFallback(ai, {
       contents: prompt,
-      allowThinking: true,
-      timeoutMs: 12000,
+      allowThinking: false,
+      timeoutMs: 8500,
       config: {
         systemInstruction: `You are an expert global travel curator and logistics planner. ${langInstruction}`,
         responseMimeType: 'application/json',
@@ -1245,7 +1254,7 @@ app.post('/api/gemini/packing-list', async (req, res) => {
       ? 'Output item names in Vietnamese (Tiếng Việt) and categories as one of: Essentials, Clothing, Electronics, Toiletries, Documents, Gear.'
       : 'Output item names in English.';
 
-    const prompt = `Generate a smart, highly practical packing checklist for a ${cleanDays}-day trip to "${cleanDest}".
+    const prompt = `Generate a smart, concise packing checklist of 10-12 essential items for a ${cleanDays}-day trip to "${cleanDest}".
     Context: Season/Weather: ${season || 'general'}, Planned Activities: ${activities || 'city walking, dining, sightseeing'}.
     Categorize items into: Essentials, Clothing, Electronics, Toiletries, Documents, Gear.`;
 
@@ -1303,10 +1312,10 @@ app.post('/api/gemini/chat', async (req, res) => {
   const { message, tripContext, language } = req.body;
   const lang = language === 'vi' ? 'vi' : 'en';
   const cleanMsg = String(message || '').slice(0, 1000).trim();
-  const chatCacheKey = `chat:${cleanMsg.toLowerCase()}:${String(tripContext?.destination || '')}:${lang}`;
+  const chatCacheKey = normalizeChatCacheKey(cleanMsg, tripContext?.destination, lang);
   const cachedChat = getCachedGeminiResponse<any>(chatCacheKey);
   if (cachedChat) {
-    return res.json(cachedChat);
+    return res.json({ ...cachedChat, cached: true });
   }
 
   try {
@@ -1330,7 +1339,9 @@ app.post('/api/gemini/chat', async (req, res) => {
 
     if (response.text) {
       const payload = { reply: response.text };
-      setCachedGeminiResponse(chatCacheKey, payload, 5 * 60 * 1000);
+      if (cleanMsg) {
+        setCachedGeminiResponse(chatCacheKey, payload, 5 * 60 * 1000);
+      }
       return res.json(payload);
     }
     throw new Error('Empty reply from AI');
@@ -1340,11 +1351,15 @@ app.post('/api/gemini/chat', async (req, res) => {
       `[Gemini Chat] Serving smart fallback reply (${isQuota ? 'quota cooldown' : 'upstream unavailable'}).`
     );
     const fallbackReply = generateFallbackChatReply(cleanMsg, tripContext, lang);
-    return res.json({
+    const fallbackPayload = {
       reply: fallbackReply,
       usedFallback: true,
       fallbackReason: isQuota ? 'quota_exceeded' : 'upstream_unavailable',
-    });
+    };
+    if (cleanMsg) {
+      setCachedGeminiResponse(chatCacheKey, fallbackPayload, 5 * 60 * 1000);
+    }
+    return res.json(fallbackPayload);
   }
 });
 

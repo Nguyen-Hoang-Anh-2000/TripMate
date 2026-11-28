@@ -81,6 +81,8 @@ export const InteractiveMapView: React.FC<InteractiveMapViewProps> = ({ trip }) 
 
   // Collapse/Expand state for each day in itinerary list (default expanded, toggled by chevron-up/chevron-down)
   const [collapsedDays, setCollapsedDays] = useState<Record<number, boolean>>({});
+  // Mobile bottom-sheet drawer toggle for Route Stops so map occupies primary mobile viewport
+  const [isMobileStopsOpen, setIsMobileStopsOpen] = useState(false);
 
   const toggleDayCollapse = (dayNumber: number) => {
     setCollapsedDays((prev) => ({
@@ -713,7 +715,7 @@ export const InteractiveMapView: React.FC<InteractiveMapViewProps> = ({ trip }) 
       {/* 2. Main Map & Waypoints List Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3.5">
         {/* Interactive Google Map Box */}
-        <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 p-1.5 sm:p-2 shadow-2xs relative overflow-hidden flex flex-col h-[340px] sm:h-[480px] lg:h-[560px]">
+        <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 p-1.5 sm:p-2 shadow-2xs relative overflow-hidden flex flex-col h-[410px] sm:h-[480px] lg:h-[560px]">
           {/* Floating Map Mode Switcher (Top Right, Compact) */}
           <div className="absolute top-3 right-3 z-20 bg-white/95 backdrop-blur-md p-1 rounded-xl border border-slate-200 shadow-md flex items-center gap-0.5 text-xs">
             <button
@@ -748,24 +750,36 @@ export const InteractiveMapView: React.FC<InteractiveMapViewProps> = ({ trip }) 
           <div ref={mapContainerRef} className="w-full h-full flex-1 rounded-xl"></div>
         </div>
 
-        {/* Side Location List (Switchable between By Day and Nearest -> Farthest with km distance) */}
-        <div className="bg-white rounded-2xl border border-slate-200 p-3.5 shadow-2xs flex flex-col justify-between overflow-hidden max-h-[460px] lg:max-h-[560px]">
+        {/* Side Location List / Mobile Collapsible Bottom Sheet */}
+        <div className="bg-white rounded-2xl border border-slate-200 p-3.5 shadow-2xs flex flex-col justify-between overflow-hidden lg:max-h-[560px]">
           <div className="flex flex-col flex-1 overflow-hidden">
-            {/* List Header + Sort Mode Switcher */}
+            {/* List Header + Mobile Sheet Toggle + Sort Mode Switcher */}
             <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-100 shrink-0">
-              <div className="min-w-0">
+              <button
+                type="button"
+                onClick={() => setIsMobileStopsOpen(!isMobileStopsOpen)}
+                className="lg:pointer-events-none flex items-center gap-1.5 min-w-0 text-left cursor-pointer lg:cursor-default"
+                aria-expanded={isMobileStopsOpen}
+              >
+                <span className="lg:hidden w-6 h-1 rounded-full bg-slate-300 shrink-0 hidden" />
                 <h3 className="font-extrabold text-slate-900 text-xs sm:text-sm truncate">
                   {sortMode === 'nearest'
                     ? (isVi ? 'Gần nhất → Xa nhất' : 'Nearest to Farthest')
-                    : (isVi ? 'Điểm dừng lộ trình' : 'Route Stops')}
+                    : (isVi ? `Điểm dừng lộ trình (${filteredWaypoints.length})` : `Route Stops (${filteredWaypoints.length})`)}
                 </h3>
-              </div>
+                <span className="lg:hidden text-slate-500 shrink-0">
+                  {isMobileStopsOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+                </span>
+              </button>
 
               {/* Sort Mode Toggle: Theo ngày vs Gần → Xa (km) */}
               <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-xl border border-slate-200/80 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setSortMode('itinerary')}
+                  onClick={() => {
+                    setSortMode('itinerary');
+                    setIsMobileStopsOpen(true);
+                  }}
                   className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
                     sortMode === 'itinerary'
                       ? 'bg-white text-slate-900 shadow-2xs'
@@ -776,7 +790,10 @@ export const InteractiveMapView: React.FC<InteractiveMapViewProps> = ({ trip }) 
                 </button>
                 <button
                   type="button"
-                  onClick={handleActivateNearestSort}
+                  onClick={() => {
+                    setIsMobileStopsOpen(true);
+                    handleActivateNearestSort();
+                  }}
                   className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1 ${
                     sortMode === 'nearest'
                       ? 'bg-emerald-600 text-white shadow-2xs'
@@ -790,8 +807,8 @@ export const InteractiveMapView: React.FC<InteractiveMapViewProps> = ({ trip }) 
               </div>
             </div>
 
-            {/* Scrollable Stops Container */}
-            <div className="mt-2.5 space-y-2.5 overflow-y-auto flex-1 pr-0.5 overscroll-contain">
+            {/* Scrollable Stops Container (Collapsible drawer on mobile, always visible on lg desktop) */}
+            <div className={`${isMobileStopsOpen ? 'max-h-[380px] mt-2.5' : 'hidden'} lg:block lg:max-h-none lg:mt-2.5 space-y-2.5 overflow-y-auto flex-1 pr-0.5 overscroll-contain`}>
               {filteredWaypoints.length === 0 ? (
                 <div className="text-center py-8 text-slate-400 text-xs">
                   {isVi ? 'Chưa có địa điểm nào.' : 'No stops yet.'}

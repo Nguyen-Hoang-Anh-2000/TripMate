@@ -10,6 +10,7 @@ import { Trip, ActivityItem, CategoryType, SavedPlace, Expense } from '../types'
 import { useLanguage } from '../context/LanguageContext';
 import { formatMoney } from '../utils/formatCurrency';
 import { getLocalDateString } from '../utils/dateUtils';
+import { validateImageUploadFile } from '../utils/fileValidationUtils';
 import { CategoryConfig, getSavedCategories, CategorySettingsModal } from './CategorySettingsModal';
 
 interface ItineraryViewProps {
@@ -170,11 +171,6 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   const [dropdownSearchInput, setDropdownSearchInput] = useState('');
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Day dropdown state (with search-like feature)
-  const [isDayDropdownOpen, setIsDayDropdownOpen] = useState(false);
-  const [daySearchInput, setDaySearchInput] = useState('');
-  const dayDropdownRef = useRef<HTMLDivElement>(null);
-
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [targetDayNumber, setTargetDayNumber] = useState<number>(trip.days[0]?.dayNumber || 1);
 
@@ -217,8 +213,9 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   // Handle receipt image upload & AI OCR total cost extraction
   const handleItineraryReceiptUpload = (file: File) => {
     if (!completedActivityPrompt) return;
-    if (!file.type.startsWith('image/')) {
-      setActivityScanNotice(isVi ? 'Vui lòng chọn tệp hình ảnh (PNG, JPG, WEBP).' : 'Please select an image file.');
+    const validation = validateImageUploadFile(file);
+    if (!validation.valid) {
+      setActivityScanNotice(isVi ? validation.errorVi! : validation.errorEn!);
       return;
     }
 
@@ -514,9 +511,6 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
       if (dropdownRef.current && !dropdownRef.current.contains(target)) {
         setIsFilterDropdownOpen(false);
       }
-      if (dayDropdownRef.current && !dayDropdownRef.current.contains(target)) {
-        setIsDayDropdownOpen(false);
-      }
       if (locationDropdownRef.current && !locationDropdownRef.current.contains(target)) {
         setIsLocationDropdownOpen(false);
       }
@@ -552,18 +546,6 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
       icon: c.icon,
     })),
   ], [categoriesList, isVi, t]);
-
-  // Filtered days for Day search droplist
-  const filteredDaysForDropdown = useMemo(() => {
-    const q = daySearchInput.trim().toLowerCase();
-    if (!q) return trip.days;
-    return trip.days.filter((d) => {
-      const dayNumStr = `ngày ${d.dayNumber} day ${d.dayNumber}`;
-      const title = d.title.toLowerCase();
-      const date = d.date.toLowerCase();
-      return dayNumStr.includes(q) || title.includes(q) || date.includes(q);
-    });
-  }, [daySearchInput, trip.days]);
 
   // Filtered categories for droplist
   const filteredCategories = useMemo(() => {
@@ -999,162 +981,66 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   return (
     <div className="space-y-4">
       
-      {/* 1. Mobile-First Compact Droplist Filter Bar (Day Search Droplist + Category Search Droplist + Add Activity) */}
-      <div className="bg-white rounded-2xl p-3 sm:p-4 border border-slate-200 shadow-2xs relative z-20">
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 items-center">
-          
-          {/* Day Selector Search-Like Droplist */}
-          <div className="relative col-span-1" ref={dayDropdownRef}>
-            <button
-              type="button"
-              onClick={() => {
-                setIsDayDropdownOpen(!isDayDropdownOpen);
-                setIsFilterDropdownOpen(false);
-              }}
-              className={`w-full flex items-center justify-between text-xs font-semibold py-2 px-2.5 rounded-xl border transition-colors shadow-2xs cursor-pointer truncate ${
-                activeDayTab !== 'all'
-                  ? 'border-teal-500 bg-teal-50/70 text-teal-900'
-                  : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
-              }`}
-            >
-              <span className="truncate flex items-center gap-1.5">
-                <Calendar className="w-3.5 h-3.5 text-teal-600 shrink-0" />
-                <span className="truncate">
-                  {activeDayTab === 'all'
-                    ? (isVi ? 'Tất cả ngày' : 'All Days')
-                    : (() => {
-                        const selectedDayObj = trip.days.find((d) => d.dayNumber === activeDayTab);
-                        const onlyD = selectedDayObj?.date ? selectedDayObj.date.split(' - ')[0].trim() : '';
-                        return isVi
-                          ? `Ngày ${activeDayTab}${onlyD ? ` (${onlyD})` : ''}`
-                          : `Day ${activeDayTab}${onlyD ? ` (${onlyD})` : ''}`;
-                      })()}
+      {/* 1. Compact Horizontal Day Chips + Category Search Filter + 1 Primary CTA */}
+      <div className="bg-white rounded-2xl p-3 sm:p-3.5 border border-slate-200 shadow-2xs relative z-20 space-y-2.5">
+        {/* Horizontal Scrollable Day Chips */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar">
+          <button
+            type="button"
+            onClick={() => setActiveDayTab('all')}
+            className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors cursor-pointer shrink-0 ${
+              activeDayTab === 'all'
+                ? 'bg-slate-900 text-white shadow-2xs'
+                : 'bg-slate-100 hover:bg-slate-200/80 text-slate-700'
+            }`}
+          >
+            {isVi ? 'Tất cả' : 'All'}
+          </button>
+          {trip.days.map((d) => {
+            const isSelected = activeDayTab === d.dayNumber;
+            return (
+              <button
+                key={d.dayNumber}
+                type="button"
+                onClick={() => {
+                  setActiveDayTab(d.dayNumber);
+                  setExpandedDays((prev) => ({ ...prev, [d.dayNumber]: true }));
+                }}
+                className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-colors cursor-pointer shrink-0 flex items-center gap-1 ${
+                  isSelected
+                    ? 'bg-teal-600 text-white shadow-2xs'
+                    : 'bg-slate-100 hover:bg-slate-200/80 text-slate-700'
+                }`}
+              >
+                <span>{isVi ? `Ngày ${d.dayNumber}` : `Day ${d.dayNumber}`}</span>
+                <span className={`text-[10px] ${isSelected ? 'text-teal-100' : 'text-slate-400'}`}>
+                  ({d.activities.length})
                 </span>
-              </span>
-              <div className="flex items-center gap-1 shrink-0 ml-1">
-                {activeDayTab !== 'all' && (
-                  <span
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setActiveDayTab('all');
-                      setDaySearchInput('');
-                    }}
-                    className="p-0.5 hover:bg-teal-200/60 rounded text-teal-700"
-                    title={isVi ? 'Xóa lọc ngày' : 'Reset day filter'}
-                  >
-                    <X className="w-3 h-3" />
-                  </span>
-                )}
-                <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isDayDropdownOpen ? 'rotate-180' : ''}`} />
-              </div>
-            </button>
+              </button>
+            );
+          })}
+        </div>
 
-            {/* Day Search Droplist Menu */}
-            {isDayDropdownOpen && (
-              <div className="absolute left-0 top-full mt-1.5 w-64 sm:w-72 max-w-[calc(100vw-2.5rem)] bg-white rounded-2xl border border-slate-200 shadow-xl z-40 p-2.5 space-y-2 animate-in fade-in zoom-in-95 duration-100">
-                {/* Search input inside day droplist */}
-                <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                  <input
-                    type="text"
-                    autoFocus
-                    value={daySearchInput}
-                    onChange={(e) => setDaySearchInput(e.target.value)}
-                    placeholder={isVi ? 'Tìm ngày (VD: 1, 20/08)...' : 'Search day (e.g. 1, 20/08)...'}
-                    className="w-full text-xs pl-8 pr-7 py-2 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white text-slate-800 placeholder:text-slate-400 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
-                  />
-                  {daySearchInput && (
-                    <button
-                      type="button"
-                      onClick={() => setDaySearchInput('')}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  )}
-                </div>
-
-                {/* Days list */}
-                <div className="max-h-56 overflow-y-auto space-y-1 pr-0.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveDayTab('all');
-                      setIsDayDropdownOpen(false);
-                    }}
-                    className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
-                      activeDayTab === 'all'
-                        ? 'bg-teal-50 text-teal-800 font-bold'
-                        : 'text-slate-700 hover:bg-slate-100'
-                    }`}
-                  >
-                    <span>{isVi ? '📅 Tất cả ngày' : '📅 All Days'}</span>
-                    {activeDayTab === 'all' && <span className="text-teal-600 text-xs">✓</span>}
-                  </button>
-
-                  {filteredDaysForDropdown.map((d) => {
-                    const onlyD = d.date ? d.date.split(' - ')[0].trim() : '';
-                    const isSelected = activeDayTab === d.dayNumber;
-                    return (
-                      <button
-                        key={d.dayNumber}
-                        type="button"
-                        onClick={() => {
-                          setActiveDayTab(d.dayNumber);
-                          setExpandedDays((prev) => ({ ...prev, [d.dayNumber]: true }));
-                          setIsDayDropdownOpen(false);
-                        }}
-                        className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center justify-between transition-colors cursor-pointer ${
-                          isSelected
-                            ? 'bg-teal-50 text-teal-800 font-bold'
-                            : 'text-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        <div className="min-w-0 truncate">
-                          <span className="font-semibold text-slate-900">
-                            {isVi ? `Ngày ${d.dayNumber}` : `Day ${d.dayNumber}`}
-                          </span>
-                          {onlyD && <span className="text-slate-400 ml-1 font-normal">({onlyD})</span>}
-                        </div>
-                        <span className="text-[11px] text-slate-400 shrink-0 ml-1.5">
-                          {d.activities.length} {isVi ? 'mục' : (d.activities.length === 1 ? 'activity' : 'activities')}
-                        </span>
-                      </button>
-                    );
-                  })}
-
-                  {filteredDaysForDropdown.length === 0 && (
-                    <div className="text-center py-3 text-xs text-slate-400 italic">
-                      {isVi ? 'Không tìm thấy ngày phù hợp' : 'No matching days'}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Search-Like Droplist (Category / Activity Searchable Filter) */}
-          <div className="relative col-span-1" ref={dropdownRef}>
+        {/* Category/Search Droplist + Primary CTA */}
+        <div className="flex items-center justify-between gap-2">
+          <div className="relative flex-1 min-w-0 sm:max-w-xs" ref={dropdownRef}>
             <button
               type="button"
-              onClick={() => {
-                setIsFilterDropdownOpen(!isFilterDropdownOpen);
-                setIsDayDropdownOpen(false);
-              }}
-              className={`w-full flex items-center justify-between text-xs font-semibold py-2 px-2.5 rounded-xl border transition-colors shadow-2xs cursor-pointer truncate ${
+              onClick={() => setIsFilterDropdownOpen(!isFilterDropdownOpen)}
+              className={`w-full flex items-center justify-between text-xs font-semibold py-2 px-2.5 rounded-xl border transition-colors shadow-2xs cursor-pointer truncate min-h-[38px] ${
                 selectedCategory !== 'all' || searchQuery
                   ? 'border-teal-500 bg-teal-50/70 text-teal-900'
-                  : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
+                  : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
               }`}
             >
               <span className="truncate flex items-center gap-1.5">
                 <Filter className="w-3.5 h-3.5 text-teal-600 shrink-0" />
                 <span className="truncate">
                   {searchQuery
-                    ? `🔍 "${searchQuery}"`
+                    ? `"${searchQuery}"`
                     : selectedCategory !== 'all'
                     ? (categories.find((c) => c.value === selectedCategory)?.label || selectedCategory)
-                    : (isVi ? 'Tất cả thể loại' : 'All Categories')}
+                    : (isVi ? 'Thể loại & Tìm kiếm' : 'Category & Search')}
                 </span>
               </span>
               <div className="flex items-center gap-1 shrink-0 ml-1">
@@ -1176,10 +1062,9 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               </div>
             </button>
 
-            {/* Droplist Menu with search input inside - anchored right on mobile to prevent overflow/layout breaking */}
+            {/* Droplist Menu with search input inside */}
             {isFilterDropdownOpen && (
-              <div className="absolute right-0 sm:left-0 sm:right-auto top-full mt-1.5 w-64 sm:w-72 max-w-[calc(100vw-2.5rem)] bg-white rounded-2xl border border-slate-200 shadow-xl z-40 p-2.5 space-y-2 animate-in fade-in zoom-in-95 duration-100">
-                {/* Search input inside droplist */}
+              <div className="absolute left-0 top-full mt-1.5 w-64 sm:w-72 max-w-[calc(100vw-2.5rem)] bg-white rounded-2xl border border-slate-200 shadow-xl z-40 p-2.5 space-y-2 animate-in fade-in zoom-in-95 duration-100">
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                   <input
@@ -1191,7 +1076,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                       setDropdownSearchInput(val);
                       setSearchQuery(val);
                     }}
-                    placeholder={isVi ? 'Gõ tìm kiếm hoạt động...' : 'Type to search activity...'}
+                    placeholder={isVi ? 'Tìm hoạt động...' : 'Search activity...'}
                     className="w-full text-xs pl-8 pr-7 py-2 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white text-slate-800 placeholder:text-slate-400 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
                   />
                   {dropdownSearchInput && (
@@ -1208,7 +1093,6 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                   )}
                 </div>
 
-                {/* Categories selection list */}
                 <div className="max-h-56 overflow-y-auto space-y-1 pr-0.5">
                   <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-2 py-0.5">
                     {isVi ? 'Theo Thể loại' : 'By Category'}
@@ -1234,7 +1118,6 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                     </button>
                   ))}
 
-                  {/* Direct matching activity items */}
                   {matchingActivityHighlights.length > 0 && (
                     <div className="pt-2 border-t border-slate-100">
                       <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-2 py-0.5">
@@ -1261,7 +1144,6 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                     </div>
                   )}
 
-                  {/* Category Configuration Link */}
                   <div className="pt-2 border-t border-slate-100">
                     <button
                       type="button"
@@ -1280,17 +1162,15 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
             )}
           </div>
 
-          {/* Action Button: Add Activity */}
-          <div className="col-span-2 sm:col-span-1 flex items-center gap-2">
-            <button
-              onClick={() => handleOpenAddModal()}
-              className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer min-h-[36px]"
-            >
-              <Plus className="w-4 h-4 text-teal-400" />
-              <span>{t('itinerary.addActivity')}</span>
-            </button>
-          </div>
-
+          {/* Primary Action Button: Add Activity */}
+          <button
+            type="button"
+            onClick={() => handleOpenAddModal()}
+            className="flex items-center justify-center gap-1.5 py-2 px-3.5 bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer min-h-[38px] shrink-0"
+          >
+            <Plus className="w-4 h-4" />
+            <span>{t('itinerary.addActivity')}</span>
+          </button>
         </div>
       </div>
 

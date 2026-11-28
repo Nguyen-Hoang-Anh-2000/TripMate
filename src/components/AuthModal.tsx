@@ -2,13 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import {
   X, Phone, Mail, User, ShieldCheck, KeyRound, Lock, Eye, EyeOff,
-  AlertCircle, CheckCircle2, ArrowLeft, ChevronRight, Sparkles, Camera, Loader2
+  AlertCircle, CheckCircle2, ArrowLeft, ChevronRight, Sparkles, Camera, Loader2, Globe, ChevronDown
 } from 'lucide-react';
 import { useAuth, RFC_EMAIL_REGEX } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { ForgotPasswordFlow } from './ForgotPasswordFlow';
 import { PWAInstallButton } from './PWAInstallButton';
 import { compressAvatarImage } from '../utils/imageUtils';
+import { validateImageUploadFile } from '../utils/fileValidationUtils';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -33,10 +34,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
     authModalView,
     setAuthModalView,
   } = useAuth();
-  const { isVi } = useLanguage();
+  const { isVi, setLang } = useLanguage();
 
   // Logged-out auth states
   const [guestMode, setGuestMode] = useState<'login' | 'register' | 'forgot'>('login');
+  const [showDemoUsers, setShowDemoUsers] = useState(false);
   const [email, setEmail] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [phone, setPhone] = useState('');
@@ -161,8 +163,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
-    if (!file.type.startsWith('image/')) {
-      setErrorMsg(isVi ? 'Vui lòng chọn tệp hình ảnh hợp lệ (PNG, JPG, WEBP).' : 'Please select a valid image file.');
+    const validation = validateImageUploadFile(file);
+    if (!validation.valid) {
+      setErrorMsg(isVi ? validation.errorVi! : validation.errorEn!);
       return;
     }
 
@@ -317,6 +320,38 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                   {/* Add to Home Screen / Install App (iOS, Android, Windows) */}
                   <PWAInstallButton variant="modal-card" />
 
+                  {/* Language Switcher (Moved here from Desktop Navbar) */}
+                  <div className="flex items-center justify-between gap-2 p-3 rounded-2xl bg-slate-50 border border-slate-200">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-9 h-9 rounded-xl bg-white text-slate-600 border border-slate-200 flex items-center justify-center shrink-0">
+                        <Globe className="w-4 h-4 text-teal-600" />
+                      </div>
+                      <span className="text-xs sm:text-sm font-bold text-slate-900 truncate">
+                        {isVi ? 'Ngôn ngữ' : 'Language'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1 p-1 bg-slate-200/70 rounded-xl shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setLang('vi')}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                          isVi ? 'bg-white text-teal-800 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        Tiếng Việt
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLang('en')}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+                          !isVi ? 'bg-white text-teal-800 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        English
+                      </button>
+                    </div>
+                  </div>
+
                   {/* Change Password Entry Button (directly above Sign Out) */}
                   <button
                     type="button"
@@ -336,13 +371,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                           {isVi ? 'Đổi mật khẩu' : 'Change Password'}
                         </div>
                         <div className="text-xs text-slate-500">
-                          {userProfile.passwordHash
-                            ? isVi
-                              ? 'Cập nhật mật khẩu mới hoặc khôi phục khi quên'
-                              : 'Update password or reset if forgotten'
-                            : isVi
-                            ? 'Thiết lập mật khẩu đăng nhập cho tài khoản'
-                            : 'Set a login password for your account'}
+                          {isVi ? 'Cập nhật hoặc khôi phục mật khẩu' : 'Update or reset password'}
                         </div>
                       </div>
                     </div>
@@ -790,31 +819,39 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                     </button>
                   </form>
 
-                  {/* Demo Switcher */}
+                  {/* Demo Switcher (Collapsed by default) */}
                   {guestMode === 'login' && (
                     <div className="pt-3 border-t border-slate-100">
-                      <div className="text-[11px] font-bold text-slate-500 mb-2 flex items-center justify-between">
-                        <span>{isVi ? 'Tài khoản thử nghiệm nhanh (1 chạm):' : 'Instant Demo Accounts:'}</span>
-                        <span className="text-[10px] text-teal-600 font-semibold">
-                          {isVi ? 'Mật khẩu: 123456' : 'Pass: 123456'}
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-2 gap-1.5">
-                        {DEMO_USERS.map((demo) => (
-                          <button
-                            key={demo.email}
-                            type="button"
-                            onClick={() => handleQuickDemo(demo)}
-                            className="p-2 bg-slate-50 hover:bg-teal-50/80 border border-slate-200 hover:border-teal-300 rounded-xl text-left transition-all cursor-pointer group"
-                          >
-                            <div className="text-xs font-bold text-slate-800 group-hover:text-teal-900 truncate">
-                              {demo.name}
-                            </div>
-                            <div className="text-[10px] text-slate-500 truncate">{demo.email}</div>
-                            <div className="text-[9px] font-semibold text-teal-700 truncate mt-0.5">{demo.phone}</div>
-                          </button>
-                        ))}
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowDemoUsers((prev) => !prev)}
+                        className="w-full flex items-center justify-center gap-1.5 text-[11px] font-semibold text-slate-500 hover:text-teal-700 py-1 cursor-pointer transition-colors"
+                      >
+                        <span>{isVi ? 'Dùng thử nhanh không cần đăng ký' : 'Quick demo without signing up'}</span>
+                        <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showDemoUsers ? 'rotate-180' : ''}`} />
+                      </button>
+                      {showDemoUsers && (
+                        <div className="mt-2.5 space-y-2 animate-in fade-in duration-150">
+                          <div className="text-[10px] text-slate-400 text-right font-semibold">
+                            {isVi ? 'Mật khẩu: 123456' : 'Pass: 123456'}
+                          </div>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            {DEMO_USERS.map((demo) => (
+                              <button
+                                key={demo.email}
+                                type="button"
+                                onClick={() => handleQuickDemo(demo)}
+                                className="p-2 bg-slate-50 hover:bg-teal-50/80 border border-slate-200 hover:border-teal-300 rounded-xl text-left transition-all cursor-pointer group"
+                              >
+                                <div className="text-xs font-bold text-slate-800 group-hover:text-teal-900 truncate">
+                                  {demo.name}
+                                </div>
+                                <div className="text-[10px] text-slate-500 truncate">{demo.email}</div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

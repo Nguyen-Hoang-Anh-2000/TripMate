@@ -7,6 +7,7 @@ import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { ForgotPasswordFlow } from './ForgotPasswordFlow';
 import { compressAvatarImage } from '../utils/imageUtils';
+import { validateImageUploadFile } from '../utils/fileValidationUtils';
 
 const DEMO_ACCOUNTS = [
   { name: 'Perry Nguyễn', email: 'perrynguyen10@gmail.com', phone: '0901234567', roleVi: 'Trưởng đoàn', roleEn: 'Trip Leader', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Perry' },
@@ -338,17 +339,14 @@ export const AuthScreen: React.FC = () => {
                 </button>
               </form>
 
-              {/* Collapsible Quick 1-Click Demo Account Testing */}
+              {/* Collapsible Quick Demo Without Signing Up */}
               <div className="pt-3.5 mt-3.5 border-t border-white/10">
                 <button
                   type="button"
                   onClick={() => setShowDemoAccounts((prev) => !prev)}
-                  className="w-full flex items-center justify-between gap-2 text-[11px] text-slate-300 hover:text-white py-1 cursor-pointer transition-colors"
+                  className="w-full flex items-center justify-center gap-1.5 text-[11px] text-slate-400 hover:text-white py-1.5 cursor-pointer transition-colors"
                 >
-                  <span className="font-semibold flex items-center gap-1.5">
-                    <Sparkles className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-                    <span>{isVi ? 'Dùng thử nhanh (4 tài khoản mẫu)' : 'Quick Demo Accounts'}</span>
-                  </span>
+                  <span className="font-medium">{isVi ? 'Dùng thử nhanh không cần đăng ký' : 'Quick demo without signing up'}</span>
                   <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${showDemoAccounts ? 'rotate-180' : ''}`} />
                 </button>
                 {showDemoAccounts && (
@@ -432,12 +430,19 @@ export const AuthScreen: React.FC = () => {
                         const file = e.target.files?.[0];
                         e.target.value = '';
                         if (!file) return;
+                        const validation = validateImageUploadFile(file);
+                        if (!validation.valid) {
+                          setErrorMessage(isVi ? validation.errorVi! : validation.errorEn!);
+                          return;
+                        }
+                        setErrorMessage(null);
                         setIsCompressingAvatar(true);
                         try {
                           const compressed = await compressAvatarImage(file);
                           setRegisterAvatar(compressed);
                         } catch (err) {
                           console.warn('Avatar upload error:', err);
+                          setErrorMessage(isVi ? 'Không thể xử lý ảnh đại diện.' : 'Unable to process avatar image.');
                         } finally {
                           setIsCompressingAvatar(false);
                         }

@@ -19,6 +19,7 @@ import { useAuth } from '../context/AuthContext';
 import { db } from '../firebase';
 import { getLocalDateString } from '../utils/dateUtils';
 import { compressImage } from '../utils/imageUtils';
+import { validateImageUploadFile } from '../utils/fileValidationUtils';
 import { buildDefaultAvatar } from '../utils/avatarSyncUtils';
 import { normalizeText } from '../utils/itineraryPlannerUtils';
 import { InterestsComboSelect } from './InterestsComboSelect';
@@ -124,6 +125,7 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
 
   // Inline checkbox: open AI itinerary after creating trip if checked
   const [wantSuggestedItinerary, setWantSuggestedItinerary] = useState(false);
+  const [showMoreOptions, setShowMoreOptions] = useState(false);
 
   // Helper to reset all form inputs to pristine state
   const resetForm = () => {
@@ -143,6 +145,7 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
     setIsMemberDropdownOpen(false);
     setIsMemberInputFocused(false);
     setWantSuggestedItinerary(false);
+    setShowMoreOptions(false);
   };
 
   // Reset form and fetch registered TripMate accounts whenever modal opens
@@ -340,10 +343,12 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
   // Handle local image file upload from mobile or desktop
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
 
-    if (!file.type.startsWith('image/')) {
-      setUploadError(isVi ? 'Vui lòng chọn tệp hình ảnh hợp lệ (PNG, JPG, WEBP).' : 'Please select an image file.');
+    const validation = validateImageUploadFile(file);
+    if (!validation.valid) {
+      setUploadError(isVi ? validation.errorVi! : validation.errorEn!);
       return;
     }
     setUploadError('');
@@ -533,7 +538,7 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
+              <div className="sm:col-span-2">
                 <label className="block text-xs font-semibold text-slate-700 mb-1">{t('newTrip.fieldDest')} *</label>
                 <input
                   type="text"
@@ -541,17 +546,6 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
                   placeholder={t('newTrip.destPlaceholder')}
                   value={destination}
                   onChange={(e) => setDestination(e.target.value)}
-                  className="w-full text-xs p-2.5 sm:p-3 rounded-xl border border-slate-200 bg-slate-50/40 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden transition-all"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">{t('newTrip.fieldCountry')}</label>
-                <input
-                  type="text"
-                  placeholder={t('newTrip.countryPlaceholder')}
-                  value={country}
-                  onChange={(e) => setCountry(e.target.value)}
                   className="w-full text-xs p-2.5 sm:p-3 rounded-xl border border-slate-200 bg-slate-50/40 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden transition-all"
                 />
               </div>
@@ -591,57 +585,90 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
                   className="w-full text-xs p-2.5 sm:p-3 rounded-xl border border-slate-200 bg-slate-50/40 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden transition-all"
                 />
               </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">{t('newTrip.fieldBudget')}</label>
-                <input
-                  type="number"
-                  min="0"
-                  max="100000000000"
-                  step="any"
-                  placeholder={t('newTrip.budgetPlaceholder')}
-                  value={budgetTotal}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (val === '') {
-                      setBudgetTotal('');
-                      return;
-                    }
-                    const num = parseFloat(val);
-                    if (!isNaN(num) && num >= 0 && num <= 100000000000) {
-                      setBudgetTotal(val);
-                    }
-                  }}
-                  className="w-full text-xs p-2.5 sm:p-3 rounded-xl border border-slate-200 bg-slate-50/40 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden transition-all"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">{t('newTrip.fieldCurrency')}</label>
-                <select
-                  value={currency}
-                  onChange={(e) => setCurrency(e.target.value)}
-                  className="w-full text-xs p-2.5 sm:p-3 rounded-xl border border-slate-200 bg-slate-50/40 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden transition-all cursor-pointer"
-                >
-                  <option value="USD">USD ($)</option>
-                  <option value="VND">VND (₫)</option>
-                  <option value="EUR">EUR (€)</option>
-                  <option value="JPY">JPY (¥)</option>
-                  <option value="GBP">GBP (£)</option>
-                  <option value="AUD">AUD ($)</option>
-                </select>
-              </div>
             </div>
 
-            {/* Sở thích - Combo Selectbox */}
-            <InterestsComboSelect
-              selectedIds={selectedInterests}
-              onChange={setSelectedInterests}
-              isVi={isVi}
-              label={isVi ? 'Sở thích' : 'Interests'}
-              placeholder={isVi ? 'Chọn sở thích chuyến đi...' : 'Select trip interests...'}
-              dropdownId="new-trip-interests"
-            />
+            {/* Accordion Trigger: More options */}
+            <button
+              type="button"
+              onClick={() => setShowMoreOptions(!showMoreOptions)}
+              aria-expanded={showMoreOptions}
+              className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50/80 hover:bg-slate-100/80 text-xs font-semibold text-slate-700 transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span>{isVi ? 'Tùy chọn thêm' : 'More options'}</span>
+                {!showMoreOptions && (
+                  <span className="text-[11px] font-normal text-slate-400 truncate">
+                    {isVi ? 'Quốc gia, ngân sách, thành viên, ảnh bìa' : 'Country, budget, members, cover'}
+                  </span>
+                )}
+              </div>
+              <ChevronDown className={`w-4 h-4 text-slate-500 shrink-0 transition-transform ${showMoreOptions ? 'rotate-180' : ''}`} />
+            </button>
+
+            {showMoreOptions && (
+            <div className="space-y-3.5 pt-1 animate-in fade-in duration-150">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">{t('newTrip.fieldCountry')}</label>
+                  <input
+                    type="text"
+                    placeholder={t('newTrip.countryPlaceholder')}
+                    value={country}
+                    onChange={(e) => setCountry(e.target.value)}
+                    className="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50/40 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden transition-all"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">{t('newTrip.fieldBudget')}</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100000000000"
+                    step="any"
+                    placeholder={t('newTrip.budgetPlaceholder')}
+                    value={budgetTotal}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === '') {
+                        setBudgetTotal('');
+                        return;
+                      }
+                      const num = parseFloat(val);
+                      if (!isNaN(num) && num >= 0 && num <= 100000000000) {
+                        setBudgetTotal(val);
+                      }
+                    }}
+                    className="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50/40 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden transition-all"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">{t('newTrip.fieldCurrency')}</label>
+                  <select
+                    value={currency}
+                    onChange={(e) => setCurrency(e.target.value)}
+                    className="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50/40 focus:bg-white focus:ring-2 focus:ring-teal-500 focus:outline-hidden transition-all cursor-pointer"
+                  >
+                    <option value="USD">USD ($)</option>
+                    <option value="VND">VND (₫)</option>
+                    <option value="EUR">EUR (€)</option>
+                    <option value="JPY">JPY (¥)</option>
+                    <option value="GBP">GBP (£)</option>
+                    <option value="AUD">AUD ($)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Sở thích - Combo Selectbox */}
+              <InterestsComboSelect
+                selectedIds={selectedInterests}
+                onChange={setSelectedInterests}
+                isVi={isVi}
+                label={isVi ? 'Sở thích' : 'Interests'}
+                placeholder={isVi ? 'Chọn sở thích chuyến đi...' : 'Select trip interests...'}
+                dropdownId="new-trip-interests"
+              />
 
             {/* Thành viên (Tất cả nằm gọn trong Combobox) */}
             <div ref={memberDropdownRef} className="relative space-y-1.5">
@@ -711,16 +738,20 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') {
                         e.preventDefault();
+                        if (
+                          memberSearchTerm.trim().length > 0 &&
+                          !isLoadingUsers &&
+                          !isSearchingExactUser &&
+                          filteredRegisteredUsers.length === 0
+                        ) {
+                          handleAddOfflineInvitee(memberSearchTerm);
+                        }
                       }
                     }}
                     placeholder={
-                      invitedMembers.length > 0
-                        ? isVi
-                          ? 'Nhập thêm email hoặc SĐT để tìm...'
-                          : 'Enter another email or phone...'
-                        : isVi
-                        ? 'Nhập email hoặc số điện thoại để gợi ý tích chọn...'
-                        : 'Enter email or phone to see suggestions...'
+                      isVi
+                        ? 'Tên, email hoặc SĐT bạn đồng hành...'
+                        : 'Name, email, or phone...'
                     }
                     className="w-full min-w-0 px-2.5 py-2.5 sm:py-3 text-xs bg-transparent text-slate-800 placeholder:text-slate-400 focus:outline-hidden"
                   />
@@ -775,11 +806,11 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
                     className="absolute left-0 right-0 top-full mt-1.5 z-30 bg-white border border-slate-200 rounded-2xl shadow-xl overflow-hidden animate-in fade-in slide-in-from-top-1 duration-150"
                   >
                     <div className="max-h-56 overflow-y-auto divide-y divide-slate-100/80">
-                      {/* Matching Suggestions when typing email or phone */}
+                      {/* Matching Suggestions & Inline Offline Member Option */}
                       {memberSearchTerm.trim().length > 0 && (
                         <>
                           {isLoadingUsers || isSearchingExactUser ? (
-                            <div className="px-3 py-4 text-center text-xs text-slate-500 flex items-center justify-center gap-2">
+                            <div className="px-3 py-3 text-center text-xs text-slate-500 flex items-center justify-center gap-2">
                               <Loader2 className="w-3.5 h-3.5 animate-spin text-teal-600" />
                               <span>
                                 {isVi
@@ -788,24 +819,10 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
                               </span>
                             </div>
                           ) : filteredRegisteredUsers.length === 0 ? (
-                            <div className="p-2.5 space-y-2 text-center">
-                              <div className="text-[11px] text-slate-500">
-                                {isVi
-                                  ? 'Không tìm thấy tài khoản TripMate khớp từ khóa này.'
-                                  : 'No TripMate account matches this search.'}
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() => handleAddOfflineInvitee(memberSearchTerm)}
-                                className="w-full py-2 px-3 rounded-xl bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-800 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                              >
-                                <UserPlus className="w-3.5 h-3.5 text-teal-600 shrink-0" />
-                                <span className="truncate">
-                                  {isVi
-                                    ? `+ Thêm "${memberSearchTerm.trim()}" làm thành viên ngoại tuyến`
-                                    : `+ Add "${memberSearchTerm.trim()}" as offline member`}
-                                </span>
-                              </button>
+                            <div className="px-3 pt-2.5 pb-1 text-center text-[11px] text-slate-500">
+                              {isVi
+                                ? 'Không tìm thấy tài khoản TripMate khớp từ khóa này.'
+                                : 'No TripMate account matches this search.'}
                             </div>
                           ) : (
                             filteredRegisteredUsers.map((account) => {
@@ -859,6 +876,28 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
                                 </button>
                               );
                             })
+                          )}
+
+                          {/* Always allow adding typed name/contact directly as an offline member */}
+                          {!invitedMembers.some(
+                            (m) =>
+                              !m.isRegistered &&
+                              m.name.trim().toLowerCase() === memberSearchTerm.trim().toLowerCase()
+                          ) && (
+                            <div className="p-2 bg-slate-50/70">
+                              <button
+                                type="button"
+                                onClick={() => handleAddOfflineInvitee(memberSearchTerm)}
+                                className="w-full py-2 px-3 rounded-xl bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-800 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                              >
+                                <UserPlus className="w-3.5 h-3.5 text-teal-600 shrink-0" />
+                                <span className="truncate">
+                                  {isVi
+                                    ? `+ Thêm "${memberSearchTerm.trim()}" làm thành viên ngoại tuyến`
+                                    : `+ Add "${memberSearchTerm.trim()}" as offline member`}
+                                </span>
+                              </button>
+                            </div>
                           )}
                         </>
                       )}
@@ -926,8 +965,8 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
                         <Mail className="w-3.5 h-3.5 text-teal-600 shrink-0 mt-0.5" />
                         <span>
                           {isVi
-                            ? 'Tài khoản đã tích chọn sẽ nhận lời mời qua app'
-                            : 'Checked accounts receive an in-app invitation'}
+                            ? 'Tài khoản TripMate sẽ nhận lời mời tự động.'
+                            : 'TripMate users get an in-app invite.'}
                         </span>
                       </div>
                     </div>
@@ -993,6 +1032,8 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({
                 <span>{isVi ? 'Tạo lịch trình gợi ý' : 'Generate suggested itinerary'}</span>
               </div>
             </label>
+            </div>
+            )}
 
             {/* Action Buttons */}
             <div className="flex justify-end gap-2 pt-3 border-t border-slate-100 shrink-0">

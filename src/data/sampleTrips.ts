@@ -169,7 +169,7 @@ export const SAMPLE_TRIPS: Trip[] = [
       { id: 'p-dl-4', category: 'Electronics', name: 'Sạc dự phòng 20,000mAh', quantity: 1, isPacked: false }
     ],
     documents: [
-      { id: 'doc-dl-1', title: 'Vé xe Limousine Thành Bưởi', docType: 'Flight Ticket', codeOrNumber: 'TB-992108', notes: 'Xuất phát 23:30 tại bến Bến Xe Mền Đông. Ghế VIP nằm.', date: '2026-12-14' },
+      { id: 'doc-dl-1', title: 'Vé xe Limousine Thành Bưởi', docType: 'Flight Ticket', codeOrNumber: 'TB-992108', notes: 'Xuất phát 23:30 tại Bến Xe Miền Đông. Ghế VIP nằm.', date: '2026-12-14' },
       { id: 'doc-dl-2', title: 'Đặt phòng Homestay Dốc Mơ', docType: 'Hotel Voucher', codeOrNumber: 'HOMESTAY-DM-882', notes: 'Check-in 12:00 PM. Hỗ trợ gửi đồ sớm.', date: '2026-12-15' }
     ]
   },

@@ -235,17 +235,16 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
     <div className="space-y-4">
       {/* Top Action Bar */}
       <div className="bg-white rounded-2xl p-3 sm:p-4 border border-slate-200/90 shadow-2xs space-y-3">
-        {/* Row 1: Nút gợi ý AI nằm trên bên trái, nút thêm nằm bên phải kế bên */}
+        {/* Row 1: Nút gợi ý AI trung tính bên trái, 1 nút chính Thêm đồ bên phải */}
         <div className="flex items-center justify-between gap-2">
-          {/* Nút gợi ý AI nằm trên bên trái */}
           <button
             type="button"
             onClick={onGenerateAiPackingList}
             disabled={isAiLoading}
-            className="px-3.5 py-2 bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-700 hover:to-emerald-700 text-white font-semibold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 min-h-[38px]"
+            className="px-3.5 py-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold text-xs rounded-xl transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 min-h-[38px]"
             title={isVi ? 'Gợi ý danh mục đồ đạc bằng AI' : 'Generate packing list with AI'}
           >
-            <Sparkles className={`w-3.5 h-3.5 text-amber-200 shrink-0 ${isAiLoading ? 'animate-spin' : ''}`} />
+            <Sparkles className={`w-3.5 h-3.5 text-teal-600 shrink-0 ${isAiLoading ? 'animate-spin' : ''}`} />
             <span className="whitespace-nowrap">
               {isAiLoading
                 ? (isVi ? 'Đang tạo...' : 'Generating...')
@@ -253,7 +252,6 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
             </span>
           </button>
 
-          {/* Nút thêm đồ nằm bên phải kế bên */}
           <button
             type="button"
             onClick={handleOpenAddModal}
@@ -264,73 +262,53 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
           </button>
         </div>
 
-        {/* Row 2: Combobox phân loại nằm dưới nút gợi ý và thêm đồ + Bộ lọc trạng thái */}
+        {/* Row 2: Combobox phân loại + Icon bánh răng cấu hình + Bộ lọc trạng thái */}
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
-          {/* Combobox phân loại (Nút cấu hình nằm bên trong combobox) */}
-          <div className="relative flex-1 min-w-0 sm:max-w-xs" ref={categoryDropdownRef}>
-            <button
-              type="button"
-              onClick={() => setIsCategoryDropdownOpen(!isCategoryDropdownOpen)}
-              className={`w-full flex items-center justify-between gap-2 text-xs font-semibold py-2 px-3 rounded-xl border transition-colors shadow-2xs cursor-pointer ${
-                selectedCategoryIds.length < categories.length
-                  ? 'border-teal-500 bg-teal-50/80 text-teal-900 font-bold'
-                  : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
-              }`}
-            >
-              <div className="flex items-center gap-1.5 min-w-0 truncate">
-                <span className="text-teal-600 shrink-0">🏷️</span>
-                <span className="truncate">
-                  {selectedCategoryIds.length === categories.length
-                    ? (isVi ? 'Tất cả phân loại' : 'All Categories')
-                    : (isVi ? `${selectedCategoryIds.length} phân loại đã chọn` : `${selectedCategoryIds.length} ${selectedCategoryIds.length === 1 ? 'category' : 'categories'}`)}
-                </span>
-              </div>
-              <ChevronDown
-                className={`w-3.5 h-3.5 text-slate-400 shrink-0 transition-transform ${
-                  isCategoryDropdownOpen ? 'rotate-180' : ''
+          <div className="flex items-center gap-1.5 flex-1 min-w-0 sm:max-w-xs">
+            <div className="relative flex-1 min-w-0" ref={categoryDropdownRef}>
+              <button
+                type="button"
+                onClick={() => setIsCategoryDropdownOpen(!isCategoryDropdownOpen)}
+                className={`w-full flex items-center justify-between gap-2 text-xs font-semibold py-2 px-3 rounded-xl border transition-colors shadow-2xs cursor-pointer ${
+                  selectedCategoryIds.length < categories.length
+                    ? 'border-teal-500 bg-teal-50/80 text-teal-900 font-bold'
+                    : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
                 }`}
-              />
-            </button>
-
-            {/* Combobox Multicheckbox Popover Menu */}
-            {isCategoryDropdownOpen && (
-              <div className="absolute left-0 top-full mt-1.5 w-80 max-w-[calc(100vw-2rem)] bg-white rounded-2xl border border-slate-200 shadow-xl z-50 p-2.5 space-y-2 animate-in fade-in zoom-in-95 duration-100">
-                {/* Search inside combobox */}
-                <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                  <input
-                    type="text"
-                    autoFocus
-                    value={categorySearchQuery}
-                    onChange={(e) => setCategorySearchQuery(e.target.value)}
-                    placeholder={isVi ? 'Tìm phân loại...' : 'Search categories...'}
-                    className="w-full text-xs pl-8 pr-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
-                  />
-                </div>
-
-                {/* Header: Phân loại đồ + Nút Cấu hình phía trên gần tiêu đề + Chọn tất cả */}
-                <div className="flex items-center justify-between px-1 py-1 border-b border-slate-100 gap-2">
-                  <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                    {isVi ? 'Phân loại đồ' : 'Categories'}
+              >
+                <div className="flex items-center gap-1.5 min-w-0 truncate">
+                  <span className="text-teal-600 shrink-0">🏷️</span>
+                  <span className="truncate">
+                    {selectedCategoryIds.length === categories.length
+                      ? (isVi ? 'Tất cả phân loại' : 'All Categories')
+                      : (isVi ? `${selectedCategoryIds.length} phân loại` : `${selectedCategoryIds.length} ${selectedCategoryIds.length === 1 ? 'category' : 'categories'}`)}
                   </span>
-                  <div className="flex items-center gap-1.5">
-                    {/* Nút Cấu hình phía trên gần tiêu đề */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsCategoryDropdownOpen(false);
-                        setIsCategoryModalOpen(true);
-                      }}
-                      className="text-[11px] font-semibold text-slate-600 hover:text-teal-700 flex items-center gap-1 px-2 py-0.5 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer border border-slate-200/80 bg-slate-50/60"
-                      title={isVi ? 'Cấu hình phân loại' : 'Configure Categories'}
-                    >
-                      <Settings2 className="w-3 h-3 text-slate-500" />
-                      <span>{isVi ? 'Cấu hình' : 'Config'}</span>
-                    </button>
+                </div>
+                <ChevronDown
+                  className={`w-3.5 h-3.5 text-slate-400 shrink-0 transition-transform ${
+                    isCategoryDropdownOpen ? 'rotate-180' : ''
+                  }`}
+                />
+              </button>
 
-                    <span className="text-slate-200">|</span>
+              {/* Combobox Multicheckbox Popover Menu */}
+              {isCategoryDropdownOpen && (
+                <div className="absolute left-0 top-full mt-1.5 w-80 max-w-[calc(100vw-2rem)] bg-white rounded-2xl border border-slate-200 shadow-xl z-50 p-2.5 space-y-2 animate-in fade-in zoom-in-95 duration-100">
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type="text"
+                      autoFocus
+                      value={categorySearchQuery}
+                      onChange={(e) => setCategorySearchQuery(e.target.value)}
+                      placeholder={isVi ? 'Tìm phân loại...' : 'Search categories...'}
+                      className="w-full text-xs pl-8 pr-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-teal-500"
+                    />
+                  </div>
 
-                    {/* Select / Deselect All Action */}
+                  <div className="flex items-center justify-between px-1 py-1 border-b border-slate-100 gap-2">
+                    <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                      {isVi ? 'Phân loại' : 'Categories'}
+                    </span>
                     <button
                       type="button"
                       onClick={handleSelectAllCategories}
@@ -341,7 +319,6 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
                         : (isVi ? 'Chọn tất cả' : 'Select all')}
                     </button>
                   </div>
-                </div>
 
                 {/* Category options list with checkboxes */}
                 <div className="max-h-56 overflow-y-auto space-y-1 pr-0.5">
@@ -381,9 +358,20 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
                         </div>
                       );
                     })}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsCategoryModalOpen(true)}
+              className="p-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 hover:text-slate-900 transition-colors cursor-pointer shrink-0 min-h-[38px] flex items-center justify-center"
+              title={isVi ? 'Cấu hình phân loại' : 'Configure Categories'}
+              aria-label={isVi ? 'Cấu hình phân loại' : 'Configure Categories'}
+            >
+              <Settings2 className="w-4 h-4" />
+            </button>
           </div>
 
           {/* Bộ lọc trạng thái */}
@@ -621,13 +609,18 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    {isVi ? 'Số lượng' : 'Quantity'}
+                    {isVi ? 'Số lượng (1–999)' : 'Quantity (1–999)'}
                   </label>
                   <input
                     type="number"
-                    min="1"
+                    min={1}
+                    max={999}
                     value={newItemQty}
-                    onChange={(e) => setNewItemQty(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                    onChange={(e) => {
+                      const raw = parseInt(e.target.value, 10);
+                      setNewItemQty(Number.isNaN(raw) ? 1 : Math.min(999, Math.max(1, raw)));
+                    }}
+                    onBlur={() => setNewItemQty((prev) => Math.min(999, Math.max(1, prev || 1)))}
                     className="w-full text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
                   />
                 </div>
@@ -719,13 +712,18 @@ export const PackingListView: React.FC<PackingListViewProps> = ({
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    {isVi ? 'Số lượng' : 'Quantity'}
+                    {isVi ? 'Số lượng (1–999)' : 'Quantity (1–999)'}
                   </label>
                   <input
                     type="number"
-                    min="1"
+                    min={1}
+                    max={999}
                     value={editQty}
-                    onChange={(e) => setEditQty(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                    onChange={(e) => {
+                      const raw = parseInt(e.target.value, 10);
+                      setEditQty(Number.isNaN(raw) ? 1 : Math.min(999, Math.max(1, raw)));
+                    }}
+                    onBlur={() => setEditQty((prev) => Math.min(999, Math.max(1, prev || 1)))}
                     className="w-full text-xs p-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-teal-500 focus:outline-hidden"
                   />
                 </div>
