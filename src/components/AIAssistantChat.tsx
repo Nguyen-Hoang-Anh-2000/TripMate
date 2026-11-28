@@ -20,6 +20,70 @@ interface ChatMessage {
   time: string;
 }
 
+const CHAT_CACHE_TTL_MS = 5 * 60 * 1000;
+const CHAT_CACHE_STORAGE_KEY = 'tripmate_ai_chat_cache_v1';
+const moduleChatCache = new Map<string, { reply: string; expiresAt: number }>();
+
+function buildCandidateCacheKeys(queryText: string, destination: string, lang: string): string[] {
+  const clean = queryText.trim();
+  const stripped = clean.replace(/[?!.,;:]+$/g, '').trim();
+  const exactKey = normalizeChatCacheKey(clean, destination, lang);
+  const strippedKey = normalizeChatCacheKey(stripped || clean, destination, lang);
+  return exactKey === strippedKey ? [exactKey] : [exactKey, strippedKey];
+}
+
+function readPersistentChatCache(keys: string[]): string | null {
+  const now = Date.now();
+  for (const k of keys) {
+    const modHit = moduleChatCache.get(k);
+    if (modHit && modHit.expiresAt > now) {
+      return modHit.reply;
+    }
+  }
+  try {
+    const raw = localStorage.getItem(CHAT_CACHE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, { reply: string; expiresAt: number }>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    for (const k of keys) {
+      const entry = parsed[k];
+      if (entry && typeof entry.reply === 'string' && entry.expiresAt > now) {
+        moduleChatCache.set(k, entry);
+        return entry.reply;
+      }
+    }
+  } catch {
+    // Ignore storage parse failures
+  }
+  return null;
+}
+
+function writePersistentChatCache(keys: string[], reply: string, expiresAt: number): void {
+  const entry = { reply, expiresAt };
+  for (const k of keys) {
+    moduleChatCache.set(k, entry);
+  }
+  try {
+    const now = Date.now();
+    const raw = localStorage.getItem(CHAT_CACHE_STORAGE_KEY);
+    const parsed: Record<string, { reply: string; expiresAt: number }> =
+      raw ? JSON.parse(raw) || {} : {};
+    // Prune expired entries to keep storage compact
+    const nextStore: Record<string, { reply: string; expiresAt: number }> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (v && typeof v.expiresAt === 'number' && v.expiresAt > now) {
+        nextStore[k] = v;
+      }
+    }
+    for (const k of keys) {
+      nextStore[k] = entry;
+    }
+    localStorage.setItem(CHAT_CACHE_STORAGE_KEY, JSON.stringify(nextStore));
+  } catch {
+    // Ignore storage quota issues
+  }
+}
+
 export const AIAssistantChat: React.FC<AIAssistantChatProps> = ({
   isOpen,
   onClose,
@@ -123,9 +187,24 @@ export const AIAssistantChat: React.FC<AIAssistantChatProps> = ({
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
 
-    const cacheKey = normalizeChatCacheKey(cleanQuery, trip.destination, lang);
-    const cachedHit = clientChatCacheRef.current.get(cacheKey);
-    if (cachedHit && cachedHit.expiresAt > Date.now()) {
+    const candidateKeys = buildCandidateCacheKeys(cleanQuery, trip.destination, lang);
+    let cachedReplyText: string | null = null;
+    for (const key of candidateKeys) {
+      const hit = clientChatCacheRef.current.get(key);
+      if (hit && hit.expiresAt > Date.now()) {
+        cachedReplyText = hit.reply;
+        break;
+      }
+    }
+    if (!cachedReplyText) {
+      cachedReplyText = readPersistentChatCache(candidateKeys);
+    }
+
+    if (cachedReplyText) {
+      const expiresAt = Date.now() + CHAT_CACHE_TTL_MS;
+      for (const key of candidateKeys) {
+        clientChatCacheRef.current.set(key, { reply: cachedReplyText, expiresAt });
+      }
       setInputMsg('');
       setMessages((prev) => [
         ...prev,
@@ -133,7 +212,7 @@ export const AIAssistantChat: React.FC<AIAssistantChatProps> = ({
         {
           id: `ai-cache-${Date.now()}`,
           sender: 'ai',
-          text: cachedHit.reply,
+          text: cachedReplyText!,
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         },
       ]);
@@ -168,10 +247,11 @@ export const AIAssistantChat: React.FC<AIAssistantChatProps> = ({
 
       const data = await res.json();
       const finalReply = data.reply || generateFallbackChatReply(cleanQuery);
-      clientChatCacheRef.current.set(cacheKey, {
-        reply: finalReply,
-        expiresAt: Date.now() + 5 * 60 * 1000,
-      });
+      const expiresAt = Date.now() + CHAT_CACHE_TTL_MS;
+      for (const key of candidateKeys) {
+        clientChatCacheRef.current.set(key, { reply: finalReply, expiresAt });
+      }
+      writePersistentChatCache(candidateKeys, finalReply, expiresAt);
 
       const aiReply: ChatMessage = {
         id: `ai-${Date.now()}`,
@@ -184,10 +264,11 @@ export const AIAssistantChat: React.FC<AIAssistantChatProps> = ({
     } catch (err) {
       console.warn('AI Chat timeout/fallback activated:', err);
       const fallbackText = generateFallbackChatReply(cleanQuery);
-      clientChatCacheRef.current.set(cacheKey, {
-        reply: fallbackText,
-        expiresAt: Date.now() + 5 * 60 * 1000,
-      });
+      const expiresAt = Date.now() + CHAT_CACHE_TTL_MS;
+      for (const key of candidateKeys) {
+        clientChatCacheRef.current.set(key, { reply: fallbackText, expiresAt });
+      }
+      writePersistentChatCache(candidateKeys, fallbackText, expiresAt);
       setMessages((prev) => [
         ...prev,
         {

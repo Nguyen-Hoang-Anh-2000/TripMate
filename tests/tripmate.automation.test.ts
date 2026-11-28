@@ -40,6 +40,7 @@ import {
 import { normalizePhoneNumber } from '../src/utils/phoneUtils';
 import { validateImageUploadFile } from '../src/utils/fileValidationUtils';
 import { normalizeChatCacheKey, generateSmartFallbackChatReply } from '../src/utils/chatFallbackUtils';
+import { sanitizePackingItemName, sanitizeTripLegacyTypos } from '../src/utils/packingSanitizerUtils';
 import { spawn } from 'node:child_process';
 import type { SavedPlace, Trip, TripInvitation, TripNotification } from '../src/types';
 
@@ -1972,5 +1973,75 @@ describe('QA v2 Release Sign-off & Security Boundary Verification', () => {
     assert.ok(appSrc.includes('<span className="text-[11px] font-bold tracking-wide text-white whitespace-nowrap">\n                  AI\n                </span>'));
     const weatherSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/RealtimeWeatherBadge.tsx'), 'utf8');
     assert.ok(!weatherSrc.includes('AccuWeather'));
+  });
+
+  test('TC-FIX-RETEST-01: Khắc phục cắt dropdown ⋯ Banner, Cache Chat AI vĩnh viễn qua đóng/mở, SĐT trùng (+84/gạch nối) & làm sạch Sạc nhanh thoại trên chuyến cũ', () => {
+    // 1. Cover Banner outer container must NOT apply overflow-hidden so desktop ⋯ dropdown Delete item never clips
+    const appSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/App.tsx'), 'utf8');
+    assert.ok(appSrc.includes('relative z-30 w-full rounded-2xl sm:rounded-3xl border border-slate-200/80'));
+    assert.ok(appSrc.includes('absolute inset-0 rounded-2xl sm:rounded-3xl overflow-hidden pointer-events-none'));
+    assert.ok(appSrc.includes('shadow-xl py-1.5 z-50'));
+
+    // 2. Chat AI persistent module + localStorage 5-min TTL cache checked before setLoading(true)
+    const chatSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/components/AIAssistantChat.tsx'), 'utf8');
+    assert.ok(chatSrc.includes('tripmate_ai_chat_cache_v1'));
+    assert.ok(chatSrc.includes('readPersistentChatCache'));
+    assert.ok(chatSrc.includes('writePersistentChatCache'));
+    assert.ok(chatSrc.includes('buildCandidateCacheKeys'));
+    const cacheCheckIdx = chatSrc.indexOf('readPersistentChatCache(candidateKeys)');
+    const loadingStartIdx = chatSrc.indexOf('setLoading(true)');
+    assert.ok(cacheCheckIdx >= 0 && loadingStartIdx > cacheCheckIdx);
+
+    // 3. Phone normalization (+84, 84, unicode dashes) & AuthContext demo/known phones + fresh registration UID
+    assert.equal(normalizePhoneNumber('+84901234568'), '0901234568');
+    assert.equal(normalizePhoneNumber('84901234568'), '0901234568');
+    assert.equal(normalizePhoneNumber('0901–234–568'), '0901234568');
+    const authCtx = fs.readFileSync(path.join(ROOT_DIR, 'src/context/AuthContext.tsx'), 'utf8');
+    assert.ok(authCtx.includes('DEMO_ACCOUNT_PHONES'));
+    assert.ok(authCtx.includes('getKnownRegisteredPhones'));
+    assert.ok(authCtx.includes('tripmate_known_phones'));
+    assert.ok(authCtx.includes('const targetUid = isRegister ? generatedUid'));
+
+    // 4. Legacy persisted trips auto-sanitization for "Sạc nhanh thoại" and "Mền Đông" + deduplication
+    assert.equal(sanitizePackingItemName('Sạc nhanh thoại'), 'Sạc dự phòng & Cáp sạc');
+    assert.equal(sanitizePackingItemName('Mền Đông'), 'Đồ giữ ấm');
+    const legacyTrip: Trip = {
+      id: 'trip-legacy-typo',
+      title: 'Old Saved Trip',
+      destination: 'Đà Lạt',
+      country: 'Việt Nam',
+      startDate: '2026-06-01',
+      endDate: '2026-06-03',
+      coverImage: '',
+      budgetTotal: 1000000,
+      currency: 'VND',
+      members: [],
+      days: [],
+      expenses: [],
+      documents: [],
+      packingList: [
+        { id: 'p1', category: 'Electronics', name: 'Sạc nhanh thoại', quantity: 1, isPacked: false },
+        { id: 'p2', category: 'Electronics', name: 'Sạc nhanh thoại (cũ)', quantity: 1, isPacked: true },
+        { id: 'p3', category: 'Clothing', name: 'Mền Đông', quantity: 1, isPacked: false },
+        { id: 'p4', category: 'Electronics', name: 'Sạc dự phòng & Cáp sạc', quantity: 1, isPacked: false },
+      ],
+    };
+    const sanitized = sanitizeTripLegacyTypos(legacyTrip);
+    assert.equal(sanitized.changed, true);
+    const serialized = JSON.stringify(sanitized.trip.packingList);
+    assert.ok(!serialized.includes('Sạc nhanh thoại'));
+    assert.ok(!serialized.includes('Mền Đông'));
+    // Deduplicated Electronics "Sạc dự phòng & Cáp sạc" count = 1
+    assert.equal(
+      sanitized.trip.packingList.filter((i) => i.name === 'Sạc dự phòng & Cáp sạc').length,
+      1
+    );
+    assert.ok(appSrc.includes('sanitizeTripLegacyTypos'));
+
+    // 5. Large image upload (12MB+) memory-safe ObjectURL compression
+    const imgUtilsSrc = fs.readFileSync(path.join(ROOT_DIR, 'src/utils/imageUtils.ts'), 'utf8');
+    assert.ok(imgUtilsSrc.includes('URL.createObjectURL'));
+    assert.ok(imgUtilsSrc.includes('URL.revokeObjectURL'));
+    assert.ok(imgUtilsSrc.includes('MAX_COMPRESSED_DATAURL_CHARS'));
   });
 });

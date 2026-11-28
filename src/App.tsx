@@ -28,6 +28,7 @@ import { db, stripUndefinedDeep, handleFirestoreError, OperationType } from './f
 import { computeTripDeletionSummary, buildTripDeletionNotifications } from './utils/tripSettlementUtils';
 import { buildDefaultAvatar, syncUserAvatarIntoTrips } from './utils/avatarSyncUtils';
 import { filterTripsForUser, getUserTripsCacheKey } from './utils/tripAccessUtils';
+import { sanitizeTripLegacyTypos } from './utils/packingSanitizerUtils';
 
 import { 
   Calendar, MapPin, DollarSign, CloudSun, Users, Compass, 
@@ -74,8 +75,20 @@ function AppContent() {
       if (cached) {
         const parsed = JSON.parse(cached);
         if (Array.isArray(parsed)) {
-          const notDeleted = parsed.filter((t: Trip) => t && t.id && !deletedIds.has(t.id));
-          return filterTripsForUser(notDeleted, targetUser);
+          let cacheChanged = false;
+          const sanitizedList = parsed
+            .filter((t: Trip) => t && t.id && !deletedIds.has(t.id))
+            .map((t: Trip) => {
+              const res = sanitizeTripLegacyTypos(t);
+              if (res.changed) cacheChanged = true;
+              return res.trip;
+            });
+          if (cacheChanged) {
+            try {
+              localStorage.setItem(cacheKey, JSON.stringify(sanitizedList));
+            } catch {}
+          }
+          return filterTripsForUser(sanitizedList, targetUser);
         }
       }
     } catch (e) {
@@ -190,13 +203,25 @@ function AppContent() {
 
             const seenIds = new Set<string>();
             const remoteTrips: Trip[] = [];
+            const tripsNeedingTypoCleanup: Trip[] = [];
             snapshot.forEach((d) => {
               // Never resurrect trips deleted by the user in this session / cached tombstones
               if (!deletedTripIdsRef.current.has(d.id) && !seenIds.has(d.id)) {
                 seenIds.add(d.id);
-                remoteTrips.push({ id: d.id, ...(d.data() as Omit<Trip, 'id'>) });
+                const rawRemote: Trip = { id: d.id, ...(d.data() as Omit<Trip, 'id'>) };
+                const { trip: sanitizedRemote, changed } = sanitizeTripLegacyTypos(rawRemote);
+                remoteTrips.push(sanitizedRemote);
+                if (changed) {
+                  tripsNeedingTypoCleanup.push(sanitizedRemote);
+                }
               }
             });
+
+            if (tripsNeedingTypoCleanup.length > 0) {
+              tripsNeedingTypoCleanup.forEach((cleanTrip) => {
+                setDoc(doc(db, 'trips', cleanTrip.id), stripUndefinedDeep(cleanTrip), { merge: true }).catch(() => {});
+              });
+            }
 
             const accessibleRemoteTrips = filterTripsForUser(remoteTrips, userProfile);
 
@@ -1807,21 +1832,23 @@ function AppContent() {
           </div>
         ) : (
           <>
-        {/* Trip Header Banner with Compact Luxe Style */}
-        <div className="relative w-full rounded-2xl sm:rounded-3xl overflow-hidden border border-slate-200/80 shadow-sm group min-h-[105px] sm:min-h-[145px] flex flex-col justify-between p-3 sm:p-5 bg-slate-900 transition-all">
-          {/* Background Image */}
-          {activeTrip.coverImage ? (
-            <img
-              src={activeTrip.coverImage}
-              alt={activeTrip.title}
-              className="absolute inset-0 w-full h-full object-cover object-center"
-            />
-          ) : (
-            <div className="absolute inset-0 bg-gradient-to-r from-teal-900 via-slate-900 to-indigo-950" />
-          )}
+        {/* Trip Header Banner with Compact Luxe Style (overflow kept on inner backdrop so ⋯ popover never clips) */}
+        <div className="relative z-30 w-full rounded-2xl sm:rounded-3xl border border-slate-200/80 shadow-sm group min-h-[105px] sm:min-h-[145px] flex flex-col justify-between p-3 sm:p-5 bg-slate-900 transition-all">
+          <div className="absolute inset-0 rounded-2xl sm:rounded-3xl overflow-hidden pointer-events-none">
+            {/* Background Image */}
+            {activeTrip.coverImage ? (
+              <img
+                src={activeTrip.coverImage}
+                alt={activeTrip.title}
+                className="w-full h-full object-cover object-center"
+              />
+            ) : (
+              <div className="w-full h-full bg-gradient-to-r from-teal-900 via-slate-900 to-indigo-950" />
+            )}
 
-          {/* High-legibility scrim gradient overlay */}
-          <div className="absolute inset-0 bg-gradient-to-t from-slate-950/95 via-slate-950/60 to-slate-950/30" />
+            {/* High-legibility scrim gradient overlay */}
+            <div className="absolute inset-0 bg-gradient-to-t from-slate-950/95 via-slate-950/60 to-slate-950/30" />
+          </div>
 
           {/* Top Bar inside Banner: Badges on left, Action buttons on right */}
           <div className="relative z-10 flex items-center justify-between gap-2 mb-1.5 sm:mb-2">
@@ -1881,7 +1908,7 @@ function AppContent() {
                 </button>
 
                 {isDesktopTripMenuOpen && (
-                  <div className="absolute right-0 top-full mt-1.5 w-48 bg-white rounded-2xl border border-slate-200 shadow-xl py-1.5 z-40 animate-in fade-in zoom-in-95 duration-100">
+                  <div className="absolute right-0 top-full mt-1.5 w-48 bg-white rounded-2xl border border-slate-200 shadow-xl py-1.5 z-50 animate-in fade-in zoom-in-95 duration-100">
                     <button
                       type="button"
                       onClick={() => {

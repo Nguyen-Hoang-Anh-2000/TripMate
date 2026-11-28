@@ -299,6 +299,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Sign In / Registration with Email & Phone
   const DEMO_EMAILS = ['perrynguyen10@gmail.com', 'linhchi@tripmate.app', 'minhquan@tripmate.app', 'khanhvy@tripmate.app'];
+  const DEMO_PHONES_BY_EMAIL: Record<string, string> = {
+    'perrynguyen10@gmail.com': '0901234567',
+    'linhchi@tripmate.app': '0912345678',
+    'minhquan@tripmate.app': '0987654321',
+    'khanhvy@tripmate.app': '0933221100',
+  };
+  const DEMO_ACCOUNT_PHONES = Object.values(DEMO_PHONES_BY_EMAIL);
+
+  const getKnownRegisteredPhones = (): Set<string> => {
+    const phones = new Set<string>(DEMO_ACCOUNT_PHONES.map(normalizePhoneNumber));
+    try {
+      const raw = localStorage.getItem('tripmate_known_phones');
+      const arr = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(arr)) {
+        arr.forEach((p) => {
+          const norm = normalizePhoneNumber(String(p || ''));
+          if (norm) phones.add(norm);
+        });
+      }
+    } catch {}
+    return phones;
+  };
+
+  const rememberRegisteredPhone = (phoneVal: string) => {
+    const norm = normalizePhoneNumber(phoneVal);
+    if (!norm) return;
+    try {
+      const existing = getKnownRegisteredPhones();
+      existing.add(norm);
+      localStorage.setItem('tripmate_known_phones', JSON.stringify(Array.from(existing)));
+    } catch {}
+  };
 
   const loginWithEmailAndPhone = async (
     emailOrPhone: string, 
@@ -316,9 +348,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const cleanEmail = isInputEmail ? cleanInput : '';
       const fallbackPhone = !isInputEmail ? normalizePhoneNumber(emailOrPhone.trim()) : cleanPhone;
 
-      // Deterministic user ID generation for in-app session
+      // Deterministic user ID generation for in-app session (never reuse stale auth.currentUser.uid on new registration)
       const seed = cleanEmail || fallbackPhone || 'user';
-      const targetUid = auth.currentUser?.uid || ('usr_' + Math.abs(seed.split('').reduce((acc, char) => (acc << 5) - acc + char.charCodeAt(0), 0)).toString(36) + '_' + Date.now().toString(36).slice(-6));
+      const generatedUid = 'usr_' + Math.abs(seed.split('').reduce((acc, char) => (acc << 5) - acc + char.charCodeAt(0), 0)).toString(36) + '_' + Date.now().toString(36).slice(-6);
+      const targetUid = isRegister ? generatedUid : (auth.currentUser?.uid || generatedUid);
 
       const usersRef = collection(db, 'users');
 
@@ -376,16 +409,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           };
         }
 
-        // 2. Kiểm tra trùng Số điện thoại đã chuẩn hóa (bỏ khoảng trắng, gạch ngang, ngoặc)
+        // 2. Kiểm tra trùng Số điện thoại đã chuẩn hóa (Firestore + Demo accounts + Local known phones)
         if (cleanPhone) {
-          const qPhone = query(usersRef, where('phone', '==', cleanPhone));
-          const snapPhone = await getDocs(qPhone);
-          let phoneExists = !snapPhone.empty;
+          let phoneExists = getKnownRegisteredPhones().has(cleanPhone);
+          if (!phoneExists) {
+            const qPhone = query(usersRef, where('phone', '==', cleanPhone));
+            const snapPhone = await getDocs(qPhone);
+            phoneExists = !snapPhone.empty;
+          }
           if (!phoneExists) {
             const allUsersSnap = await getDocs(usersRef);
             phoneExists = allUsersSnap.docs.some((docSnap) => {
               const storedPhone = (docSnap.data() as any)?.phone;
-              return storedPhone ? normalizePhoneNumber(String(storedPhone)) === cleanPhone : false;
+              const normalized = storedPhone ? normalizePhoneNumber(String(storedPhone)) : '';
+              if (normalized) rememberRegisteredPhone(normalized);
+              return normalized === cleanPhone;
             });
           }
           if (phoneExists) {
@@ -417,6 +455,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         };
 
         await setDoc(doc(db, 'users', targetUid), profile);
+        if (cleanPhone) rememberRegisteredPhone(cleanPhone);
         setUserProfile(profile);
         localStorage.setItem('tripmate_user_profile', JSON.stringify(profile));
         setIsAuthModalOpen(false);
@@ -459,16 +498,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const finalName = displayName?.trim() || cleanEmail.split('@')[0];
         const finalAvatar = `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(finalName)}`;
         const demoPwdHash = await hashStringSHA256('123456', 'tripmate_auth_pwd');
+        const resolvedDemoPhone = cleanPhone || DEMO_PHONES_BY_EMAIL[cleanEmail] || '';
         const demoProfile: UserProfile = {
           id: targetUid,
           displayName: finalName,
           email: cleanEmail,
-          phone: cleanPhone || '',
+          phone: resolvedDemoPhone,
           avatar: finalAvatar,
           passwordHash: demoPwdHash,
           createdAt: new Date().toISOString(),
         };
         await setDoc(doc(db, 'users', targetUid), demoProfile);
+        if (resolvedDemoPhone) rememberRegisteredPhone(resolvedDemoPhone);
         setUserProfile(demoProfile);
         localStorage.setItem('tripmate_user_profile', JSON.stringify(demoProfile));
         setIsAuthModalOpen(false);
@@ -581,19 +622,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           foundDoc = snapEmail.docs[0];
         }
       } else {
-        const qPhone = query(usersRef, where('phone', '==', rawTrimmed));
+        const compactPhone = normalizePhoneNumber(rawTrimmed);
+        const qPhone = query(usersRef, where('phone', '==', compactPhone || rawTrimmed));
         const snapPhone = await getDocs(qPhone);
         if (!snapPhone.empty) {
           foundDoc = snapPhone.docs[0];
-        } else {
-          const compactPhone = rawTrimmed.replace(/[\s\-().]/g, '');
-          if (compactPhone && compactPhone !== rawTrimmed) {
-            const qCompact = query(usersRef, where('phone', '==', compactPhone));
-            const snapCompact = await getDocs(qCompact);
-            if (!snapCompact.empty) {
-              foundDoc = snapCompact.docs[0];
-            }
-          }
+        } else if (compactPhone) {
+          const allUsersSnap = await getDocs(usersRef);
+          foundDoc =
+            allUsersSnap.docs.find((docSnap) => {
+              const storedPhone = (docSnap.data() as any)?.phone;
+              return storedPhone ? normalizePhoneNumber(String(storedPhone)) === compactPhone : false;
+            }) || null;
         }
       }
 
